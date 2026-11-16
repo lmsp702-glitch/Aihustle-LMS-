@@ -13,13 +13,24 @@ import SettingsPage from './SettingsPage.jsx'
 import ThemeToggle from './ThemeToggle.jsx'
 import { fetchWithAuth, isInvalidSessionResponse } from './auth-session.js'
 import NotificationFeed from './NotificationFeed.jsx'
+import StudentNotificationBell from './StudentNotificationBell.jsx'
+import StudentNotificationsPage from './StudentNotificationsPage.jsx'
 import StudentQuizExperience from './StudentQuizPanel.jsx'
+import { filterCoursesByCategory, getCourseCategoryNames, normalizeCourseCategory } from './course-categories.js'
+import { findActiveTranscriptCueIndex, formatTranscriptTime } from './srt-transcript.js'
 import { createAttentionCheckSchedule } from './video-attention-checks.js'
 import './StudentDashboard.css'
 
 const studentCertificateCache = new Map()
 const studentCertificateRequests = new Map()
 const studentCertificateCacheTtlMs = 30_000
+const studentLearningPageCacheTtlMs = 30_000
+const studentEnrollmentCache = new Map()
+const studentEnrollmentRequests = new Map()
+const studentCourseContentCache = new Map()
+const studentCourseContentRequests = new Map()
+const studentPageCertificateRequests = new Map()
+const studentResultsCache = new Map()
 const COURSE_NOTES_KEY = 'course-notes'
 const COURSE_RESOURCES_KEY = 'course-resources'
 const COURSE_CERTIFICATE_KEY = 'course-certificate'
@@ -48,7 +59,7 @@ const navigation = [
 ]
 
 const secondaryPages = {
-  '/student/announcements': { label: 'Updates', icon: 'bell' },
+  '/student/announcements': { label: 'Notifications', icon: 'bell' },
   '/student/updates': { label: 'Updates', icon: 'bell' },
   '/student/purchases': { label: 'My Purchases', icon: 'bookOpen' },
   '/student/achievements': { label: 'My Achievements', icon: 'award' },
@@ -85,18 +96,19 @@ const categories = [
 ]
 
 const tools = [
-  { title: 'Grades & Results', description: 'Your assessment results will appear here.', icon: 'chart', id: 'student-grades' },
-  { title: 'Learning Resources', description: 'Resources shared with your courses will appear here.', icon: 'folder', id: 'student-resources' },
-  { title: 'Messages', description: 'Course conversations and messages will appear here.', icon: 'message', id: 'student-messages' },
-  { title: 'Certificates', description: 'Certificates you earn will appear here.', icon: 'award', id: 'student-certificates' },
-  { title: 'My Profile', description: 'Your account details are verified securely from the LMS.', icon: 'user', id: 'student-profile' },
-  { title: 'Settings', description: 'Account preferences will be available here.', icon: 'settings', id: 'student-settings' },
+  { title: 'Grades & Results', description: 'View your quiz and assignment scores.', icon: 'chart', id: 'student-grades', path: '/student/results' },
+  { title: 'Learning Resources', description: 'Access course notes and learning materials.', icon: 'folder', id: 'student-resources', path: '/student/resources' },
+  { title: 'Messages', description: 'Open course conversations and updates.', icon: 'message', id: 'student-messages', path: '/student/messages' },
+  { title: 'Certificates', description: 'View and download your earned certificates.', icon: 'award', id: 'student-certificates', path: '/student/certificates' },
+  { title: 'My Profile', description: 'Review your personal and academic details.', icon: 'user', id: 'student-profile', path: '/student/profile' },
+  { title: 'Settings', description: 'Manage your account and preferences.', icon: 'settings', id: 'student-settings', path: '/student/settings' },
 ]
 
 function Icon({ name, size = 19 }) {
   const paths = {
     layoutDashboard: <><rect x="3" y="3" width="7" height="9" rx="1" /><rect x="14" y="3" width="7" height="5" rx="1" /><rect x="14" y="12" width="7" height="9" rx="1" /><rect x="3" y="16" width="7" height="5" rx="1" /></>,
     bookOpen: <><path d="M12 7v14" /><path d="M3 18V5a1 1 0 0 1 1-1h4a4 4 0 0 1 4 4 4 4 0 0 1 4-4h4a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-4a4 4 0 0 0-4 2 4 4 0 0 0-4-2H4a1 1 0 0 1-1-1Z" /></>,
+    file: <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6M8 13h8m-8 4h8" /></>,
     play: <><circle cx="12" cy="12" r="9" /><path d="m10 8 6 4-6 4z" /></>,
     clipboardCheck: <><rect x="8" y="4" width="8" height="4" rx="1" /><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" /><path d="m9 14 2 2 4-4" /></>,
     chartNoAxesCombined: <><path d="M3 3v18h18" /><path d="m19 9-5 5-4-4-5 5" /></>,
@@ -670,6 +682,105 @@ async function fetchStudentCourseContent(courseId, onLogout, signal) {
   return result
 }
 
+function getStudentPageCacheKey() {
+  return getStudentCertificateCacheKey()
+}
+
+function getCachedStudentPageEnrollments() {
+  const cacheKey = getStudentPageCacheKey()
+  return cacheKey ? studentEnrollmentCache.get(cacheKey)?.enrollments || null : null
+}
+
+async function fetchStudentPageEnrollments(onLogout) {
+  const cacheKey = getStudentPageCacheKey()
+  if (!cacheKey) return fetchMyEnrollments(onLogout)
+  const cached = studentEnrollmentCache.get(cacheKey)
+  if (cached && Date.now() - cached.savedAt < studentLearningPageCacheTtlMs) return cached.enrollments
+
+  let request = studentEnrollmentRequests.get(cacheKey)
+  if (!request) {
+    request = fetchMyEnrollments(onLogout).then((enrollments) => {
+      studentEnrollmentCache.set(cacheKey, { enrollments, savedAt: Date.now() })
+      return enrollments
+    })
+    studentEnrollmentRequests.set(cacheKey, request)
+  }
+  try {
+    return await request
+  } finally {
+    if (studentEnrollmentRequests.get(cacheKey) === request) studentEnrollmentRequests.delete(cacheKey)
+  }
+}
+
+function getStudentCourseContentCacheKey(courseId) {
+  const studentId = getStudentPageCacheKey()
+  return studentId ? `${studentId}:${courseId}` : ''
+}
+
+function getCachedStudentPageCourseContent(courseId) {
+  const cacheKey = getStudentCourseContentCacheKey(courseId)
+  return cacheKey ? studentCourseContentCache.get(cacheKey)?.content || null : null
+}
+
+async function fetchStudentPageCourseContent(courseId, onLogout) {
+  const cacheKey = getStudentCourseContentCacheKey(courseId)
+  if (!cacheKey) return fetchStudentCourseContent(courseId, onLogout)
+  const cached = studentCourseContentCache.get(cacheKey)
+  if (cached && Date.now() - cached.savedAt < studentLearningPageCacheTtlMs) return cached.content
+
+  let request = studentCourseContentRequests.get(cacheKey)
+  if (!request) {
+    request = fetchStudentCourseContent(courseId, onLogout).then((content) => {
+      studentCourseContentCache.set(cacheKey, { content, savedAt: Date.now() })
+      return content
+    })
+    studentCourseContentRequests.set(cacheKey, request)
+  }
+  try {
+    return await request
+  } finally {
+    if (studentCourseContentRequests.get(cacheKey) === request) studentCourseContentRequests.delete(cacheKey)
+  }
+}
+
+async function fetchStudentPageCertificates(onLogout) {
+  const cacheKey = getStudentPageCacheKey()
+  if (!cacheKey) return fetchStudentCertificates(onLogout)
+  const cached = studentCertificateCache.get(cacheKey)
+  if (cached && Date.now() - cached.savedAt < studentCertificateCacheTtlMs) return cached.certificates
+
+  let request = studentPageCertificateRequests.get(cacheKey)
+  if (!request) {
+    request = fetchStudentCertificates(onLogout).then((certificates) => {
+      studentCertificateCache.set(cacheKey, { certificates, savedAt: Date.now() })
+      return certificates
+    })
+    studentPageCertificateRequests.set(cacheKey, request)
+  }
+  try {
+    return await request
+  } finally {
+    if (studentPageCertificateRequests.get(cacheKey) === request) studentPageCertificateRequests.delete(cacheKey)
+  }
+}
+
+function invalidateStudentResultsCache() {
+  const cacheKey = getStudentPageCacheKey()
+  if (cacheKey) studentResultsCache.delete(cacheKey)
+}
+
+function invalidateStudentLearningPageCaches() {
+  const cacheKey = getStudentPageCacheKey()
+  if (!cacheKey) return
+  studentEnrollmentCache.delete(cacheKey)
+  studentResultsCache.delete(cacheKey)
+  studentCertificateCache.delete(cacheKey)
+  const coursePrefix = `${cacheKey}:`
+  studentCourseContentCache.forEach((_, key) => {
+    if (key.startsWith(coursePrefix)) studentCourseContentCache.delete(key)
+  })
+}
+
 async function fetchStudentCourseCertificate(courseId, onLogout, signal) {
   const certificates = await fetchStudentCertificates(onLogout, signal)
   const certificate = certificates.find((entry) => String(entry.courseId) === String(courseId))
@@ -721,6 +832,444 @@ function getCourseAssignmentTitle(course, assignmentId) {
   return assignments.find((assignment) => String(assignment._id) === String(assignmentId))?.title || 'Assignment'
 }
 
+function getCourseAssignments(course) {
+  const moduleAssignments = (course.modules || []).flatMap((module) => (
+    (module.contentItems || [])
+      .filter((item) => item.type === 'assignment')
+      .map((item) => ({ ...item, ...(item.assignment || {}), _id: item._id || item.assignment?._id }))
+  ))
+  const seenIds = new Set()
+  return [...(course.assignments || []), ...moduleAssignments].filter((assignment) => {
+    const id = String(assignment._id || '')
+    if (!id || seenIds.has(id)) return false
+    seenIds.add(id)
+    return true
+  }).map((assignment) => ({
+    ...assignment,
+    description: assignment.description || assignment.content || '',
+  }))
+}
+
+function getLatestAssignmentSubmission(submissions, assignmentId) {
+  return submissions
+    .filter((submission) => String(submission.assignmentId) === String(assignmentId))
+    .sort((left, right) => new Date(right.submittedAt || 0).getTime() - new Date(left.submittedAt || 0).getTime())[0] || null
+}
+
+function getAssignmentRecordStatus(submission) {
+  if (!submission) return 'pending'
+  if (submission.reviewStatus === 'approved') return 'graded'
+  if (submission.reviewStatus === 'pending') return 'submitted'
+  return 'pending'
+}
+
+function getLatestEnrollmentsByCourse(enrollments) {
+  const latestEnrollmentByCourse = new Map()
+  enrollments.forEach((enrollment) => {
+    const courseId = String(enrollment.courseId?._id || enrollment.courseId || '')
+    if (courseId && !latestEnrollmentByCourse.has(courseId)) {
+      latestEnrollmentByCourse.set(courseId, enrollment)
+    }
+  })
+  return latestEnrollmentByCourse
+}
+
+function createStudentAssignmentRows(courseResults) {
+  return courseResults.flatMap(({ enrollment, submissions }) => {
+    const course = enrollment.courseId
+    return getCourseAssignments(course).map((assignment) => {
+      const submission = getLatestAssignmentSubmission(submissions, assignment._id)
+      return {
+        key: `${enrollment._id}:${assignment._id}`,
+        courseId: String(course._id),
+        courseName: course.title || 'Course',
+        enrollmentId: String(enrollment._id),
+        assignment,
+        submission,
+        status: getAssignmentRecordStatus(submission),
+      }
+    })
+  })
+}
+
+async function fetchStudentAssignmentRows(onLogout) {
+  const enrollments = await fetchStudentPageEnrollments(onLogout)
+  const latestEnrollments = getLatestEnrollmentsByCourse(enrollments)
+  const courseResults = await Promise.all([...latestEnrollments.keys()].map(async (courseId) => {
+    const result = await fetchStudentPageCourseContent(courseId, onLogout)
+    return { enrollment: result.enrollment, submissions: result.assignmentSubmissions }
+  }))
+  return createStudentAssignmentRows(courseResults)
+}
+
+function getCachedStudentAssignmentRows() {
+  const enrollments = getCachedStudentPageEnrollments()
+  if (!enrollments) return null
+  const latestEnrollments = getLatestEnrollmentsByCourse(enrollments)
+  const courseResults = [...latestEnrollments.keys()].map((courseId) => {
+    const content = getCachedStudentPageCourseContent(courseId)
+    return content
+      ? { enrollment: content.enrollment, submissions: content.assignmentSubmissions }
+      : null
+  })
+  if (courseResults.some((result) => result === null)) return null
+  return createStudentAssignmentRows(courseResults)
+}
+
+function getDashboardAssignmentStatus(entry) {
+  const reviewStatus = entry.submission?.reviewStatus
+  if (!entry.submission) return { label: 'Pending', tone: 'pending' }
+  if (reviewStatus === 'approved') return { label: 'Approved', tone: 'approved' }
+  if (reviewStatus === 'rejected') return { label: 'Rejected', tone: 'rejected' }
+  if (reviewStatus === 'pending') return { label: 'Awaiting Review', tone: 'awaiting' }
+  return { label: 'Submitted', tone: 'submitted' }
+}
+
+function StudentDashboardUpcomingAssignments({ onLogout }) {
+  const cachedAssignments = getCachedStudentAssignmentRows()
+  const [assignments, setAssignments] = useState(cachedAssignments || [])
+  const [hasAssignmentData, setHasAssignmentData] = useState(cachedAssignments !== null)
+  const [loading, setLoading] = useState(cachedAssignments === null)
+  const [error, setError] = useState('')
+  const [retry, setRetry] = useState(0)
+
+  useEffect(() => {
+    let active = true
+    async function loadAssignments() {
+      setLoading(true)
+      setError('')
+      try {
+        const rows = await fetchStudentAssignmentRows(onLogout)
+        if (active) {
+          setAssignments(rows)
+          setHasAssignmentData(true)
+        }
+      } catch (loadError) {
+        if (active) {
+          setError(loadError instanceof Error ? loadError.message : 'Assignments could not be loaded.')
+        }
+      } finally {
+        if (active) setLoading(false)
+      }
+    }
+    void loadAssignments()
+    return () => { active = false }
+  }, [onLogout, retry])
+
+  const visibleAssignments = [...assignments]
+    .sort((left, right) => {
+      const priority = (entry) => {
+        const status = getDashboardAssignmentStatus(entry).tone
+        return status === 'approved' ? 2 : status === 'awaiting' || status === 'submitted' ? 1 : 0
+      }
+      const priorityDifference = priority(left) - priority(right)
+      if (priorityDifference) return priorityDifference
+      const leftDue = left.assignment.dueDate ? new Date(left.assignment.dueDate).getTime() : Number.POSITIVE_INFINITY
+      const rightDue = right.assignment.dueDate ? new Date(right.assignment.dueDate).getTime() : Number.POSITIVE_INFINITY
+      return leftDue - rightDue
+    })
+    .slice(0, 3)
+
+  return (
+    <div className="student-dashboard-assignment-list" aria-busy={loading}>
+      {error && <p className="student-dashboard-data-error" role="alert">{error}</p>}
+      {loading && !hasAssignmentData ? (
+        [0, 1, 2].map((item) => (
+          <div className="student-dashboard-assignment student-dashboard-assignment--skeleton" key={item} aria-hidden="true">
+            <span className="student-page-skeleton student-dashboard-assignment__skeleton-icon" />
+            <span className="student-dashboard-assignment__skeleton-copy">
+              <i className="student-page-skeleton" />
+              <i className="student-page-skeleton is-short" />
+            </span>
+            <span className="student-page-skeleton student-dashboard-assignment__skeleton-status" />
+          </div>
+        ))
+      ) : !hasAssignmentData && error ? null : assignments.length === 0 ? (
+        <EmptyState
+          icon="check"
+          title="No assignments yet"
+          description="Assignments from your enrolled courses will appear here."
+        />
+      ) : visibleAssignments.map((entry) => {
+        const status = getDashboardAssignmentStatus(entry)
+        const dueDate = entry.assignment.dueDate ? new Date(entry.assignment.dueDate) : null
+        const dueDateLabel = dueDate && Number.isFinite(dueDate.getTime())
+          ? `Due: ${formatResultDate(dueDate)}`
+          : 'No due date'
+        return (
+          <Link className="student-dashboard-assignment" key={entry.key} to="/student/assignments">
+            <span className="student-dashboard-assignment__icon"><Icon name="file" size={18} /></span>
+            <span className="student-dashboard-assignment__copy">
+              <strong>{entry.assignment.title || 'Assignment'}</strong>
+              <span>{entry.courseName}</span>
+              <small>{dueDateLabel}</small>
+            </span>
+            <span className={`student-dashboard-assignment__status is-${status.tone}`}>{status.label}</span>
+          </Link>
+        )
+      })}
+      {hasAssignmentData && assignments.length > 3 && (
+        <Link className="student-dashboard-assignment-list__more" to="/student/assignments">
+          View all assignments <Icon name="arrow" size={15} />
+        </Link>
+      )}
+      {!hasAssignmentData && error && (
+        <button
+          className="student-dashboard-data-retry"
+          type="button"
+          onClick={() => setRetry((current) => current + 1)}
+        >
+          Try again
+        </button>
+      )}
+    </div>
+  )
+}
+
+function StudentAssignmentsPage({ onLogout, onLearningDataChanged }) {
+  const [initialAssignments] = useState(getCachedStudentAssignmentRows)
+  const [assignments, setAssignments] = useState(initialAssignments || [])
+  const [hasAssignmentData, setHasAssignmentData] = useState(initialAssignments !== null)
+  const [isLoading, setIsLoading] = useState(initialAssignments === null)
+  const [error, setError] = useState('')
+  const [selectedStatus, setSelectedStatus] = useState('all')
+  const [selectedCourseId, setSelectedCourseId] = useState('all')
+  const [activeAssignmentKey, setActiveAssignmentKey] = useState('')
+  const [refreshToken, setRefreshToken] = useState(0)
+  const hasAssignmentDataRef = useRef(initialAssignments !== null)
+
+  useEffect(() => {
+    let active = true
+    async function loadAssignments() {
+      if (!hasAssignmentDataRef.current) setIsLoading(true)
+      setError('')
+      try {
+        const rows = await fetchStudentAssignmentRows(onLogout)
+        if (active) {
+          setAssignments(rows)
+          setHasAssignmentData(true)
+          hasAssignmentDataRef.current = true
+        }
+      } catch (loadError) {
+        if (active) setError(loadError instanceof Error ? loadError.message : 'Assignments could not be loaded.')
+      } finally {
+        if (active) {
+          setIsLoading(false)
+        }
+      }
+    }
+    void loadAssignments()
+    return () => { active = false }
+  }, [onLogout, refreshToken])
+
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState === 'visible') setRefreshToken((current) => current + 1)
+    }
+    const intervalId = window.setInterval(refresh, 30000)
+    window.addEventListener('focus', refresh)
+    return () => {
+      window.clearInterval(intervalId)
+      window.removeEventListener('focus', refresh)
+    }
+  }, [])
+
+  const activeAssignment = assignments.find(({ key }) => key === activeAssignmentKey) || null
+  const courseAssignments = selectedCourseId === 'all'
+    ? assignments
+    : assignments.filter(({ courseId }) => courseId === selectedCourseId)
+  const counts = {
+    all: courseAssignments.length,
+    pending: courseAssignments.filter(({ status }) => status === 'pending').length,
+    submitted: courseAssignments.filter(({ status }) => status === 'submitted').length,
+    graded: courseAssignments.filter(({ status }) => status === 'graded').length,
+  }
+  const visibleAssignments = courseAssignments.filter((entry) => (
+    (selectedStatus === 'all' || entry.status === selectedStatus)
+  )).sort((left, right) => {
+    const leftDue = left.assignment.dueDate ? new Date(left.assignment.dueDate).getTime() : Number.POSITIVE_INFINITY
+    const rightDue = right.assignment.dueDate ? new Date(right.assignment.dueDate).getTime() : Number.POSITIVE_INFINITY
+    return leftDue - rightDue || String(left.assignment.title || '').localeCompare(String(right.assignment.title || ''))
+  })
+  const courses = [...new Map(assignments.map(({ courseId, courseName }) => [courseId, courseName])).entries()]
+  function updateSubmission(entryKey, submission) {
+    setAssignments((current) => current.map((entry) => (
+      entry.key === entryKey
+        ? { ...entry, submission, status: getAssignmentRecordStatus(submission) }
+        : entry
+    )))
+    const entry = assignments.find(({ key }) => key === entryKey)
+    if (entry) {
+      studentCourseContentCache.delete(getStudentCourseContentCacheKey(entry.courseId))
+      invalidateStudentResultsCache()
+    }
+  }
+
+  const filters = [
+    { key: 'all', label: hasAssignmentData ? `All Assignments (${counts.all})` : 'All Assignments' },
+    { key: 'pending', label: hasAssignmentData ? `Pending (${counts.pending})` : 'Pending' },
+    { key: 'submitted', label: hasAssignmentData ? `Awaiting Review (${counts.submitted})` : 'Awaiting Review' },
+    { key: 'graded', label: hasAssignmentData ? `Graded (${counts.graded})` : 'Graded' },
+  ]
+
+  return (
+    <StudentRoutePage eyebrow="STAY ON TRACK" title="Assignments" className="student-assignments-page">
+      <div className="student-assignments">
+        <header className="student-assignments__header">
+          <div className="student-assignments__heading">
+            <span className="student-assignments__eyebrow">Stay on Track</span>
+            <h1>Your Assignments</h1>
+            <p>View, submit, and track your course assignments.</p>
+          </div>
+          <svg className="student-assignments__illustration" viewBox="0 0 300 160" aria-hidden="true">
+            <path d="M232 147c0 0 18-54-14-90 11-12 14-21 13-35l-26-2-27 17-14 36-15 12 14 31 69-2Z" fill="#AAD0B6" opacity="0.7"/>
+            <path d="M220 58h-42c-5 0-9 4-9 9v55c0 5 4 9 9 9h67c5 0 9-4 9-9V81l-34-23Z" fill="#f4f5f0" stroke="#c9c7be" strokeWidth="2"/>
+            <path d="M220 58v23h34" fill="none" stroke="#d5d0c8" strokeWidth="2"/>
+            <path d="M178 84h52M178 96h52M178 108h41" stroke="#88A99A" strokeWidth="2" strokeLinecap="round"/>
+            <path d="M250 99l15 15-20 20-17-17" fill="none" stroke="#38A76A" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M267 95l-8 8" stroke="#7DA297" strokeWidth="2" strokeLinecap="round"/>
+            <path d="M144 52c0-6 5-11 11-11h43c6 0 11 5 11 11v57c0 6-5 11-11 11h-43c-6 0-11-5-11-11V52Z" fill="#f6f7f1" stroke="#d4d0c4" strokeWidth="2"/>
+            <path d="M171 48l39 29-39 29-39-29 39-29Z" fill="#dfece4" opacity="0.9"/>
+            <path d="M165 58h13M165 68h26" stroke="#7EA89C" strokeWidth="2" strokeLinecap="round"/>
+            <path d="M124 118c14-15 28-19 44-11 9 5 18 6 29 3" fill="none" stroke="#d8b142" strokeWidth="4" strokeLinecap="round"/>
+            <path d="M230 105l16-11 28 0c13 0 25 12 25 25v3H203l27-17Z" fill="#D3E8D3"/>
+            <path d="M263 98l15 42h3l14-42h-12l-9 17-9-17h-2Z" fill="#f1d474"/>
+            <path d="M100 121l-28-34 19 63h27l-18-29Z" fill="#e6d38d" opacity="0.85"/>
+            <path d="M65 110l52 30" stroke="#7e7f74" strokeWidth="3" strokeLinecap="round" opacity="0.6"/>
+            <path d="M72 61l-25 35" stroke="#f3d363" strokeWidth="5" strokeLinecap="round"/>
+            <path d="M47 99l-17 8 27 9-10-17Z" fill="#f3d363"/>
+            <path d="M46 91l31-24" stroke="#f0c94f" strokeWidth="4" strokeLinecap="round"/>
+            <circle cx="44" cy="87" r="4" fill="#e6c257"/>
+          </svg>
+        </header>
+
+        <div className="student-assignments__stats" aria-label="Assignment summary">
+          {[
+            { label: 'Total Assignments', value: counts.all, icon: 'check' },
+            { label: 'Pending', value: counts.pending, icon: 'clock', tone: 'amber' },
+            { label: 'Awaiting Review', value: counts.submitted, icon: 'check', tone: 'green' },
+            { label: 'Graded', value: counts.graded, icon: 'award', tone: 'purple' },
+          ].map((stat) => (
+            <article className="student-assignments__stat" key={stat.label}>
+              <span className={`student-assignments__stat-icon${stat.tone ? ` student-assignments__stat-icon--${stat.tone}` : ''}`}>
+                <Icon name={stat.icon} size={20} />
+              </span>
+              <div>
+                <span className="student-assignments__stat-label">{stat.label}</span>
+                <strong>
+                  {isLoading
+                    ? <span className="student-page-skeleton student-assignments__stat-skeleton" aria-hidden="true" />
+                    : hasAssignmentData ? stat.value : '—'}
+                </strong>
+              </div>
+            </article>
+          ))}
+        </div>
+
+        {error && <p className="student-assignments__error" role="alert">{error}</p>}
+
+        <div className="student-assignments__toolbar">
+          <div className="student-assignments__tabs" role="tablist" aria-label="Assignment filters">
+            {filters.map((filter) => (
+              <button
+                type="button"
+                role="tab"
+                aria-selected={selectedStatus === filter.key}
+                className={`student-assignments__tab${selectedStatus === filter.key ? ' is-active' : ''}`}
+                key={filter.key}
+                onClick={() => setSelectedStatus(filter.key)}
+              >
+                {filter.label}
+              </button>
+            ))}
+          </div>
+          <label className="student-assignments__filter">
+            <select aria-label="Filter by course" value={selectedCourseId} onChange={(event) => setSelectedCourseId(event.target.value)}>
+              <option value="all">All Courses</option>
+              {courses.map(([courseId, courseName]) => <option value={courseId} key={courseId}>{courseName}</option>)}
+            </select>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 7.5 10 12.5 15 7.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/></svg>
+          </label>
+        </div>
+
+        <div className="student-assignments__list" aria-label="Assignments list" aria-busy={isLoading}>
+          {isLoading ? (
+            [0, 1, 2].map((item) => (
+              <article className="student-assignment-item student-assignment-item--skeleton" key={item} aria-hidden="true">
+                <div className="student-assignment-item__meta">
+                  <span className="student-page-skeleton student-assignment-item__skeleton-icon" />
+                  <div>
+                    <span className="student-page-skeleton student-assignment-item__skeleton-title" />
+                    <span className="student-page-skeleton student-assignment-item__skeleton-course" />
+                  </div>
+                </div>
+                <span className="student-page-skeleton student-assignment-item__skeleton-due" />
+                <span className="student-page-skeleton student-assignment-item__skeleton-status" />
+                <span className="student-page-skeleton student-assignment-item__skeleton-score" />
+                <span className="student-page-skeleton student-assignment-item__skeleton-action" />
+              </article>
+            ))
+          ) : !hasAssignmentData ? null : visibleAssignments.length === 0 ? (
+            <p className="student-assignments__empty">
+              {assignments.length === 0
+                ? 'Assignments from your enrolled courses will appear here.'
+                : 'No assignments match these filters.'}
+            </p>
+          ) : visibleAssignments.map((entry) => {
+            const { assignment, submission, status } = entry
+            const rejected = submission?.reviewStatus === 'rejected'
+            const hasMarks = submission?.marksObtained !== null
+              && submission?.marksObtained !== undefined
+              && Number.isFinite(Number(submission.marksObtained))
+            const statusLabel = rejected ? 'Rejected' : status === 'graded' ? 'Approved' : status === 'submitted' ? 'Submitted' : 'Pending'
+            const actionLabel = rejected ? 'Resubmit' : status === 'graded' ? 'View Details' : status === 'submitted' ? 'View Submission' : 'View & Submit'
+            return (
+              <article className="student-assignment-item" key={entry.key}>
+                <div className="student-assignment-item__meta">
+                  <span className="student-assignment-item__icon"><Icon name="book" size={16} /></span>
+                  <div>
+                    <h2>{assignment.title || 'Assignment'}</h2>
+                    <p>{entry.courseName}</p>
+                  </div>
+                </div>
+                <div className="student-assignment-item__due">
+                  <Icon name="clock" size={14} />
+                  <span>{assignment.dueDate ? `Due: ${formatResultDate(assignment.dueDate)}` : 'No due date'}</span>
+                </div>
+                <span className={`student-assignment-item__status is-${rejected ? 'rejected' : status === 'graded' ? 'graded' : status}`}>
+                  {statusLabel}
+                </span>
+                {status === 'graded' && hasMarks ? (
+                  <span className="student-assignment-item__score">
+                    Score: {submission.marksObtained} / {assignment.points ?? assignment.maximumMarks ?? '—'}
+                  </span>
+                ) : <span className="student-assignment-item__score-placeholder" aria-hidden="true" />}
+                <button
+                  type="button"
+                  className={`student-assignment-item__action${status === 'pending' ? ' student-assignment-item__action--primary' : ''}`}
+                  onClick={() => setActiveAssignmentKey(entry.key)}
+                >
+                  {actionLabel} <span aria-hidden="true">›</span>
+                </button>
+              </article>
+            )
+          })}
+        </div>
+      </div>
+
+      {activeAssignment && (
+        <StudentAssignmentDetail
+          entry={activeAssignment}
+          onClose={() => setActiveAssignmentKey('')}
+          onLogout={onLogout}
+          onSubmitted={(submission) => updateSubmission(activeAssignment.key, submission)}
+          onLearningDataChanged={onLearningDataChanged}
+        />
+      )}
+    </StudentRoutePage>
+  )
+}
+
 function getAttemptScore(attempt) {
   const score = attempt.scorePercentage
   if (score !== null && score !== undefined && Number.isFinite(Number(score))) return Number(score)
@@ -740,48 +1289,73 @@ function formatResultDate(value) {
     : '—'
 }
 
+function getCachedStudentResults() {
+  const cacheKey = getStudentPageCacheKey()
+  if (!cacheKey) return null
+  const cachedResults = studentResultsCache.get(cacheKey)
+  if (cachedResults) return { ...cachedResults, hasCertificatesData: true }
+
+  const enrollments = getCachedStudentPageEnrollments()
+  if (!enrollments) return null
+  const courseResults = [...getLatestEnrollmentsByCourse(enrollments).keys()].map((courseId) => {
+    const content = getCachedStudentPageCourseContent(courseId)
+    return content
+      ? {
+        courseId,
+        enrollment: content.enrollment,
+        course: content.enrollment.courseId,
+        quizAttempts: content.quizAttempts,
+        assignmentSubmissions: content.assignmentSubmissions,
+      }
+      : null
+  })
+  if (courseResults.some((result) => result === null)) return null
+  const certificateCache = studentCertificateCache.get(cacheKey)
+  return {
+    courseResults,
+    certificates: certificateCache?.certificates || [],
+    hasCertificatesData: Boolean(certificateCache),
+  }
+}
+
+function StudentResultsTableSkeleton() {
+  return (
+    <div className="student-results__table-wrap student-results__skeleton-wrap" role="status" aria-label="Loading results" aria-busy="true">
+      <table className="student-results__table" aria-hidden="true">
+        <thead><tr>{[0, 1, 2, 3, 4, 5].map((cell) => <th key={cell}><span className="student-page-skeleton student-results__skeleton-heading" /></th>)}</tr></thead>
+        <tbody>{[0, 1, 2].map((row) => (
+          <tr key={row}>{[0, 1, 2, 3, 4, 5].map((cell) => (
+            <td key={cell}><span className={`student-page-skeleton student-results__skeleton-cell is-cell-${cell}`} /></td>
+          ))}</tr>
+        ))}</tbody>
+      </table>
+    </div>
+  )
+}
+
 function StudentResultsPage({ onLogout }) {
   const navigate = useNavigate()
-  const [courseResults, setCourseResults] = useState([])
-  const [certificates, setCertificates] = useState([])
+  const [initialResults] = useState(getCachedStudentResults)
+  const [courseResults, setCourseResults] = useState(initialResults?.courseResults || [])
+  const [certificates, setCertificates] = useState(initialResults?.certificates || [])
+  const [hasResultsData, setHasResultsData] = useState(initialResults !== null)
+  const [hasCertificatesData, setHasCertificatesData] = useState(initialResults?.hasCertificatesData === true)
   const [activeTab, setActiveTab] = useState('courses')
   const [selectedCourseId, setSelectedCourseId] = useState('all')
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(initialResults === null)
+  const [certificatesLoading, setCertificatesLoading] = useState(initialResults?.hasCertificatesData !== true)
   const [error, setError] = useState('')
 
   useEffect(() => {
-    const controller = new AbortController()
+    let active = true
     async function loadResults() {
-      setLoading(true)
       setError('')
       try {
-        const enrollments = await fetchMyEnrollments(onLogout, controller.signal)
-        const latestEnrollmentByCourse = new Map()
-        enrollments.forEach((enrollment) => {
-          const courseId = String(enrollment.courseId?._id || enrollment.courseId || '')
-          if (courseId && !latestEnrollmentByCourse.has(courseId)) {
-            latestEnrollmentByCourse.set(courseId, enrollment)
-          }
-        })
-        const certificateCacheKey = getStudentCertificateCacheKey()
-        const cachedCertificates = certificateCacheKey
-          ? studentCertificateCache.get(certificateCacheKey)
-          : null
-        const certificateRequest = cachedCertificates
-          && Date.now() - cachedCertificates.savedAt < studentCertificateCacheTtlMs
-          ? Promise.resolve(cachedCertificates.certificates)
-          : fetchStudentCertificates(onLogout, controller.signal).then((result) => {
-            if (certificateCacheKey) {
-              studentCertificateCache.set(certificateCacheKey, {
-                certificates: result,
-                savedAt: Date.now(),
-              })
-            }
-            return result
-          })
+        const enrollments = await fetchStudentPageEnrollments(onLogout)
+        const latestEnrollments = getLatestEnrollmentsByCourse(enrollments)
         const [loadedCourseResults, loadedCertificates] = await Promise.all([
-          Promise.all([...latestEnrollmentByCourse.entries()].map(async ([courseId]) => {
-            const result = await fetchStudentCourseContent(courseId, onLogout, controller.signal)
+          Promise.all([...latestEnrollments.keys()].map(async (courseId) => {
+            const result = await fetchStudentPageCourseContent(courseId, onLogout)
             return {
               courseId,
               enrollment: result.enrollment,
@@ -790,21 +1364,33 @@ function StudentResultsPage({ onLogout }) {
               assignmentSubmissions: result.assignmentSubmissions,
             }
           })),
-          certificateRequest,
+          fetchStudentPageCertificates(onLogout),
         ])
-        if (controller.signal.aborted) return
+        if (!active) return
         setCourseResults(loadedCourseResults)
         setCertificates(loadedCertificates)
+        setHasResultsData(true)
+        setHasCertificatesData(true)
+        const cacheKey = getStudentPageCacheKey()
+        if (cacheKey) {
+          studentResultsCache.set(cacheKey, {
+            courseResults: loadedCourseResults,
+            certificates: loadedCertificates,
+          })
+        }
       } catch (loadError) {
-        if (!controller.signal.aborted) {
+        if (active) {
           setError(loadError instanceof Error ? loadError.message : 'Grades and results could not be loaded.')
         }
       } finally {
-        if (!controller.signal.aborted) setLoading(false)
+        if (active) {
+          setLoading(false)
+          setCertificatesLoading(false)
+        }
       }
     }
     void loadResults()
-    return () => controller.abort()
+    return () => { active = false }
   }, [onLogout])
 
   const courseRows = courseResults.map((result) => {
@@ -890,19 +1476,25 @@ function StudentResultsPage({ onLogout }) {
       <section className="student-results__summary" aria-label="Learning results summary">
         <button className="student-results__summary-card is-blue" type="button" onClick={() => navigate('/student/courses')}>
           <span className="student-results__summary-icon"><Icon name="bookOpen" size={25} /></span>
-          <span><strong>{courseRows.length}</strong><small>Enrolled Courses</small></span>
+          <span><strong>{hasResultsData ? courseRows.length : loading ? <span className="student-page-skeleton student-results__summary-skeleton" /> : '—'}</strong><small>Enrolled Courses</small></span>
         </button>
         <article className="student-results__summary-card is-green">
           <span className="student-results__summary-icon"><Icon name="check" size={23} /></span>
-          <span><strong>{overallProgress}%</strong><small>Overall Progress</small><i><b style={{ width: `${overallProgress}%` }} /></i></span>
+          <span>
+            <strong>{hasResultsData ? `${overallProgress}%` : loading ? <span className="student-page-skeleton student-results__summary-skeleton" /> : '—'}</strong>
+            <small>Overall Progress</small>
+            <i>{hasResultsData || loading
+              ? <b className={!hasResultsData ? 'student-page-skeleton' : ''} style={{ width: hasResultsData ? `${overallProgress}%` : '100%' }} />
+              : null}</i>
+          </span>
         </article>
         <article className="student-results__summary-card is-purple">
           <span className="student-results__summary-icon"><Icon name="spark" size={23} /></span>
-          <span><strong>{averageScore === null ? '—' : `${averageScore}%`}</strong><small>Average Score</small></span>
+          <span><strong>{hasResultsData ? (averageScore === null ? '—' : `${averageScore}%`) : loading ? <span className="student-page-skeleton student-results__summary-skeleton" /> : '—'}</strong><small>Average Score</small></span>
         </article>
         <button className="student-results__summary-card is-orange" type="button" onClick={() => navigate('/student/certificates')}>
           <span className="student-results__summary-icon"><Icon name="award" size={25} /></span>
-          <span><strong>{earnedCertificates.length}</strong><small>Certificates Earned</small></span>
+          <span><strong>{hasCertificatesData ? earnedCertificates.length : certificatesLoading ? <span className="student-page-skeleton student-results__summary-skeleton" /> : '—'}</strong><small>Certificates Earned</small></span>
         </button>
       </section>
 
@@ -926,7 +1518,7 @@ function StudentResultsPage({ onLogout }) {
           ))}
         </nav>
         {error && <p className="student-results__error" role="alert">{error}</p>}
-        {loading ? <p className="student-results__loading" role="status">Loading your grades and results…</p> : (
+        {loading && !hasResultsData ? <StudentResultsTableSkeleton /> : hasResultsData ? (
           <div className="student-results__table-wrap">
             {activeTab === 'courses' && (
               visibleCourses.length
@@ -993,7 +1585,11 @@ function StudentResultsPage({ onLogout }) {
                 : <p className="student-results__empty">Quiz attempts will appear here after you complete a quiz.</p>
             )}
             {activeTab === 'certificates' && (
-              earnedCertificates.length
+              !hasCertificatesData
+                ? certificatesLoading
+                  ? <StudentResultsTableSkeleton />
+                  : <p className="student-results__empty">Certificate data is unavailable.</p>
+                : earnedCertificates.length
                 ? <div className="student-results__certificates">
                     {earnedCertificates.map((entry) => (
                       <button key={entry.courseId} type="button" onClick={() => navigate('/student/certificates')}>
@@ -1006,7 +1602,7 @@ function StudentResultsPage({ onLogout }) {
                 : <p className="student-results__empty">Earned certificates will appear here.</p>
             )}
           </div>
-        )}
+        ) : null}
       </section>
 
       <div className="student-results__lower">
@@ -1014,24 +1610,43 @@ function StudentResultsPage({ onLogout }) {
           <h2 id="student-results-performance-title"><Icon name="chart" size={17} />Performance Overview</h2>
           <div className="student-results__performance">
             <div
-              className="student-results__donut"
+              className={`student-results__donut${hasResultsData ? '' : ' is-loading'}`}
               role="img"
-              aria-label={`${overallProgress}% overall progress`}
+              aria-label={hasResultsData ? `${overallProgress}% overall progress` : loading ? 'Overall progress loading' : 'Overall progress unavailable'}
               style={{ '--student-results-progress': `${overallProgress}%` }}
             >
-              <span><strong>{overallProgress}%</strong><small>Overall Progress</small></span>
+              <span>
+                <strong>{hasResultsData ? `${overallProgress}%` : loading ? <span className="student-page-skeleton student-results__summary-skeleton" /> : '—'}</strong>
+                <small>Overall Progress</small>
+              </span>
             </div>
             <ul>
-              <li><i className="is-completed" />Completed<strong>{completedCourseCount}</strong></li>
-              <li><i className="is-progress" />In Progress<strong>{inProgressCourseCount}</strong></li>
-              <li><i className="is-not-started" />Not Started<strong>{notStartedCourseCount}</strong></li>
+              <li><i className="is-completed" />Completed<strong>{hasResultsData ? completedCourseCount : loading ? <span className="student-page-skeleton student-results__metric-skeleton" /> : '—'}</strong></li>
+              <li><i className="is-progress" />In Progress<strong>{hasResultsData ? inProgressCourseCount : loading ? <span className="student-page-skeleton student-results__metric-skeleton" /> : '—'}</strong></li>
+              <li><i className="is-not-started" />Not Started<strong>{hasResultsData ? notStartedCourseCount : loading ? <span className="student-page-skeleton student-results__metric-skeleton" /> : '—'}</strong></li>
             </ul>
           </div>
         </section>
         <section className="student-results__panel" aria-labelledby="student-results-recent-title">
           <h2 id="student-results-recent-title"><Icon name="spark" size={17} />Recent Results</h2>
           <button className="student-results__view-all" type="button" onClick={() => setActiveTab('quizzes')}>View All <Icon name="arrow" size={14} /></button>
-          {recentAttempts.length
+          {loading && !hasResultsData
+            ? <ul className="student-results__recent student-results__recent--skeleton" aria-hidden="true">
+                {[0, 1, 2].map((item) => (
+                  <li key={item}>
+                    <span className="student-page-skeleton student-results__recent-skeleton-icon" />
+                    <span className="student-results__recent-copy">
+                      <span className="student-page-skeleton student-results__recent-skeleton-copy" />
+                      <span className="student-page-skeleton student-results__recent-skeleton-copy is-short" />
+                    </span>
+                    <span className="student-page-skeleton student-results__recent-skeleton-score" />
+                    <span className="student-page-skeleton student-results__recent-skeleton-date" />
+                  </li>
+                ))}
+              </ul>
+            : !hasResultsData
+              ? <p className="student-results__empty">Results are unavailable.</p>
+              : recentAttempts.length
             ? <ul className="student-results__recent">
                 {recentAttempts.map((attempt) => (
                   <li key={attempt._id}>
@@ -1174,13 +1789,56 @@ function getStudentContentLabel(type) {
   }[type] || 'Course content'
 }
 
-function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submissions, onSubmitted, onLearningDataChanged, onLogout, showHeader = true }) {
+function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submissions, onSubmitted, onLearningDataChanged, onLogout, showHeader = true, canSubmit = true }) {
   const [file, setFile] = useState(null)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
+  const [isDragging, setIsDragging] = useState(false)
+  const [filePreviewUrl, setFilePreviewUrl] = useState('')
+  const fileInputRef = useRef(null)
   const assignmentSubmissions = submissions.filter((submission) => (
     String(submission.assignmentId) === String(assignment._id)
   ))
+  const latestSubmission = assignmentSubmissions
+    .slice()
+    .sort((left, right) => new Date(right.submittedAt || 0).getTime() - new Date(left.submittedAt || 0).getTime())[0]
+
+  useEffect(() => {
+    if (!file) {
+      setFilePreviewUrl('')
+      return undefined
+    }
+    const previewUrl = URL.createObjectURL(file)
+    setFilePreviewUrl(previewUrl)
+    return () => URL.revokeObjectURL(previewUrl)
+  }, [file])
+
+  function chooseAssignmentFile(candidate) {
+    if (!candidate) return
+    const extension = candidate.name.slice(candidate.name.lastIndexOf('.')).toLowerCase()
+    if (!['.pdf', '.docx', '.txt'].includes(extension)) {
+      setError('Choose a PDF, DOCX, or TXT file.')
+      return
+    }
+    if (!candidate.size || candidate.size > 10 * 1024 * 1024) {
+      setError('Choose a file that is smaller than 10 MB.')
+      return
+    }
+    setError('')
+    setFile(candidate)
+  }
+
+  function formatFileSize(bytes) {
+    return bytes >= 1024 * 1024
+      ? `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+      : `${Math.max(1, Math.round(bytes / 1024))} KB`
+  }
+
+  function getSubmissionStatusLabel(submission) {
+    if (submission.reviewStatus === 'approved') return 'Approved'
+    if (submission.reviewStatus === 'rejected') return 'Rejected — resubmission required'
+    return 'Awaiting Admin Review'
+  }
 
   async function submitAssignment(event) {
     event.preventDefault()
@@ -1224,33 +1882,126 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
   }
 
   return (
-    <section className="student-course-activity">
+    <section className={`student-course-activity${showHeader ? ' student-course-assignment-view' : ''}`}>
       {showHeader && (
-        <header>
-          <span className="student-eyebrow">{getStudentContentLabel('assignment')}</span>
+        <header className="student-course-assignment-view__header">
+          <span className="student-course-assignment-view__icon"><Icon name="clipboardCheck" size={20} /></span>
           <h2>{assignment.title}</h2>
+          <span className="student-course-assignment-view__badge"><Icon name="clipboardCheck" size={13} />Assignment</span>
+          {latestSubmission && (
+            <span className={`student-course-assignment-view__status is-${latestSubmission.reviewStatus || 'pending'}`}>
+              {getSubmissionStatusLabel(latestSubmission)}
+            </span>
+          )}
         </header>
       )}
       {assignment.description && <p className="student-course-activity__instructions">{assignment.description}</p>}
-      <div className="student-course-activity__details">
-        <span>Due {assignment.dueDate ? new Date(assignment.dueDate).toLocaleDateString() : 'No due date'}</span>
-        <span>{Number(assignment.points) || 0} points</span>
-      </div>
+      {showHeader ? (
+        <div className="student-course-activity__details student-course-assignment-view__details">
+          <span>
+            <Icon name="clock" size={19} />
+            <span><small>Due Date</small><strong>{assignment.dueDate ? new Date(assignment.dueDate).toLocaleDateString() : 'No due date'}</strong></span>
+          </span>
+          <span>
+            <Icon name="award" size={20} />
+            <span><small>Total Points</small><strong>{Number(assignment.points) || 0} points</strong></span>
+          </span>
+        </div>
+      ) : (
+        <div className="student-course-activity__details">
+          <span>Due {assignment.dueDate ? new Date(assignment.dueDate).toLocaleDateString() : 'No due date'}</span>
+          <span>{Number(assignment.points) || 0} points</span>
+        </div>
+      )}
       {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
-      <form className="student-assignment-submit" onSubmit={submitAssignment}>
-        <label>
-          <span>Upload your work (PDF, DOCX, or TXT · max 10 MB)</span>
-          <input type="file" accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain" onChange={(event) => setFile(event.currentTarget.files?.[0] || null)} />
-        </label>
-        <button className="student-button" type="submit" disabled={submitting || !assignment._id}>
-          {submitting ? 'Submitting…' : 'Submit assignment'}
-        </button>
-      </form>
+      {canSubmit && (
+        <form className={`student-assignment-submit${showHeader ? ' student-assignment-submit--card' : ''}`} onSubmit={submitAssignment}>
+          {showHeader && (
+            <div className="student-assignment-submit__heading">
+              <span className="student-assignment-submit__upload-icon"><Icon name="file" size={20} /></span>
+              <span><strong>Upload your work</strong><small>Upload a PDF, DOCX, or TXT file (max 10 MB)</small></span>
+            </div>
+          )}
+          {showHeader ? (
+            <label
+              className={`student-assignment-submit__dropzone${isDragging ? ' is-dragging' : ''}${file ? ' has-file' : ''}`}
+              onDragOver={(event) => {
+                event.preventDefault()
+                setIsDragging(true)
+              }}
+              onDragLeave={(event) => {
+                if (!event.currentTarget.contains(event.relatedTarget)) setIsDragging(false)
+              }}
+              onDrop={(event) => {
+                event.preventDefault()
+                setIsDragging(false)
+                chooseAssignmentFile(event.dataTransfer.files?.[0])
+              }}
+            >
+              <input
+                ref={fileInputRef}
+                className="student-assignment-submit__file-input"
+                type="file"
+                accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
+                onChange={(event) => chooseAssignmentFile(event.currentTarget.files?.[0])}
+              />
+              <Icon name="file" size={32} />
+              <span>Drag and drop your file here</span>
+              <small>or</small>
+              <span className="student-assignment-submit__choose">Choose File</span>
+            </label>
+          ) : (
+            <label>
+              <span>Upload your work (PDF, DOCX, or TXT · max 10 MB)</span>
+              <input
+                type="file"
+                accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
+                onChange={(event) => chooseAssignmentFile(event.currentTarget.files?.[0])}
+              />
+            </label>
+          )}
+          {showHeader && file && (
+            <div className="student-assignment-submit__uploaded">
+              <span className="student-assignment-submit__file-icon"><Icon name="file" size={17} /></span>
+              <span className="student-assignment-submit__file-name"><strong>{file.name}</strong><small>{formatFileSize(file.size)}</small></span>
+              <a href={filePreviewUrl || undefined} target="_blank" rel="noreferrer">View</a>
+              <button
+                type="button"
+                onClick={() => {
+                  setFile(null)
+                  setError('')
+                  if (fileInputRef.current) fileInputRef.current.value = ''
+                }}
+              >
+                Remove
+              </button>
+            </div>
+          )}
+          <button
+            className={`student-button${showHeader ? ' student-assignment-submit__submit' : ''}`}
+            type="submit"
+            disabled={submitting || !assignment._id || (showHeader && !file)}
+          >
+            {submitting ? 'Submitting…' : showHeader ? <>Submit assignment <Icon name="arrow" size={15} /></> : 'Submit assignment'}
+          </button>
+        </form>
+      )}
+      {showHeader && latestSubmission && (
+        <div className="student-assignment-submit__review">
+          <strong>{getSubmissionStatusLabel(latestSubmission)}</strong>
+          {latestSubmission.reviewStatus === 'approved' && latestSubmission.marksObtained !== null && latestSubmission.marksObtained !== undefined && (
+            <span>Score: {latestSubmission.marksObtained} / {assignment.points ?? assignment.maximumMarks ?? '—'}</span>
+          )}
+          {(latestSubmission.reviewComment || latestSubmission.feedback) && (
+            <p>{latestSubmission.reviewComment || latestSubmission.feedback}</p>
+          )}
+        </div>
+      )}
       {assignmentSubmissions.length > 0 && (
         <div className="student-assignment-submissions">
           <h3>Submissions</h3>
           {assignmentSubmissions.map((submission) => (
-            <a key={submission._id} href={`${API_BASE_URL}/assignment-submissions/${encodeURIComponent(submission._id)}/download`} onClick={async (event) => {
+            <a className={showHeader ? 'student-assignment-submissions__file' : undefined} key={submission._id} href={`${API_BASE_URL}/assignment-submissions/${encodeURIComponent(submission._id)}/download`} onClick={async (event) => {
               event.preventDefault()
               try {
                 const savedAuth = sessionStorage.getItem('lms.auth')
@@ -1278,12 +2029,64 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
                 setError(downloadError instanceof Error ? downloadError.message : 'The submitted file could not be downloaded.')
               }
             }}>
-              {submission.fileName} · Submitted {new Date(submission.submittedAt).toLocaleString()}
+              {showHeader ? (
+                <>
+                  <span className="student-assignment-submit__file-icon"><Icon name="file" size={17} /></span>
+                  <span className="student-assignment-submit__file-name"><strong>{submission.fileName}</strong><small>Submitted {new Date(submission.submittedAt).toLocaleString()}</small></span>
+                  <span>View</span>
+                </>
+              ) : `${submission.fileName} · Submitted ${new Date(submission.submittedAt).toLocaleString()}`}
             </a>
           ))}
         </div>
       )}
     </section>
+  )
+}
+
+function StudentAssignmentDetail({ entry, onClose, onLogout, onSubmitted, onLearningDataChanged }) {
+  const { assignment, submission, status } = entry
+  const isRejected = submission?.reviewStatus === 'rejected'
+  const feedback = submission?.reviewComment || submission?.feedback
+  const hasScore = submission?.marksObtained !== null
+    && submission?.marksObtained !== undefined
+    && Number.isFinite(Number(submission.marksObtained))
+  const maximumMarks = assignment.points ?? assignment.maximumMarks
+
+  return (
+    <div className="student-assignment-dialog" role="presentation" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onClose()
+    }}>
+      <section className="student-assignment-dialog__panel" role="dialog" aria-modal="true" aria-labelledby="student-assignment-dialog-title">
+        <header className="student-assignment-dialog__header">
+          <div>
+            <span className="student-assignments__eyebrow">{entry.courseName}</span>
+            <h2 id="student-assignment-dialog-title">{assignment.title || 'Assignment'}</h2>
+          </div>
+          <button type="button" className="student-assignment-dialog__close" onClick={onClose} aria-label="Close assignment details">×</button>
+        </header>
+        {submission && (
+          <div className={`student-assignment-dialog__review is-${isRejected ? 'rejected' : status}`}>
+            <strong>{isRejected ? 'Rejected — resubmission required' : status === 'graded' ? 'Approved' : 'Awaiting Admin Review'}</strong>
+            {hasScore && status === 'graded' && (
+              <span>Score: {submission.marksObtained}{maximumMarks !== undefined ? ` / ${maximumMarks}` : ''}</span>
+            )}
+            {feedback && <p>{feedback}</p>}
+          </div>
+        )}
+        <StudentAssignmentPanel
+          courseId={entry.courseId}
+          enrollmentId={entry.enrollmentId}
+          assignment={assignment}
+          submissions={submission ? [submission] : []}
+          onSubmitted={onSubmitted}
+          onLearningDataChanged={onLearningDataChanged}
+          onLogout={onLogout}
+          showHeader={false}
+          canSubmit={status === 'pending'}
+        />
+      </section>
+    </div>
   )
 }
 
@@ -1384,43 +2187,63 @@ function EnrollmentCourseCards({
   )
 }
 
+function EnrollmentCourseSkeletons() {
+  return (
+    <div className="student-enrolled-courses student-enrolled-courses--skeleton" role="status" aria-label="Loading courses" aria-busy="true">
+      {[0, 1].map((item) => (
+        <article className="student-enrolled-course" key={item} aria-hidden="true">
+          <span className="student-page-skeleton student-enrolled-course__skeleton-image" />
+          <div className="student-enrolled-course__body student-enrolled-course__skeleton-body">
+            <span className="student-page-skeleton student-enrolled-course__skeleton-title" />
+            <span className="student-page-skeleton student-enrolled-course__skeleton-line" />
+            <span className="student-page-skeleton student-enrolled-course__skeleton-line is-short" />
+            <span className="student-page-skeleton student-enrolled-course__skeleton-progress" />
+          </div>
+        </article>
+      ))}
+    </div>
+  )
+}
+
 function StudentDashboardCourses({ onLogout, selectedCategory }) {
-  const [enrollments, setEnrollments] = useState([])
-  const [loading, setLoading] = useState(true)
+  const [initialEnrollments] = useState(getCachedStudentPageEnrollments)
+  const [enrollments, setEnrollments] = useState(initialEnrollments || [])
+  const [loading, setLoading] = useState(initialEnrollments === null)
   const [error, setError] = useState('')
 
   useEffect(() => {
-    const controller = new AbortController()
-    fetchMyEnrollments(onLogout, controller.signal)
-      .then(setEnrollments)
+    let active = true
+    fetchStudentPageEnrollments(onLogout)
+      .then((loadedEnrollments) => { if (active) setEnrollments(loadedEnrollments) })
       .catch((loadError) => {
-        if (loadError.name !== 'AbortError') {
-          setError(loadError instanceof Error ? loadError.message : 'Your courses could not be loaded.')
-        }
+        if (active) setError(loadError instanceof Error ? loadError.message : 'Your courses could not be loaded.')
       })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false) })
-    return () => controller.abort()
+      .finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
   }, [onLogout])
 
   const categoryEnrollments = selectedCategory
     ? enrollments.filter((entry) => (
       typeof entry.courseId === 'object'
       && entry.courseId
-      && entry.courseId.category?.trim().toLowerCase() === selectedCategory.toLowerCase()
+      && filterCoursesByCategory([entry.courseId], selectedCategory).length > 0
     ))
     : enrollments.slice(0, 3)
 
   return loading
-    ? <p role="status">Loading your courses…</p>
-    : error
+    ? <EnrollmentCourseSkeletons />
+    : error && initialEnrollments === null
       ? <p className="student-courses__message is-error" role="alert">{error}</p>
-      : <EnrollmentCourseCards
+      : <>
+        {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
+        <EnrollmentCourseCards
         enrollments={categoryEnrollments}
         emptyTitle={selectedCategory ? `No ${selectedCategory} courses yet` : 'No enrolled courses yet'}
         emptyDescription={selectedCategory
           ? `Enrolled courses in ${selectedCategory} will appear here.`
           : 'Courses assigned or enrolled for your account will appear here.'}
       />
+      </>
 }
 
 function StudentAvailableCourseCard({ course, enrollment, onEnroll, enrolling, error }) {
@@ -1465,7 +2288,7 @@ function StudentAvailableCourseCard({ course, enrollment, onEnroll, enrolling, e
   )
 }
 
-function StudentAvailableCourses({ user, onLogout, onLearningDataChanged }) {
+function StudentAvailableCourses({ user, onLogout, onLearningDataChanged, onCategoriesLoaded, selectedCategory }) {
   const [courses, setCourses] = useState([])
   const [enrollments, setEnrollments] = useState([])
   const [enrollingCourseId, setEnrollingCourseId] = useState('')
@@ -1477,20 +2300,22 @@ function StudentAvailableCourses({ user, onLogout, onLearningDataChanged }) {
     const controller = new AbortController()
     Promise.all([
       fetchPublishedCourses(onLogout, controller.signal),
-      fetchMyEnrollments(onLogout, controller.signal),
+      fetchStudentPageEnrollments(onLogout),
     ])
       .then(([publishedCourses, currentEnrollments]) => {
+        if (controller.signal.aborted) return
         setCourses(publishedCourses)
         setEnrollments(currentEnrollments)
+        onCategoriesLoaded(getCourseCategoryNames(publishedCourses))
       })
       .catch((loadError) => {
-        if (loadError.name !== 'AbortError') {
+        if (!controller.signal.aborted && loadError.name !== 'AbortError') {
           setError(loadError instanceof Error ? loadError.message : 'Available courses could not be loaded.')
         }
       })
       .finally(() => { if (!controller.signal.aborted) setLoading(false) })
     return () => controller.abort()
-  }, [onLogout, user?.id])
+  }, [onCategoriesLoaded, onLogout, user?.id])
 
   const enrollmentsByCourseId = new Map()
   for (const entry of enrollments) {
@@ -1498,6 +2323,8 @@ function StudentAvailableCourses({ user, onLogout, onLearningDataChanged }) {
     const enrolledCourseId = String(entry.courseId?._id || entry.courseId)
     if (!enrollmentsByCourseId.has(enrolledCourseId)) enrollmentsByCourseId.set(enrolledCourseId, entry)
   }
+
+  const categoryCourses = filterCoursesByCategory(courses, selectedCategory)
 
   async function enrollInCourse(course) {
     const courseId = String(course._id)
@@ -1547,9 +2374,9 @@ function StudentAvailableCourses({ user, onLogout, onLearningDataChanged }) {
       </div>
       {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
       {loading ? <p role="status">Loading courses…</p> : !error && (
-        courses.length
+        categoryCourses.length
           ? <div className="student-available-courses__grid">
-            {courses.map((course) => (
+            {categoryCourses.map((course) => (
               <StudentAvailableCourseCard
                 key={course._id}
                 course={course}
@@ -1560,7 +2387,13 @@ function StudentAvailableCourses({ user, onLogout, onLearningDataChanged }) {
               />
             ))}
           </div>
-          : <EmptyState
+          : selectedCategory
+            ? <EmptyState
+              icon="book"
+              title={`No ${selectedCategory} courses found`}
+              description={`Published courses in ${selectedCategory} will appear here.`}
+            />
+            : <EmptyState
             icon="book"
             title="No published courses yet"
             description="Published courses will appear here when the administrator adds them."
@@ -1618,7 +2451,9 @@ function StudentCourseLearning({
     ))?._learningKey || ''
   })
   const [detailsTab, setDetailsTab] = useState('overview')
+  const [lessonInfoTab, setLessonInfoTab] = useState('overview')
   const [videoOpenSequence, setVideoOpenSequence] = useState(0)
+  const [transcriptPlayback, setTranscriptPlayback] = useState({ lessonKey: '', cueIndex: -1 })
   const [expandedModules, setExpandedModules] = useState(() => new Set(
     course.modules?.length ? [String(course.modules[0]._id || `${course.modules[0].title}-0`)] : [],
   ))
@@ -1637,6 +2472,10 @@ function StudentCourseLearning({
   const [courseCertificatePdfRetry, setCourseCertificatePdfRetry] = useState(0)
   const courseCertificatePdfUrlRef = useRef('')
   const videoPlayerRef = useRef(null)
+  const transcriptCueListRef = useRef(null)
+  const transcriptCueRefs = useRef([])
+  const transcriptScriptRef = useRef(null)
+  const transcriptScriptCueRefs = useRef([])
   const assignmentStatusRefreshRef = useRef(false)
   const lessonPlaybackPositionsRef = useRef({ ...(enrollment.lessonPlaybackPositions || {}) })
   const playbackPositionSaveRef = useRef(new Map())
@@ -1664,6 +2503,13 @@ function StudentCourseLearning({
     String(lesson._id || lessonKey) === activeLessonId
   )))
   const activeEntry = lessons[activeIndex]
+  const activeVideoKey = `${String(course._id)}:${String(activeEntry?.lesson?._id || activeEntry?.lessonKey || '')}`
+  const transcriptCues = Array.isArray(activeEntry?.lesson?.transcriptCues)
+    ? activeEntry.lesson.transcriptCues
+    : []
+  const activeTranscriptCueIndex = transcriptPlayback.lessonKey === activeVideoKey
+    ? transcriptPlayback.cueIndex
+    : findActiveTranscriptCueIndex(transcriptCues, 0)
   const activeContentItem = allContentItems.find((item) => item._learningKey === activeContentItemId)
   const showCourseCertificate = course.generateCertificate !== false
   const hasCurrentCourseCertificate = String(courseCertificate?.courseId || '') === String(course._id)
@@ -1695,6 +2541,52 @@ function StudentCourseLearning({
   const showVideoPlayer = detailsTab === 'overview'
     && (!activeContentItem || activeContentItem.type === 'video-lesson')
   const isActiveQuiz = detailsTab === 'overview' && activeContentItem?.type === 'quiz'
+  const isActiveAssignment = detailsTab === 'overview' && activeContentItem?.type === 'assignment'
+  const hasActiveQuizAttempt = isActiveQuiz && quizAttempts.some((attempt) => (
+    String(attempt.quizId) === String(activeContentItem.quiz?._id)
+    && attempt.status === 'started'
+  ))
+
+  useEffect(() => {
+    if (activeTranscriptCueIndex < 0) return
+    const container = lessonInfoTab === 'transcript'
+      ? transcriptScriptRef.current
+      : transcriptCueListRef.current
+    const cue = lessonInfoTab === 'transcript'
+      ? transcriptScriptCueRefs.current[activeTranscriptCueIndex]
+      : transcriptCueRefs.current[activeTranscriptCueIndex]
+    if (!container || !cue) return
+    const containerBounds = container.getBoundingClientRect()
+    const cueBounds = cue.getBoundingClientRect()
+    if (cueBounds.top < containerBounds.top) {
+      container.scrollTo({
+        top: container.scrollTop + cueBounds.top - containerBounds.top - 6,
+        behavior: 'smooth',
+      })
+    } else if (cueBounds.bottom > containerBounds.bottom) {
+      container.scrollTo({
+        top: container.scrollTop + cueBounds.bottom - containerBounds.bottom + 6,
+        behavior: 'smooth',
+      })
+    }
+  }, [activeTranscriptCueIndex, activeVideoKey, lessonInfoTab, transcriptCues])
+
+  function seekToTranscriptCue(cue) {
+    const video = videoPlayerRef.current
+    if (!video || !Number.isFinite(cue.startTimeMs)) return
+    video.currentTime = cue.startTimeMs / 1000
+    updateTranscriptPlaybackTime(video)
+  }
+
+  function updateTranscriptPlaybackTime(video) {
+    if (!Number.isFinite(video.currentTime)) return
+    const cueIndex = findActiveTranscriptCueIndex(transcriptCues, video.currentTime)
+    setTranscriptPlayback((current) => (
+      current.lessonKey === activeVideoKey && current.cueIndex === cueIndex
+        ? current
+        : { lessonKey: activeVideoKey, cueIndex }
+    ))
+  }
 
   useEffect(() => {
     if (!showCourseCertificate) return undefined
@@ -2240,7 +3132,10 @@ function StudentCourseLearning({
       if (force) saveState.queuedPosition = position
       return
     }
-    if (position === saveState.lastSavedPosition || (!force && Math.abs(position - saveState.lastSavedPosition) < 10)) return
+    if (!force && (
+      position === saveState.lastSavedPosition
+      || Math.abs(position - saveState.lastSavedPosition) < 10
+    )) return
 
     saveState.inFlight = true
     void (async () => {
@@ -2287,6 +3182,7 @@ function StudentCourseLearning({
   function handleVideoMetadata(video, entry) {
     initializeAttentionCheckSession(video, entry)
     video.currentTime = 0
+    updateTranscriptPlaybackTime(video)
     setAutoplayBlockedLessonId('')
     const playback = video.play()
     if (playback && typeof playback.catch === 'function') {
@@ -2337,6 +3233,10 @@ function StudentCourseLearning({
     const lessonId = String(entry.lesson._id || '')
     if (!isValidLessonId(lessonId)) {
       setProgressError('This lesson cannot be tracked because it has no saved lesson ID.')
+      return
+    }
+    if (completed && !videoPlayerRef.current?.ended) {
+      setProgressError('Watch the entire video before completing this lesson.')
       return
     }
     setSavingLessonId(lessonId)
@@ -2662,7 +3562,19 @@ function StudentCourseLearning({
               <p className="student-course-learning__empty-module">No course content matches “{contentSearch}”.</p>
             )}
           </aside>
-          <div className={`student-course-learning__main${showVideoPlayer ? ' student-course-learning__main--video' : ' student-course-learning__main--activity'}`}>
+          <div className={`student-course-learning__main${showVideoPlayer ? ' student-course-learning__main--video' : ' student-course-learning__main--activity'}${isActiveAssignment ? ' student-course-learning__main--assignment' : ''}`}>
+            {isActiveAssignment && (
+              <button
+                className="student-course-learning__assignment-back"
+                type="button"
+                onClick={() => {
+                  setActiveContentItemId('')
+                  setDetailsTab('overview')
+                }}
+              >
+                ← Back to Course
+              </button>
+            )}
             {showVideoPlayer && (
               <div className="student-course-learning__active-heading">
                 <div>
@@ -2684,8 +3596,13 @@ function StudentCourseLearning({
                     playsInline
                     preload="metadata"
                     src={activeEntry.lesson.videoUrl}
-                    onLoadedMetadata={(event) => handleVideoMetadata(event.currentTarget, activeEntry)}
+                    onLoadedMetadata={(event) => {
+                      handleVideoMetadata(event.currentTarget, activeEntry)
+                      updateTranscriptPlaybackTime(event.currentTarget)
+                    }}
                     onPlay={(event) => {
+                      updateTranscriptPlaybackTime(event.currentTarget)
+                      saveLessonPlaybackPosition(activeEntry, event.currentTarget.currentTime, true)
                       const settings = activeEntry.lesson.attentionCheck
                       if (settings?.enabled === true) {
                         initializeAttentionCheckSession(event.currentTarget)
@@ -2693,14 +3610,24 @@ function StudentCourseLearning({
                       }
                     }}
                     onTimeUpdate={(event) => {
+                      updateTranscriptPlaybackTime(event.currentTarget)
                       saveLessonPlaybackPosition(activeEntry, event.currentTarget.currentTime)
                       checkAttentionSchedule(event.currentTarget)
                     }}
-                    onSeeking={(event) => handleAttentionVideoSeeking(event.currentTarget)}
-                    onPause={(event) => saveLessonPlaybackPosition(activeEntry, event.currentTarget.currentTime, true)}
+                    onSeeking={(event) => {
+                      updateTranscriptPlaybackTime(event.currentTarget)
+                      handleAttentionVideoSeeking(event.currentTarget)
+                    }}
+                    onSeeked={(event) => updateTranscriptPlaybackTime(event.currentTarget)}
+                    onPause={(event) => {
+                      updateTranscriptPlaybackTime(event.currentTarget)
+                      saveLessonPlaybackPosition(activeEntry, event.currentTarget.currentTime, true)
+                    }}
                     onEnded={() => {
                       endCurrentAttentionCheckSession()
-                      saveLessonPlaybackPosition(activeEntry, videoPlayerRef.current?.currentTime || 0, true)
+                      const video = videoPlayerRef.current
+                      if (video) updateTranscriptPlaybackTime(video)
+                      saveLessonPlaybackPosition(activeEntry, video?.currentTime || 0, true)
                       if (!completedLessonIds.has(String(activeEntry.lesson._id))) setLessonCompleted(activeEntry, true)
                     }}
                   >
@@ -2777,8 +3704,28 @@ function StudentCourseLearning({
                 <button type="button" disabled={activeContentIndex < 0 || activeContentIndex >= allContentItems.length - 1} onClick={() => moveContent(1)}>Next →</button>
               </div>
             )}
+            {showVideoPlayer && activeEntry && (
+              <div className="student-course-learning__video-completion">
+                <button
+                  className={`student-button${completedLessonIds.has(String(activeEntry.lesson._id)) ? ' student-button--quiet' : ''}`}
+                  type="button"
+                  disabled={
+                    savingLessonId === String(activeEntry.lesson._id)
+                    || !activeEntry.lesson._id
+                    || !completedLessonIds.has(String(activeEntry.lesson._id))
+                  }
+                  title={completedLessonIds.has(String(activeEntry.lesson._id))
+                    ? 'This lesson is complete.'
+                    : 'Watch the entire video to complete this lesson.'}
+                >
+                  {savingLessonId === String(activeEntry.lesson._id)
+                    ? 'Saving…'
+                    : completedLessonIds.has(String(activeEntry.lesson._id)) ? 'Completed' : 'Watch video to complete'}
+                </button>
+              </div>
+            )}
             <section className="student-course-learning__details">
-              {!showVideoPlayer && <div className="student-course-learning__active-heading">
+              {!showVideoPlayer && !isActiveAssignment && <div className="student-course-learning__active-heading">
                 <div>
                   <h2>{detailsTab === 'certificate' ? 'Course Certificate' : activeContentItem?.title || (detailsTab === 'notes' ? 'Notes' : detailsTab === 'resources' ? 'Resources' : activeEntry?.lesson.title) || 'Select course content'}</h2>
                   {detailsTab === 'certificate'
@@ -2795,25 +3742,50 @@ function StudentCourseLearning({
                   <button type="button" disabled={activeContentIndex < 0 || activeContentIndex >= allContentItems.length - 1} onClick={() => moveContent(1)}>Next →</button>
                 </div>}
               </div>}
-              {detailsTab === 'overview' && (activeContentItem?.description || (!activeContentItem && activeEntry?.lesson.content)) && (
+              {detailsTab === 'overview' && !isActiveAssignment && (activeContentItem?.description || (!activeContentItem && activeEntry?.lesson.content)) && (
                 <p className="student-course-learning__active-description">
                   {activeContentItem?.description || activeEntry?.lesson.content}
                 </p>
               )}
-              {detailsTab !== 'certificate' && <div className="student-course-learning__tabs" role="tablist" aria-label="Course information">
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={detailsTab === 'overview'}
-                  className={detailsTab === 'overview' ? 'is-active' : ''}
-                  onClick={() => {
-                    setActiveContentItemId('')
-                    setDetailsTab('overview')
-                  }}
-                >
-                  <Icon name="book" size={15} />
-                  Overview
-                </button>
+              {detailsTab !== 'certificate' && !isActiveAssignment && <div className="student-course-learning__tabs" role="tablist" aria-label="Course information">
+                {showVideoPlayer ? (
+                  <>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={lessonInfoTab === 'overview'}
+                      className={lessonInfoTab === 'overview' ? 'is-active' : ''}
+                      onClick={() => setLessonInfoTab('overview')}
+                    >
+                      <Icon name="book" size={15} />
+                      Lesson Overview
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={lessonInfoTab === 'transcript'}
+                      className={lessonInfoTab === 'transcript' ? 'is-active' : ''}
+                      onClick={() => setLessonInfoTab('transcript')}
+                    >
+                      <Icon name="book" size={15} />
+                      Transcript
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={detailsTab === 'overview'}
+                    className={detailsTab === 'overview' ? 'is-active' : ''}
+                    onClick={() => {
+                      setActiveContentItemId('')
+                      setDetailsTab('overview')
+                    }}
+                  >
+                    <Icon name="book" size={15} />
+                    Overview
+                  </button>
+                )}
               </div>}
               {detailsTab === 'certificate' ? (
                 <div className="student-course-learning__tab-content">{renderCourseCertificate()}</div>
@@ -2853,6 +3825,64 @@ function StudentCourseLearning({
                     </ul>
                   ) : <p className="student-course-learning__tab-empty">No resources have been added to this course.</p>}
                 </div>
+              ) : showVideoPlayer ? (
+                <div className="student-course-learning__tab-content">
+                  <section className="student-course-learning__transcript" aria-labelledby="student-course-transcript-title">
+                    <h3 id="student-course-transcript-title">Transcript</h3>
+                    {transcriptCues.length ? lessonInfoTab === 'transcript' ? (
+                      <div
+                        key={activeVideoKey}
+                        ref={transcriptScriptRef}
+                        className="student-course-learning__transcript-script"
+                        aria-label="Video transcript"
+                      >
+                        <p>
+                          {transcriptCues.map((cue, index) => (
+                            <React.Fragment key={`${activeVideoKey}-${cue.startTimeMs}-${index}`}>
+                              {index > 0 ? ' ' : ''}
+                              <button
+                                type="button"
+                                ref={(element) => { transcriptScriptCueRefs.current[index] = element }}
+                                className={`student-course-learning__transcript-script-cue${index === activeTranscriptCueIndex ? ' is-active' : ''}`}
+                                aria-current={index === activeTranscriptCueIndex ? 'true' : undefined}
+                                aria-label={`Jump to ${formatTranscriptTime(cue.startTimeMs)}: ${cue.text}`}
+                                onClick={() => seekToTranscriptCue(cue)}
+                              >
+                                {cue.text}
+                              </button>
+                            </React.Fragment>
+                          ))}
+                        </p>
+                      </div>
+                    ) : (
+                      <ol
+                        key={activeVideoKey}
+                        ref={transcriptCueListRef}
+                        className="student-course-learning__transcript-cues"
+                        aria-label="Video transcript"
+                      >
+                        {transcriptCues.map((cue, index) => (
+                          <li
+                            key={`${activeVideoKey}-${cue.startTimeMs}-${index}`}
+                            ref={(element) => { transcriptCueRefs.current[index] = element }}
+                            className={`student-course-learning__transcript-cue${index === activeTranscriptCueIndex ? ' is-active' : ''}`}
+                            aria-current={index === activeTranscriptCueIndex ? 'true' : undefined}
+                          >
+                            <time>{formatTranscriptTime(cue.startTimeMs)}</time>
+                            <button
+                              type="button"
+                              className="student-course-learning__transcript-text"
+                              aria-label={`Jump to ${formatTranscriptTime(cue.startTimeMs)}: ${cue.text}`}
+                              onClick={() => seekToTranscriptCue(cue)}
+                            >
+                              {cue.text}
+                            </button>
+                          </li>
+                        ))}
+                      </ol>
+                    ) : <p className="student-course-learning__transcript-empty">Transcript not available</p>}
+                  </section>
+                </div>
               ) : (
                 <div className="student-course-learning__tab-content">
                   {activeContentItem?.type === 'quiz' ? (
@@ -2879,29 +3909,20 @@ function StudentCourseLearning({
                       onSubmitted={addAssignmentSubmission}
                       onLearningDataChanged={onLearningDataChanged}
                       onLogout={onLogout}
-                      showHeader={false}
+                      showHeader
+                      canSubmit={['not-submitted', 'rejected'].includes(getAssignmentReviewStatus(activeContentItem))}
                     />
                   ) : activeContentItem?.type === 'note' ? (
                     <StudentNotePanel item={activeContentItem} />
                   ) : activeEntry ? (
                     <section className="student-course-learning__lesson">
                       <span className="student-eyebrow">{activeEntry.module.title}</span>
-                      <button
-                        className={`student-button${completedLessonIds.has(String(activeEntry.lesson._id)) ? ' student-button--quiet' : ''}`}
-                        type="button"
-                        disabled={savingLessonId === String(activeEntry.lesson._id) || !activeEntry.lesson._id}
-                        onClick={() => setLessonCompleted(activeEntry, !completedLessonIds.has(String(activeEntry.lesson._id)))}
-                      >
-                        {savingLessonId === String(activeEntry.lesson._id)
-                          ? 'Saving…'
-                          : completedLessonIds.has(String(activeEntry.lesson._id)) ? 'Mark incomplete' : 'Mark as complete'}
-                      </button>
                     </section>
                   ) : <EmptyState icon="book" title="Select course content" description="Choose a video, quiz, assignment, or note from the course content list." />}
                 </div>
               )}
-              {isActiveQuiz && (
-                <div className="student-course-learning__detail-nav student-course-learning__detail-nav--bottom">
+              {(isActiveAssignment || (isActiveQuiz && !hasActiveQuizAttempt)) && (
+                <div className={`student-course-learning__detail-nav student-course-learning__detail-nav--bottom${isActiveAssignment ? ' student-course-learning__detail-nav--assignment' : ''}`}>
                   <button type="button" disabled={activeContentIndex <= 0} onClick={() => moveContent(-1)}>← Previous</button>
                   <button type="button" disabled={activeContentIndex < 0 || activeContentIndex >= allContentItems.length - 1} onClick={() => moveContent(1)}>Next →</button>
                 </div>
@@ -3382,24 +4403,25 @@ function StudentCourseLearningPage({
 }
 
 function StudentCourses({ user, onLogout }) {
-  const [enrollments, setEnrollments] = useState([])
+  const [initialEnrollments] = useState(getCachedStudentPageEnrollments)
+  const [enrollments, setEnrollments] = useState(initialEnrollments || [])
   const [error, setError] = useState('')
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(initialEnrollments === null)
   const location = useLocation()
   const requestedFilter = new URLSearchParams(location.search).get('filter')
   const enrollmentFilter = ['enrolled', 'completed', 'active'].includes(requestedFilter) ? requestedFilter : ''
 
   useEffect(() => {
-    const controller = new AbortController()
-    fetchMyEnrollments(onLogout, controller.signal)
-      .then(setEnrollments)
+    let active = true
+    fetchStudentPageEnrollments(onLogout)
+      .then((loadedEnrollments) => { if (active) setEnrollments(loadedEnrollments) })
       .catch((loadError) => {
-        if (loadError.name !== 'AbortError') {
+        if (active) {
           setError(loadError instanceof Error ? loadError.message : 'Unable to load your enrolled courses.')
         }
       })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false) })
-    return () => controller.abort()
+      .finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
   }, [onLogout, user?.id])
 
   const filteredEnrollments = enrollmentFilter
@@ -3416,7 +4438,7 @@ function StudentCourses({ user, onLogout }) {
   return (
     <StudentRoutePage title={pageTitle} showHeading>
       {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
-      {loading ? <p role="status">Loading your courses…</p> : !error && (
+      {loading ? <EnrollmentCourseSkeletons /> : (!error || initialEnrollments !== null) && (
         <EnrollmentCourseCards
           enrollments={filteredEnrollments}
           emptyTitle={enrollmentFilter === 'completed'
@@ -3785,6 +4807,9 @@ function StudentDashboard({
   onAccountUpdated,
 }) {
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false)
+  const profileMenuRef = useRef(null)
+  const [publishedCourseCategories, setPublishedCourseCategories] = useState([])
   const [selectedCourseCategory, setSelectedCourseCategory] = useState('')
   const [courseLearningTitle, setCourseLearningTitle] = useState('')
   const [courseContentSearch, setCourseContentSearch] = useState('')
@@ -3820,10 +4845,40 @@ function StudentDashboard({
     }[currentPage.label]
     : isHelpPage ? 'circleHelp' : secondaryPage?.icon || 'layoutDashboard'
   const firstName = user?.fullName?.trim().split(/\s+/)[0] || 'Student'
+  const exploreCategories = [
+    ...categories,
+    ...publishedCourseCategories
+      .filter((name) => !categories.some((category) => (
+        normalizeCourseCategory(category.label) === normalizeCourseCategory(name)
+      )))
+      .map((label) => ({ label, icon: 'book' })),
+  ]
   const initials = user?.fullName
     ? user.fullName.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase()
     : 'S'
   const completionPercentage = learningSummary.completionPercentage
+
+  useEffect(() => {
+    if (!profileMenuOpen) return undefined
+
+    const closeOnOutsideClick = (event) => {
+      if (!profileMenuRef.current?.contains(event.target)) setProfileMenuOpen(false)
+    }
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape') setProfileMenuOpen(false)
+    }
+
+    document.addEventListener('pointerdown', closeOnOutsideClick)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsideClick)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [profileMenuOpen])
+
+  useEffect(() => {
+    setProfileMenuOpen(false)
+  }, [location.pathname])
 
   useEffect(() => {
     if (loading) return undefined
@@ -3877,6 +4932,7 @@ function StudentDashboard({
   }
 
   function refreshLearningSummary() {
+    invalidateStudentLearningPageCaches()
     setLearningSummaryRefresh((refresh) => refresh + 1)
   }
 
@@ -3966,29 +5022,33 @@ function StudentDashboard({
           )}
           <div className="student-topbar__actions">
             <ThemeToggle isDark={isDark} onToggle={onToggleTheme} className="student-theme-toggle" />
-            <button
-              className="student-icon-button"
-              type="button"
-              aria-label="Announcements"
-              onClick={() => navigateTo('/student/announcements')}
-            >
-              <Icon name="bell" />
-            </button>
-            <button
-              className="student-icon-button"
-              type="button"
-              aria-label="Help and study companion"
-              onClick={() => navigateTo('/student/study-companion')}
-            >
-              <Icon name="help" />
-            </button>
-            <div className="student-profile-menu">
-              <div className="student-profile-trigger">
+            <StudentNotificationBell onLogout={onLogout} />
+            <div className={`student-profile-menu${profileMenuOpen ? ' is-open' : ''}`} ref={profileMenuRef}>
+              <button
+                className="student-profile-trigger"
+                type="button"
+                aria-haspopup="menu"
+                aria-expanded={profileMenuOpen}
+                aria-controls="student-profile-dropdown"
+                onClick={() => setProfileMenuOpen((isOpen) => !isOpen)}
+              >
                 <span className="student-avatar">{initials}</span>
                 <span className="student-profile-trigger__copy">
                   <strong>{user?.fullName || 'Student'}</strong><small>Student</small>
                 </span>
-              </div>
+              </button>
+              {profileMenuOpen && (
+                <div className="student-profile-dropdown" id="student-profile-dropdown" role="menu">
+                  <button
+                    className="student-profile-dropdown__logout"
+                    type="button"
+                    role="menuitem"
+                    onClick={onLogout}
+                  >
+                    <Icon name="logout" size={16} /> Logout
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </header>
@@ -4074,7 +5134,7 @@ function StudentDashboard({
               <section className="student-categories" aria-labelledby="student-categories-title">
                 <h2 id="student-categories-title">Explore categories</h2>
                 <div className="student-categories__list">
-                  {categories.map((category) => (
+                  {exploreCategories.map((category) => (
                     <button
                       className={`student-category student-category-link${selectedCourseCategory === category.label ? ' is-selected' : ''}`}
                       key={category.label}
@@ -4117,6 +5177,8 @@ function StudentDashboard({
                 user={user}
                 onLogout={onLogout}
                 onLearningDataChanged={refreshLearningSummary}
+                onCategoriesLoaded={setPublishedCourseCategories}
+                selectedCategory={selectedCourseCategory}
               />
 
               <div className="student-two-column">
@@ -4125,31 +5187,16 @@ function StudentDashboard({
                     <div><span className="student-eyebrow">STAY ON TRACK</span><h2 id="student-assignments-title">Upcoming assignments</h2></div>
                     <Link className="student-section-link student-section-link--muted" to="/student/assignments">View all</Link>
                   </div>
-                  <EmptyState icon="check" title="No assignment data available" description="Assignments and due dates aren’t connected to this account yet." />
+                  <StudentDashboardUpcomingAssignments onLogout={onLogout} />
                 </section>
                 <section className="student-panel student-announcements" aria-labelledby="student-announcements-title">
                   <div className="student-section-heading">
                     <div><span className="student-eyebrow">FROM YOUR LEARNING COMMUNITY</span><h2 id="student-announcements-title">Announcements</h2></div>
-                    <span className="student-section-link student-section-link--muted">Updates</span>
+                    <Link className="student-section-link student-section-link--muted" to="/student/announcements">
+                      Updates <Icon name="arrow" size={15} />
+                    </Link>
                   </div>
                   <NotificationFeed role="student" onLogout={onLogout} />
-                </section>
-              </div>
-
-              <div className="student-two-column student-lower-grid">
-                <section className="student-panel student-weekly-goal" aria-labelledby="student-goal-title">
-                  <span className="student-eyebrow">A STEADY RHYTHM</span>
-                  <h2 id="student-goal-title">Weekly learning goal</h2>
-                  <div className="student-goal-values"><strong>— <small>hrs</small></strong><span>of — hrs this week</span></div>
-                  <div className="student-progress-track"><span /></div>
-                  <p>Learning time and weekly goal tracking aren’t connected yet.</p>
-                </section>
-                <section className="student-panel student-ai-card" aria-labelledby="student-ai-title">
-                  <span className="student-ai-card__icon"><Icon name="spark" size={20} /></span>
-                  <span className="student-eyebrow">A HELPFUL STUDY SPACE</span>
-                  <h2 id="student-ai-title">AI Study Companion</h2>
-                  <p>Topic explanations, lesson summaries and practice questions are planned for a future release.</p>
-                  <span className="student-ai-card__status">Not connected to an AI service</span>
                 </section>
               </div>
 
@@ -4159,12 +5206,14 @@ function StudentDashboard({
                 </div>
                 <div className="student-tools-grid">
                   {tools.map((tool) => (
-                    <article className="student-tool-card" id={tool.id} key={tool.id}>
+                    <Link className="student-tool-card" id={tool.id} key={tool.id} to={tool.path}>
                       <span className="student-tool-card__icon"><Icon name={tool.icon} size={19} /></span>
-                      <h3>{tool.title}</h3>
-                      <p>{tool.description}</p>
-                      <span className="student-tool-card__status">Coming as LMS features are connected</span>
-                    </article>
+                      <span className="student-tool-card__copy">
+                        <h3>{tool.title}</h3>
+                        <p>{tool.description}</p>
+                      </span>
+                      <span className="student-tool-card__arrow" aria-hidden="true"><Icon name="arrow" size={18} /></span>
+                    </Link>
                   ))}
                 </div>
               </section>
@@ -4184,9 +5233,7 @@ function StudentDashboard({
               } />
               <Route path="/student/courses" element={<StudentCourses user={user} onLogout={onLogout} />} />
               <Route path="/student/assignments" element={
-                <StudentRoutePage eyebrow="STAY ON TRACK" title="Assignments">
-                  <EmptyState icon="check" title="No assignment data available" description="Assignments and due dates aren’t connected to this account yet." />
-                </StudentRoutePage>
+                <StudentAssignmentsPage onLogout={onLogout} onLearningDataChanged={refreshLearningSummary} />
               } />
               <Route path="/student/results" element={
                 <StudentResultsPage onLogout={onLogout} />
@@ -4232,9 +5279,7 @@ function StudentDashboard({
               <Route path="/student/help/requests" element={<SupportRequestsPage />} />
               <Route path="/student/help/requests/:ticketId" element={<SupportTicketDetailPage />} />
               <Route path="/student/announcements" element={
-                <StudentRoutePage eyebrow="FROM YOUR LEARNING COMMUNITY" title="Announcements">
-                  <NotificationFeed role="student" onLogout={onLogout} />
-                </StudentRoutePage>
+                <StudentNotificationsPage onLogout={onLogout} />
               } />
               <Route path="/student/study-companion" element={
                 <StudentRoutePage eyebrow="A HELPFUL STUDY SPACE" title="AI Study Companion">

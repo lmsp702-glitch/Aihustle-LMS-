@@ -1,0 +1,411 @@
+.student-notification-bell {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.student-notification-bell__trigger svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.7;
+}
+
+.student-notification-bell__count {
+  position: absolute;
+  top: -3px;
+  right: -4px;
+  display: grid;
+  min-width: 17px;
+  height: 17px;
+  place-items: center;
+  padding: 0 4px;
+  border: 2px solid var(--student-paper, #fffdf7);
+  border-radius: 999px;
+  background: #d93832;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 750;
+  line-height: 1;
+}
+
+.student-notification-bell__panel {
+  position: absolute;
+  z-index: 60;
+  top: calc(100% + 10px);
+  right: -8px;
+  display: flex;
+  flex-direction: column;
+  width: min(340px, calc(100vw - 24px));
+  max-height: min(475px, calc(100dvh - 92px));
+  overflow: hidden;
+  border: 1px solid #e4e0d7;
+  border-radius: 13px;
+  background: var(--student-paper, #fffdf7);
+  box-shadow: 0 14px 36px rgb(34 43 38 / 17%);
+  color: var(--student-ink, #26332f);
+}
+
+.student-notification-bell__header {
+  display: flex;
+  min-height: 46px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid #eeece6;
+  background: #fffefa;
+}
+
+.student-notification-bell__header h2 {
+  margin: 0;
+  color: #202b28;
+  font-size: 14px;
+  font-weight: 720;
+}
+
+.student-notification-bell__header > button {
+  padding: 4px 0 4px 6px;
+  border: 0;
+  background: transparent;
+  color: #287267;
+  cursor: pointer;
+  font: inherit;
+  font-size: 9px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.student-notification-bell__header > button:hover {
+  color: #174e45;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.student-notification-bell__header > button:disabled {
+  cursor: wait;
+  opacity: .65;
+}
+
+.student-notification-bell__error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 13px;
+  border-bottom: 1px solid #efdad4;
+  background: #fff6f3;
+  color: #9c4337;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.student-notification-bell__error button {
+  flex: 0 0 auto;
+  padding: 4px 7px;
+  border: 1px solid #d6bd74;
+  border-radius: 7px;
+  background: #fffaf0;
+  color: #506f64;
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.student-notification-bell__error button:hover {
+  border-color: #34796e;
+  background: #eaf3ed;
+}
+
+.student-notification-bell__list {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 340px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0 13px;
+  list-style: none;
+}
+
+.student-notification-bell__item {
+  position: relative;
+  min-width: 0;
+  border-bottom: 1px solid #eeece6;
+}
+
+.student-notification-bell__item.is-unread {
+  background: #fffdf6;
+}
+
+.student-notification-bell__content {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: 34px minmax(0, 1fr) 13px;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 25px 10px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.student-notification-bell__content:hover .student-notification-bell__copy strong {
+  color: #287267;
+}
+
+.student-notification-bell__icon {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 10px;
+  background: #f0e8fa;
+  color: #9146c4;
+}
+
+.student-notification-bell__icon.is-document { background: #f0e8fa; color: #9146c4; }
+.student-notification-bell__icon.is-check { background: #e4f2e4; color: #27883d; }
+.student-notification-bell__icon.is-megaphone { background: #e6f0fa; color: #3577b7; }
+.student-notification-bell__icon.is-book { background: #e6f0fa; color: #3577b7; }
+.student-notification-bell__icon.is-clock { background: #fff2dd; color: #b47a1d; }
+.student-notification-bell__icon.is-chart { background: #e8f1fb; color: #4877bd; }
+.student-notification-bell__icon.is-award { background: #fbf0d7; color: #a77a17; }
+.student-notification-bell__icon.is-bell { background: #e8f0e9; color: #34796e; }
+
+.student-notification-bell__icon svg,
+.student-notification-bell__chevron svg,
+.student-notification-bell__item-actions svg,
+.student-notification-bell__view-all svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.student-notification-bell__copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.student-notification-bell__copy strong {
+  overflow: hidden;
+  color: #202b28;
+  font-size: 10px;
+  font-weight: 720;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.student-notification-bell__copy > span {
+  display: -webkit-box;
+  overflow: hidden;
+  color: #53615c;
+  font-size: 10px;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+}
+
+.student-notification-bell__copy time {
+  margin-top: 1px;
+  color: #858b86;
+  font-size: 9px;
+}
+
+.student-notification-bell__chevron {
+  display: grid;
+  place-items: center;
+  color: #728078;
+}
+
+.student-notification-bell__item.is-unread::before {
+  position: absolute;
+  top: 14px;
+  left: -9px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #d9b34d;
+  content: '';
+}
+
+.student-notification-bell__item-actions {
+  position: absolute;
+  top: 15px;
+  right: 24px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .12s ease;
+}
+
+.student-notification-bell__item:hover .student-notification-bell__item-actions,
+.student-notification-bell__item:focus-within .student-notification-bell__item-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.student-notification-bell__item:hover .student-notification-bell__chevron,
+.student-notification-bell__item:focus-within .student-notification-bell__chevron {
+  opacity: 0;
+}
+
+.student-notification-bell__item-actions button {
+  display: grid;
+  width: 23px;
+  height: 23px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid #e5e1d7;
+  border-radius: 6px;
+  background: var(--student-paper, #fffdf7);
+  color: #64736a;
+  cursor: pointer;
+}
+
+.student-notification-bell__item-actions button:hover {
+  border-color: #d8aaa1;
+  background: #fff6f3;
+  color: #a34a3d;
+}
+
+.student-notification-bell__item-actions button:disabled {
+  cursor: wait;
+  opacity: .5;
+}
+
+.student-notification-bell__view-all {
+  display: flex;
+  min-height: 33px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  margin: 8px 13px 11px;
+  padding: 6px 10px;
+  border: 1px solid #d1e4d3;
+  border-radius: 8px;
+  background: #eaf4e9;
+  color: #287267;
+  cursor: pointer;
+  font: inherit;
+  font-size: 9px;
+  font-weight: 720;
+}
+
+.student-notification-bell__view-all:hover {
+  border-color: #a7cfb1;
+  background: #deefdf;
+}
+
+.student-notification-bell__view-all svg {
+  width: 13px;
+  height: 13px;
+}
+
+.student-notification-bell__empty {
+  margin: 0;
+  padding: 22px 14px;
+  color: #637067;
+  font-size: 11px;
+  text-align: center;
+}
+
+.student-notification-bell__skeleton {
+  display: grid;
+  gap: 7px;
+  padding: 10px 13px;
+}
+
+.student-notification-bell__skeleton-row {
+  height: 56px;
+  border-radius: 8px;
+  background: linear-gradient(90deg, #eeeae0 20%, #f8f5ed 50%, #eeeae0 80%);
+  background-size: 200% 100%;
+  animation: student-notification-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes student-notification-shimmer {
+  to { background-position: -200% 0; }
+}
+
+:root[data-theme='dark'] .student-notification-bell__panel {
+  border-color: #45534a;
+  background: #242d28;
+  color: #e6ebe4;
+}
+
+:root[data-theme='dark'] .student-notification-bell__header {
+  border-color: #45534a;
+  background: #2a342e;
+}
+
+:root[data-theme='dark'] .student-notification-bell__header h2,
+:root[data-theme='dark'] .student-notification-bell__copy strong {
+  color: #e6ebe4;
+}
+
+:root[data-theme='dark'] .student-notification-bell__item {
+  border-color: #3c4940;
+}
+
+:root[data-theme='dark'] .student-notification-bell__copy > span,
+:root[data-theme='dark'] .student-notification-bell__copy time,
+:root[data-theme='dark'] .student-notification-bell__empty,
+:root[data-theme='dark'] .student-notification-bell__chevron {
+  color: #b0b9af;
+}
+
+:root[data-theme='dark'] .student-notification-bell__item-actions button {
+  border-color: #45534a;
+  background: #2a342e;
+}
+
+:root[data-theme='dark'] .student-notification-bell__view-all {
+  border-color: #456752;
+  background: #2b4034;
+  color: #a8d7b6;
+}
+
+:root[data-theme='dark'] .student-notification-bell__skeleton-row {
+  background: linear-gradient(90deg, #343d37 20%, #414b44 50%, #343d37 80%);
+  background-size: 200% 100%;
+}
+
+@media (max-width: 520px) {
+  .student-notification-bell__panel {
+    position: fixed;
+    top: 66px;
+    right: 8px;
+    width: min(340px, calc(100vw - 16px));
+    max-height: calc(100dvh - 78px);
+  }
+}
+
+@media (hover: none) {
+  .student-notification-bell__item-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .student-notification-bell__chevron {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .student-notification-bell__item-actions,
+  .student-notification-bell__skeleton-row {
+    animation: none;
+    transition: none;
+  }
+}

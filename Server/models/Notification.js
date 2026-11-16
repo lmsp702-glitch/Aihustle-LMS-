@@ -6,18 +6,36 @@ const notificationSchema = new mongoose.Schema(
     recipientId: { type: mongoose.Schema.Types.ObjectId },
     type: {
       type: String,
-      enum: ['independent_student_registered', 'independent_student_approved', 'independent_student_rejected'],
+      enum: [
+        'independent_student_registered',
+        'independent_student_approved',
+        'independent_student_rejected',
+        'course_assigned',
+        'course_incomplete',
+        'assignment_due',
+        'assignment_submitted',
+        'assignment_approved',
+        'assignment_rejected',
+        'quiz_result',
+        'certificate_available',
+        'course_updated',
+      ],
       required: true,
     },
+    eventKey: { type: String, trim: true, maxlength: 300 },
     title: { type: String, required: true, trim: true, maxlength: 160 },
     message: { type: String, required: true, trim: true, maxlength: 1200 },
     link: { type: String, trim: true, maxlength: 300 },
     metadata: { type: mongoose.Schema.Types.Mixed, default: {} },
+    readAt: { type: Date, default: null },
+    deletedAt: { type: Date, default: null },
   },
   { autoCreate: false, autoIndex: false, timestamps: true, collection: 'notifications' },
 )
 
 notificationSchema.index({ recipientRole: 1, recipientId: 1, createdAt: -1 })
+notificationSchema.index({ eventKey: 1 }, { unique: true, sparse: true, name: 'unique_notification_event_key' })
+notificationSchema.index({ recipientRole: 1, recipientId: 1, deletedAt: 1, readAt: 1 }, { name: 'notification_unread_count' })
 
 const Notification =
   mongoose.models.Notification ||

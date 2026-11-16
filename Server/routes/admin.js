@@ -3,7 +3,7 @@ import bcrypt from 'bcryptjs'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { openAsBlob } from 'node:fs'
 import { Readable } from 'node:stream'
-import { open, unlink } from 'node:fs/promises'
+import { open, readFile, unlink } from 'node:fs/promises'
 import mongoose from 'mongoose'
 import multer from 'multer'
 import path from 'node:path'
@@ -27,8 +27,9 @@ import {
   accountModelsByCollection,
 } from '../models/account-models.js'
 import { authenticate, requireRoles } from '../middleware/auth.js'
-import { receiveCourseResource, receiveCourseVideo } from '../middleware/course-media-upload.js'
+import { receiveCourseResource, receiveCourseTranscript, receiveCourseVideo } from '../middleware/course-media-upload.js'
 import { normalizeCourseDetails } from '../utils/course-validation.js'
+import { parseSrtTranscript } from '../utils/srt-transcript.js'
 import {
   logEmailDeliveryFailure,
   sendCollegeAdminActivationEmail,
@@ -43,6 +44,7 @@ import { generateQuizQuestions } from '../utils/quiz-question-generator.js'
 import { parseStudentCsv } from '../utils/student-csv.js'
 import { toMongoBuffer } from '../utils/mongo-binary.js'
 import { getActiveCertificateTemplateId, issueCertificateIfEligible } from '../utils/certificates.js'
+import { createStudentNotification } from '../utils/student-notifications.js'
 
 const router = Router()
 const requireAdmin = [authenticate, requireRoles('main_admin')]
@@ -61,6 +63,24 @@ const registrationFieldAliases = Object.freeze({
 })
 const reportPageSize = 200
 const approvalStatuses = new Set(['pending', 'approved', 'rejected', 'all'])
+
+async function notifyEnrolledStudentsOfCourseUpdate(course) {
+  const enrollments = await Enrollment.find({
+    courseId: course._id,
+    status: { $ne: 'cancelled' },
+  }).select('userId').lean()
+  const recipientIds = new Set(enrollments.filter(({ userId }) => userId).map(({ userId }) => String(userId)))
+  const updatedAt = course.updatedAt instanceof Date ? course.updatedAt : new Date()
+  await Promise.all([...recipientIds].map((recipientId) => createStudentNotification({
+    recipientId,
+    eventKey: `course-updated:${recipientId}:${course._id}:${updatedAt.getTime()}`,
+    type: 'course_updated',
+    title: 'Course updated',
+    message: `${course.title || 'Your course'} has new or updated learning content.`,
+    link: `/student/course/${encodeURIComponent(String(course._id))}/learn`,
+    metadata: { courseId: String(course._id), updatedAt: updatedAt.toISOString() },
+  })))
+}
 
 function publicRegistrationDetails(details, accountFields, legacyDetails = {}) {
   const nestedDetails = details && typeof details === 'object' && !Array.isArray(details)
@@ -419,6 +439,23 @@ router.patch('/assignment-submissions/:submissionId/review', ...requireAdmin, as
         }
       }
     }
+
+    await createStudentNotification({
+      recipientId: submission.userId,
+      eventKey: `assignment-review:${submission._id}:${reviewStatus}:${submission.reviewedAt.getTime()}`,
+      type: reviewStatus === 'approved' ? 'assignment_approved' : 'assignment_rejected',
+      title: reviewStatus === 'approved' ? 'Assignment approved' : 'Assignment needs changes',
+      message: reviewStatus === 'approved'
+        ? 'Your assignment submission was approved.'
+        : 'Your assignment submission was rejected. You can review it and resubmit your work.',
+      link: '/student/assignments',
+      metadata: {
+        courseId: String(submission.courseId),
+        assignmentId: String(submission.assignmentId),
+        submissionId: String(submission._id),
+        reviewStatus,
+      },
+    })
 
     return res.json({ reviewStatus: submission.reviewStatus, reviewedAt: submission.reviewedAt })
   } catch (error) {
@@ -940,7 +977,9 @@ router.get('/courses', ...requireAdmin, async (req, res, next) => {
           modules._id modules.title modules.description modules.order
           modules.lessons._id modules.lessons.title modules.lessons.description modules.lessons.content
           modules.lessons.videoUrl modules.lessons.videoPublicId modules.lessons.videoFormat
-          modules.lessons.videoBytes modules.lessons.durationSeconds modules.lessons.resources
+          modules.lessons.videoFileName modules.lessons.videoBytes modules.lessons.durationSeconds modules.lessons.resources
+          modules.lessons.transcriptUrl modules.lessons.transcriptPublicId modules.lessons.transcriptFileName
+          modules.lessons.transcriptFormat modules.lessons.transcriptBytes modules.lessons.transcriptCues
           modules.lessons.requiredForCertificate
           modules.lessons.order modules.lessons.createdAt modules.lessons.updatedAt
           modules.lessons.attentionCheck.enabled modules.lessons.attentionCheck.minIntervalSeconds
@@ -959,8 +998,11 @@ router.get('/courses', ...requireAdmin, async (req, res, next) => {
           modules.contentItems._id modules.contentItems.type modules.contentItems.title
           modules.contentItems.description modules.contentItems.content modules.contentItems.videoUrl
           modules.contentItems.requiredForCertificate
-          modules.contentItems.videoPublicId modules.contentItems.videoFormat modules.contentItems.videoBytes
-          modules.contentItems.durationSeconds modules.contentItems.resources modules.contentItems.dueDate
+          modules.contentItems.videoPublicId modules.contentItems.videoFileName modules.contentItems.videoFormat modules.contentItems.videoBytes
+          modules.contentItems.durationSeconds modules.contentItems.transcriptUrl modules.contentItems.transcriptPublicId
+          modules.contentItems.transcriptFileName modules.contentItems.transcriptFormat modules.contentItems.transcriptBytes
+          modules.contentItems.transcriptCues
+          modules.contentItems.resources modules.contentItems.dueDate
           modules.contentItems.attentionCheck.enabled modules.contentItems.attentionCheck.questionsDuringVideo
           modules.contentItems.attentionCheck.minIntervalSeconds
           modules.contentItems.attentionCheck.maxIntervalSeconds modules.contentItems.attentionCheck.questions.prompt
@@ -1176,6 +1218,30 @@ async function uploadVideoWithProviderErrorDetails(filePath, originalName, optio
   return result
 }
 
+async function uploadCourseMediaToCloudinary(file, folder, assetType) {
+  const resourceType = assetType === 'video'
+    ? 'video'
+    : assetType === 'transcript' || file.mimetype === 'application/pdf' ? 'raw' : 'image'
+  const extension = path.extname(file.originalname).slice(1).toLowerCase()
+  const uploadOptions = {
+    folder,
+    public_id: `${randomUUID()}${resourceType === 'raw' ? `.${extension}` : ''}`,
+    resource_type: resourceType,
+    overwrite: false,
+    unique_filename: false,
+    timeout: 30 * 60 * 1000,
+  }
+  const uploaded = assetType === 'video' && file.size > 100 * 1024 * 1024
+    ? await uploadLargeVideo(file.path, { ...uploadOptions, chunk_size: 20 * 1024 * 1024 })
+    : assetType === 'video'
+      ? await uploadVideoWithProviderErrorDetails(file.path, file.originalname, uploadOptions)
+      : await cloudinary.uploader.upload(file.path, uploadOptions)
+  if (!uploaded?.secure_url || !uploaded.public_id) {
+    throw new Error('Cloudinary completed the upload without returning a usable media URL and public ID.')
+  }
+  return { uploaded, resourceType }
+}
+
 router.get('/cloudinary/health', ...requireAdmin, async (_req, res) => {
   if (!cloudinaryIsConfigured()) {
     return res.status(503).json({ connected: false, message: 'Cloudinary is not configured on the server.' })
@@ -1205,24 +1271,10 @@ async function uploadCourseMedia(req, res, next, assetType) {
     }
 
     const folder = `aihustle/courses/${courseId}/modules/${moduleId}`
-    const resourceType = assetType === 'video'
-      ? 'video'
-      : req.file.mimetype === 'application/pdf' ? 'raw' : 'image'
-    const uploadOptions = {
-      folder,
-      public_id: `${randomUUID()}${resourceType === 'raw' ? `.${path.extname(req.file.originalname).slice(1).toLowerCase()}` : ''}`,
-      resource_type: resourceType,
-      overwrite: false,
-      unique_filename: false,
-      timeout: 30 * 60 * 1000,
-    }
     let uploaded
+    let resourceType
     try {
-      uploaded = assetType === 'video' && req.file.size > 100 * 1024 * 1024
-        ? await uploadLargeVideo(req.file.path, { ...uploadOptions, resource_type: 'video', chunk_size: 20 * 1024 * 1024 })
-        : assetType === 'video'
-          ? await uploadVideoWithProviderErrorDetails(req.file.path, req.file.originalname, uploadOptions)
-          : await cloudinary.uploader.upload(req.file.path, uploadOptions)
+      ({ uploaded, resourceType } = await uploadCourseMediaToCloudinary(req.file, folder, assetType))
     } catch (error) {
       const providerMessage = safeCloudinaryErrorMessage(error)
       const cloudinaryError = error?.error || error
@@ -1273,6 +1325,354 @@ router.post(
   (req, res, next) => uploadCourseMedia(req, res, next, 'resource'),
 )
 
+function findVideoLesson(entries, lessonId, lessonDraft) {
+  const lessons = entries || []
+  const byId = lessons.find((entry) => String(entry._id) === String(lessonId))
+  if (byId) return byId
+  if (!lessonDraft?.title || !lessonDraft.videoUrl) return null
+  const matches = lessons.filter((entry) => (
+    (entry.type === undefined || entry.type === 'video-lesson')
+    && entry.title === lessonDraft.title
+    && entry.videoUrl === lessonDraft.videoUrl
+  ))
+  return matches.length === 1 ? matches[0] : null
+}
+
+function transcriptAssetReferenceQuery(publicId) {
+  return {
+    $or: [
+      { 'modules.lessons.transcriptPublicId': publicId },
+      { 'modules.contentItems.transcriptPublicId': publicId },
+    ],
+  }
+}
+
+async function cleanupTranscriptAsset(publicId) {
+  if (!publicId) return false
+  try {
+    if (await Course.exists(transcriptAssetReferenceQuery(publicId))) return false
+    const result = await cloudinary.uploader.destroy(publicId, { resource_type: 'raw', invalidate: true })
+    if (['ok', 'not found'].includes(result.result)) return false
+    console.error(JSON.stringify({ event: 'admin.course_transcript_cleanup_failed', publicId, result: result.result }))
+    return true
+  } catch (error) {
+    console.error(JSON.stringify({
+      event: 'admin.course_transcript_cleanup_failed',
+      publicId,
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+    }))
+    return true
+  }
+}
+
+function transcriptCourseProjection() {
+  return [
+    'title',
+    'category',
+    'difficulty',
+    'modules._id',
+    'modules.title',
+    'modules.lessons._id',
+    'modules.lessons.title',
+    'modules.lessons.videoUrl',
+    'modules.lessons.transcriptPublicId',
+    'modules.contentItems._id',
+    'modules.contentItems.type',
+    'modules.contentItems.title',
+    'modules.contentItems.videoUrl',
+    'modules.contentItems.transcriptPublicId',
+  ].join(' ')
+}
+
+async function uploadLessonTranscript(req, res, next) {
+  let uploadedAsset
+  try {
+    const { courseId, moduleId, lessonId } = req.params
+    if (![courseId, moduleId, lessonId].every(mongoose.isValidObjectId)) {
+      return res.status(400).json({ message: 'Select a valid course, module, and video lesson.' })
+    }
+    if (!req.file) return res.status(400).json({ message: 'Choose an SRT transcript to upload.' })
+    if (!cloudinaryIsConfigured()) {
+      return res.status(503).json({ message: 'Course transcript uploads are not configured on the server.' })
+    }
+
+    let lessonDraft
+    try {
+      lessonDraft = JSON.parse(req.body?.lesson || '')
+    } catch {
+      return res.status(400).json({ message: 'The video lesson details are invalid.' })
+    }
+    if (!lessonDraft || typeof lessonDraft !== 'object' || Array.isArray(lessonDraft)) {
+      return res.status(400).json({ message: 'The video lesson details are invalid.' })
+    }
+
+    const originalName = String(req.file.originalname || '').split(/[\\/]/).pop()
+    if (!originalName || !originalName.toLowerCase().endsWith('.srt') || originalName.length > 255) {
+      return res.status(400).json({ message: 'Choose a valid SRT transcript filename.' })
+    }
+    let transcriptCues
+    try {
+      transcriptCues = parseSrtTranscript(await readFile(req.file.path))
+    } catch (error) {
+      return res.status(400).json({ message: error instanceof Error ? error.message : 'The SRT transcript is invalid.' })
+    }
+
+    const course = await Course.findById(courseId).select(transcriptCourseProjection()).lean()
+    if (!course) return res.status(404).json({ message: 'The course was not found.' })
+    const module = (course.modules || []).find((entry) => String(entry._id) === String(moduleId))
+    const moduleTitle = module?.title || String(req.body?.moduleTitle || '').trim()
+    if (!moduleTitle || moduleTitle.length > 200) {
+      return res.status(400).json({ message: 'Enter a valid module title before uploading its transcript.' })
+    }
+
+    const normalized = normalizeCourseDetails({
+      title: course.title,
+      category: course.category || 'Other',
+      difficulty: course.difficulty || 'beginner',
+      status: 'draft',
+      modules: [{
+        _id: moduleId,
+        title: moduleTitle,
+        contentItems: [{
+          ...lessonDraft,
+          _id: lessonId,
+          type: 'video-lesson',
+          transcriptUrl: '',
+          transcriptPublicId: '',
+          transcriptFileName: originalName,
+          transcriptFormat: 'srt',
+          transcriptBytes: req.file.size,
+          transcriptCues,
+        }],
+      }],
+    })
+    if (normalized.error) return res.status(400).json({ message: normalized.error })
+    const normalizedLesson = normalized.value.modules[0].contentItems[0]
+    if (!normalizedLesson.videoUrl || !normalizedLesson.videoPublicId) {
+      return res.status(400).json({ message: 'Upload a video for this lesson before attaching its transcript.' })
+    }
+    const moduleItems = module?.contentItems || []
+    const legacyLessons = module?.lessons || []
+    const conflictingItem = moduleItems.find((item) => String(item._id) === String(lessonId))
+    if (conflictingItem && conflictingItem.type !== 'video-lesson') {
+      return res.status(409).json({ message: 'This lesson ID belongs to a different course content item.' })
+    }
+
+    const folder = `aihustle/courses/${courseId}/modules/${moduleId}`
+    let uploaded
+    try {
+      ({ uploaded } = await uploadCourseMediaToCloudinary(req.file, folder, 'transcript'))
+      uploadedAsset = uploaded
+    } catch (error) {
+      const providerMessage = safeCloudinaryErrorMessage(error)
+      console.error(JSON.stringify({
+        event: 'admin.course_media_upload_failed',
+        assetType: 'transcript',
+        errorName: error instanceof Error ? error.name : 'UnknownError',
+        providerMessage: providerMessage || undefined,
+      }))
+      return res.status(502).json({
+        message: providerMessage ? `Cloudinary upload failed: ${providerMessage}` : 'Cloudinary could not store the SRT transcript. Retry the upload.',
+      })
+    }
+
+    const savedTranscript = {
+      transcriptUrl: uploaded.secure_url,
+      transcriptPublicId: uploaded.public_id,
+      transcriptFileName: originalName,
+      transcriptFormat: 'srt',
+      transcriptBytes: req.file.size,
+      transcriptCues,
+    }
+    const savedVideo = {
+      videoUrl: normalizedLesson.videoUrl,
+      videoPublicId: normalizedLesson.videoPublicId,
+      videoFileName: normalizedLesson.videoFileName || '',
+      videoFormat: normalizedLesson.videoFormat || '',
+      videoBytes: normalizedLesson.videoBytes || 0,
+      durationSeconds: normalizedLesson.durationSeconds || 0,
+    }
+    const existingItem = findVideoLesson(moduleItems.filter((item) => item.type === 'video-lesson'), lessonId, normalizedLesson)
+    const existingLegacyLesson = findVideoLesson(legacyLessons, lessonId, normalizedLesson)
+    const previousPublicIds = new Set([
+      existingItem?.transcriptPublicId,
+      existingLegacyLesson?.transcriptPublicId,
+    ].filter((publicId) => publicId && publicId !== uploaded.public_id))
+    const update = { $set: {} }
+    const arrayFilters = []
+
+    function setTranscriptFields(path) {
+      for (const [field, value] of Object.entries({ ...savedVideo, ...savedTranscript })) {
+        update.$set[`${path}.${field}`] = value
+      }
+    }
+
+    if (existingItem) {
+      arrayFilters.push(
+        { 'contentModule._id': moduleId },
+        { 'contentItem._id': existingItem._id },
+      )
+      setTranscriptFields('modules.$[contentModule].contentItems.$[contentItem]')
+    }
+    if (existingLegacyLesson) {
+      arrayFilters.push(
+        { 'legacyModule._id': moduleId },
+        { 'legacyLesson._id': existingLegacyLesson._id },
+      )
+      setTranscriptFields('modules.$[legacyModule].lessons.$[legacyLesson]')
+    }
+
+    let filter = { _id: courseId }
+    if (!existingItem && !existingLegacyLesson) {
+      const storedLesson = {
+        ...normalizedLesson,
+        ...savedVideo,
+        ...savedTranscript,
+        order: moduleItems.length,
+      }
+      if (module) {
+        filter = { _id: courseId, 'modules._id': moduleId }
+        update.$push = { 'modules.$[newModule].contentItems': storedLesson }
+        arrayFilters.push({ 'newModule._id': moduleId })
+      } else {
+        filter = { _id: courseId, 'modules._id': { $ne: moduleId } }
+        update.$push = {
+          modules: {
+            _id: moduleId,
+            title: moduleTitle,
+            order: (course.modules || []).length,
+            lessons: [],
+            contentItems: [storedLesson],
+          },
+        }
+      }
+    } else {
+      filter = { _id: courseId, 'modules._id': moduleId }
+    }
+
+    try {
+      const result = await Course.updateOne(filter, update, { arrayFilters, runValidators: true })
+      if (!result.matchedCount || (!result.modifiedCount && !result.nModified)) {
+        throw new Error('The transcript lesson changed before it could be saved.')
+      }
+    } catch (error) {
+      await cleanupTranscriptAsset(uploaded.public_id)
+      console.error(JSON.stringify({
+        event: 'admin.course_transcript_database_update_failed',
+        courseId,
+        moduleId,
+        lessonId,
+        errorName: error instanceof Error ? error.name : 'UnknownError',
+      }))
+      return res.status(500).json({ message: 'The SRT was uploaded but could not be saved to this lesson. Retry the upload.' })
+    }
+
+    const cleanupWarning = (await Promise.all([...previousPublicIds].map(cleanupTranscriptAsset))).some(Boolean)
+    return res.status(201).json({
+      saved: true,
+      lessonId,
+      videoFileName: savedVideo.videoFileName,
+      ...savedTranscript,
+      cleanupWarning,
+    })
+  } catch (error) {
+    if (uploadedAsset) await cleanupTranscriptAsset(uploadedAsset.public_id)
+    return next(error)
+  } finally {
+    if (req.file?.path) await unlink(req.file.path).catch(() => {})
+  }
+}
+
+router.post(
+  '/courses/:courseId/modules/:moduleId/lessons/:lessonId/media/transcript',
+  ...requireAdmin,
+  receiveCourseTranscript,
+  uploadLessonTranscript,
+)
+
+async function removeLessonTranscript(req, res, next) {
+  try {
+    const { courseId, moduleId, lessonId } = req.params
+    if (![courseId, moduleId, lessonId].every(mongoose.isValidObjectId)) {
+      return res.status(400).json({ message: 'Select a valid course, module, and video lesson.' })
+    }
+
+    const course = await Course.findById(courseId).select(transcriptCourseProjection()).lean()
+    if (!course) return res.status(404).json({ message: 'The course was not found.' })
+    const module = (course.modules || []).find((entry) => String(entry._id) === String(moduleId))
+    if (!module) return res.status(404).json({ message: 'The course module was not found.' })
+    const lessonDraft = req.body?.lesson
+    const existingItem = findVideoLesson(
+      (module.contentItems || []).filter((entry) => entry.type === 'video-lesson'),
+      lessonId,
+      lessonDraft,
+    )
+    const existingLegacyLesson = findVideoLesson(module.lessons || [], lessonId, lessonDraft)
+    if (!existingItem && !existingLegacyLesson) {
+      return res.status(404).json({ message: 'The video lesson was not found.' })
+    }
+
+    const previousPublicIds = new Set([
+      existingItem?.transcriptPublicId,
+      existingLegacyLesson?.transcriptPublicId,
+    ].filter(Boolean))
+    const update = { $set: {} }
+    const unset = {}
+    const arrayFilters = []
+    const transcriptFields = ['transcriptUrl', 'transcriptPublicId', 'transcriptFileName', 'transcriptFormat', 'transcriptBytes']
+    function clearTranscriptFields(path) {
+      update.$set[`${path}.transcriptCues`] = []
+      for (const field of transcriptFields) unset[`${path}.${field}`] = ''
+    }
+
+    if (existingItem) {
+      arrayFilters.push(
+        { 'contentModule._id': moduleId },
+        { 'contentItem._id': existingItem._id },
+      )
+      clearTranscriptFields('modules.$[contentModule].contentItems.$[contentItem]')
+    }
+    if (existingLegacyLesson) {
+      arrayFilters.push(
+        { 'legacyModule._id': moduleId },
+        { 'legacyLesson._id': existingLegacyLesson._id },
+      )
+      clearTranscriptFields('modules.$[legacyModule].lessons.$[legacyLesson]')
+    }
+
+    try {
+      const result = await Course.updateOne(
+        { _id: courseId, 'modules._id': moduleId },
+        { ...update, $unset: unset },
+        { arrayFilters, runValidators: true },
+      )
+      if (!result.matchedCount || (!result.modifiedCount && !result.nModified)) {
+        return res.status(409).json({ message: 'The transcript changed before it could be removed. Refresh and retry.' })
+      }
+    } catch (error) {
+      console.error(JSON.stringify({
+        event: 'admin.course_transcript_database_remove_failed',
+        courseId,
+        moduleId,
+        lessonId,
+        errorName: error instanceof Error ? error.name : 'UnknownError',
+      }))
+      return res.status(500).json({ message: 'The transcript could not be removed from this lesson. Retry the request.' })
+    }
+
+    const cleanupWarning = (await Promise.all([...previousPublicIds].map(cleanupTranscriptAsset))).some(Boolean)
+    return res.json({ removed: true, cleanupWarning })
+  } catch (error) {
+    return next(error)
+  }
+}
+
+router.delete(
+  '/courses/:courseId/modules/:moduleId/lessons/:lessonId/media/transcript',
+  ...requireAdmin,
+  removeLessonTranscript,
+)
+
 router.post('/course-assets/delete', ...requireAdmin, async (req, res, next) => {
   try {
     const { publicId, resourceType } = req.body ?? {}
@@ -1290,8 +1690,10 @@ router.post('/course-assets/delete', ...requireAdmin, async (req, res, next) => 
       $or: [
         { thumbnailPublicId: publicId },
         { 'modules.lessons.videoPublicId': publicId },
+        { 'modules.lessons.transcriptPublicId': publicId },
         { 'modules.lessons.resources.publicId': publicId },
         { 'modules.contentItems.videoPublicId': publicId },
+        { 'modules.contentItems.transcriptPublicId': publicId },
         { 'modules.contentItems.resources.publicId': publicId },
       ],
     })
@@ -1330,6 +1732,7 @@ router.put('/courses/:courseId', ...requireAdmin, async (req, res, next) => {
     }
     const course = await Course.findByIdAndUpdate(courseId, { $set: result.value }, { new: true, runValidators: true })
     if (!course) return res.status(404).json({ message: 'The course was not found.' })
+    if (course.status === 'published') await notifyEnrolledStudentsOfCourseUpdate(course)
     return res.json({ message: 'Course updated successfully.', course })
   } catch (error) {
     return next(error)
@@ -1348,6 +1751,8 @@ router.patch('/courses/:courseId/status', ...requireAdmin, async (req, res, next
       return res.status(400).json({ message: 'Add at least one module and one lesson before publishing.' })
     }
     const course = await Course.findByIdAndUpdate(courseId, { $set: { status } }, { new: true, runValidators: true })
+    if (!course) return res.status(404).json({ message: 'The course was not found.' })
+    if (status === 'published') await notifyEnrolledStudentsOfCourseUpdate(course)
     return res.json({ message: status === 'published' ? 'Course published.' : 'Course moved to drafts.', course })
   } catch (error) {
     return next(error)
@@ -1359,7 +1764,7 @@ router.delete('/courses/:courseId', ...requireAdmin, async (req, res, next) => {
     const { courseId } = req.params
     if (!mongoose.isValidObjectId(courseId)) return res.status(400).json({ message: 'Select a valid course.' })
     const course = await Course.findById(courseId)
-      .select('status thumbnailPublicId modules.lessons.videoPublicId modules.lessons.resources.publicId modules.lessons.resources.resourceType modules.contentItems.videoPublicId modules.contentItems.resources.publicId modules.contentItems.resources.resourceType')
+      .select('status thumbnailPublicId modules.lessons.videoPublicId modules.lessons.transcriptPublicId modules.lessons.resources.publicId modules.lessons.resources.resourceType modules.contentItems.videoPublicId modules.contentItems.transcriptPublicId modules.contentItems.resources.publicId modules.contentItems.resources.resourceType')
       .lean()
     if (!course) return res.status(404).json({ message: 'The course was not found.' })
     if (course.status !== 'draft') {
@@ -1380,6 +1785,9 @@ router.delete('/courses/:courseId', ...requireAdmin, async (req, res, next) => {
       for (const item of items) {
         if (item.videoPublicId) {
           assets.set(`video:${item.videoPublicId}`, { publicId: item.videoPublicId, resourceType: 'video' })
+        }
+        if (item.transcriptPublicId) {
+          assets.set(`raw:${item.transcriptPublicId}`, { publicId: item.transcriptPublicId, resourceType: 'raw' })
         }
         for (const resource of item.resources || []) {
           if (resource.publicId) {
@@ -1406,8 +1814,10 @@ router.delete('/courses/:courseId', ...requireAdmin, async (req, res, next) => {
           $or: [
             { thumbnailPublicId: asset.publicId },
             { 'modules.lessons.videoPublicId': asset.publicId },
+            { 'modules.lessons.transcriptPublicId': asset.publicId },
             { 'modules.lessons.resources.publicId': asset.publicId },
             { 'modules.contentItems.videoPublicId': asset.publicId },
+            { 'modules.contentItems.transcriptPublicId': asset.publicId },
             { 'modules.contentItems.resources.publicId': asset.publicId },
           ],
         })

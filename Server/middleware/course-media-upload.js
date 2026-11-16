@@ -21,6 +21,10 @@ const resourceTypes = new Map([
   ['.jpeg', new Set(['image/jpeg'])],
   ['.webp', new Set(['image/webp'])],
 ])
+const transcriptTypes = new Map([
+  ['.srt', new Set(['application/x-subrip', 'text/plain'])],
+])
+const maxCourseTranscriptBytes = 2 * 1024 * 1024
 
 const storage = multer.diskStorage({
   destination(_req, _file, callback) {
@@ -31,12 +35,12 @@ const storage = multer.diskStorage({
   },
 })
 
-function fileFilter(allowedTypes, { allowUnknownMime = false } = {}) {
+function fileFilter(allowedTypes, { allowUnknownMime = false, allowAnyMime = false } = {}) {
   return (_req, file, callback) => {
     const extension = path.extname(file.originalname || '').toLowerCase()
     const acceptedMimes = allowedTypes.get(extension)
     const mimeIsUnknown = !file.mimetype || file.mimetype === 'application/octet-stream'
-    if (!acceptedMimes || (!acceptedMimes.has(file.mimetype) && !(allowUnknownMime && mimeIsUnknown))) {
+    if (!acceptedMimes || (!acceptedMimes.has(file.mimetype) && !allowAnyMime && !(allowUnknownMime && mimeIsUnknown))) {
       const error = new Error('Choose a supported file whose extension matches its file type.')
       error.statusCode = 415
       callback(error)
@@ -81,4 +85,9 @@ export const receiveCourseResource = handleUploadError(
   createUpload(resourceTypes, config.courseResourceMaxBytes),
   config.courseResourceMaxBytes,
   'resource',
+)
+export const receiveCourseTranscript = handleUploadError(
+  createUpload(transcriptTypes, maxCourseTranscriptBytes, { allowAnyMime: true }),
+  maxCourseTranscriptBytes,
+  'transcript',
 )

@@ -36,6 +36,7 @@ import {
   getRequiredCertificateActivities,
   issueCertificateIfEligible,
 } from '../utils/certificates.js'
+import { createStudentNotification } from '../utils/student-notifications.js'
 
 const router = Router()
 const requireStudent = [authenticate, requireRoles('student')]
@@ -148,6 +149,11 @@ function getLessonPlaybackPositions(enrollment) {
   const positions = enrollment?.lessonPlaybackPositions
   if (positions instanceof Map) return Object.fromEntries(positions)
   return positions && typeof positions === 'object' ? { ...positions } : {}
+}
+
+function getMapValue(values, key) {
+  if (values instanceof Map) return values.get(key)
+  return values && typeof values === 'object' ? values[key] : undefined
 }
 
 function getCertificateCourseProgress(activities, pendingRequirements = [], earned = false) {
@@ -275,16 +281,33 @@ function hideQuizAnswers(course) {
         },
       } : {}),
       ...(contentItems ? {
-        contentItems: contentItems.map(({ quiz: itemQuiz, attentionCheck, ...item }) => ({
-          ...item,
-          ...(attentionCheck ? { attentionCheck: sanitizeStudentAttentionCheck(attentionCheck) } : {}),
-          ...(itemQuiz ? {
-            quiz: {
-              ...itemQuiz,
-              questions: itemQuiz.questions?.map(({ correctOptionIndices, ...question }) => question),
-            },
-          } : {}),
-        })),
+        contentItems: contentItems.map(({ quiz: itemQuiz, attentionCheck, ...item }) => {
+          let legacyTranscriptCues
+          if (item.type === 'video-lesson') {
+            const matchingLegacyLesson = item._id
+              ? lessons?.find((lesson) => String(lesson._id) === String(item._id))
+              : null
+            const titleAndVideoMatches = !matchingLegacyLesson && item.videoUrl
+              ? (lessons || []).filter((lesson) => lesson.title === item.title && lesson.videoUrl === item.videoUrl)
+              : []
+            const transcriptLesson = matchingLegacyLesson
+              || (titleAndVideoMatches.length === 1 ? titleAndVideoMatches[0] : null)
+            legacyTranscriptCues = transcriptLesson?.transcriptCues
+          }
+          return {
+            ...item,
+            ...(item.type === 'video-lesson' && !item.transcriptCues?.length && legacyTranscriptCues?.length
+              ? { transcriptCues: legacyTranscriptCues }
+              : {}),
+            ...(attentionCheck ? { attentionCheck: sanitizeStudentAttentionCheck(attentionCheck) } : {}),
+            ...(itemQuiz ? {
+              quiz: {
+                ...itemQuiz,
+                questions: itemQuiz.questions?.map(({ correctOptionIndices, ...question }) => question),
+              },
+            } : {}),
+          }
+        }),
       } : {}),
     })),
   }
@@ -941,7 +964,7 @@ router.get('/courses/:courseId/learning-content', ...requireStudent, async (req,
 
     const [assignmentSubmissions, quizAttempts] = await Promise.all([
       AssignmentSubmission.find({ userId: req.auth.id, enrollmentId: enrollment._id })
-        .select('_id assignmentId fileName contentType fileSize submittedAt reviewStatus')
+        .select('_id assignmentId fileName contentType fileSize submittedAt reviewStatus reviewedAt reviewComment marksObtained evaluationStatus correctness feedback evaluatedAt')
         .sort({ submittedAt: -1, _id: -1 })
         .lean(),
       QuizAttempt.find({ userId: req.auth.id, enrollmentId: enrollment._id })
@@ -1505,6 +1528,22 @@ router.post('/courses/:courseId/quizzes/:quizId/attempts/:attemptId/submit', ...
     if (!updatedState) throw new Error('Quiz attempt state could not be updated after submission.')
     const quizStatus = getQuizAttemptStatus(updatedState, submittedAt)
 
+    await createStudentNotification({
+      recipientId: req.auth.id,
+      eventKey: `quiz-result:${req.auth.id}:${submittedAttempt._id}`,
+      type: 'quiz_result',
+      title: `${quiz?.title || 'Quiz'} result available`,
+      message: `${course.title || 'Your course'} · Score: ${scorePercentage}% · ${passed ? 'Passed' : 'Not passed'}.`,
+      link: `/student/course/${encodeURIComponent(courseId)}/learn?activity=${encodeURIComponent(quizId)}&activityType=quiz`,
+      metadata: {
+        courseId,
+        quizId,
+        attemptId: String(submittedAttempt._id),
+        scorePercentage,
+        passed,
+      },
+    })
+
     if (submittedAttempt.passed) {
       await issueCertificateIfEligible({
         userId: req.auth.id,
@@ -1585,6 +1624,16 @@ router.post(
         contentType: req.file.mimetype,
         fileSize: req.file.size,
         fileData: req.file.buffer,
+      })
+      const assignment = findAssignment(course, assignmentId)
+      await createStudentNotification({
+        recipientId: req.auth.id,
+        eventKey: `assignment-submitted:${req.auth.id}:${submission._id}`,
+        type: 'assignment_submitted',
+        title: 'Assignment submitted',
+        message: `${assignment.title || 'Your assignment'} is awaiting review.`,
+        link: '/student/assignments',
+        metadata: { courseId, assignmentId, submissionId: String(submission._id) },
       })
       return res.status(201).json({
         submission: {
@@ -1814,9 +1863,30 @@ router.patch('/enrollments/:enrollmentId/progress', ...requireStudent, async (re
         ...update.$set,
         [`lessonPlaybackPositions.${lessonId}`]: positionSeconds,
       }
+      const previousPositionValue = getMapValue(enrollment.lessonPlaybackPositions, lessonId)
+      const previousPositionQuery = previousPositionValue === undefined
+        ? { $exists: false }
+        : previousPositionValue
+      enrollmentQuery[`lessonPlaybackPositions.${lessonId}`] = previousPositionQuery
     }
     const result = await Enrollment.updateOne(enrollmentQuery, update)
-    if (!result.matchedCount) return res.status(404).json({ message: 'The enrollment was not found.' })
+    if (!result.matchedCount) {
+      if (!hasPositionSeconds) return res.status(404).json({ message: 'The enrollment was not found.' })
+      const latestEnrollment = await Enrollment.findOne({
+        _id: enrollmentId,
+        userId: req.auth.id,
+        ...scope,
+        status: { $ne: 'cancelled' },
+      })
+        .select('completedLessonIds startedLessonIds lessonPlaybackPositions')
+        .lean()
+      if (!latestEnrollment) return res.status(404).json({ message: 'The enrollment was not found.' })
+      return res.json({
+        completedLessonIds: (latestEnrollment.completedLessonIds || []).map(String),
+        startedLessonIds: (latestEnrollment.startedLessonIds || []).map(String),
+        lessonPlaybackPositions: getLessonPlaybackPositions(latestEnrollment),
+      })
+    }
 
     const completedLessonIds = new Set((enrollment.completedLessonIds || []).map(String))
     const startedLessonIds = new Set((enrollment.startedLessonIds || []).map(String))
@@ -1859,7 +1929,7 @@ router.post('/enrollments', ...requireStudent, async (req, res, next) => {
       .lean()
     if (!student) return res.status(404).json({ message: 'The student account was not found.' })
 
-    const course = await Course.findOne({ _id: courseId, status: 'published' }).select('_id')
+    const course = await Course.findOne({ _id: courseId, status: 'published' }).select('_id title')
     if (!course) return res.status(404).json({ message: 'The published course was not found.' })
     const existing = await Enrollment.findOne({
       userId: student._id,
@@ -1874,6 +1944,15 @@ router.post('/enrollments', ...requireStudent, async (req, res, next) => {
       assignedBy: student._id,
       status: 'active',
     }])
+    await createStudentNotification({
+      recipientId: student._id,
+      eventKey: `course-assigned:${student._id}:${enrollment._id}`,
+      type: 'course_assigned',
+      title: 'New course added',
+      message: `You are now enrolled in ${course.title || 'a course'}.`,
+      link: `/student/course/${encodeURIComponent(String(course._id))}/learn`,
+      metadata: { courseId: String(course._id), enrollmentId: String(enrollment._id) },
+    })
     return res.status(201).json({ message: 'You are now enrolled in this course.', enrollment })
   } catch (error) {
     return next(error)
@@ -1942,7 +2021,7 @@ router.post('/college/enrollments', ...requireCollegeAdmin, async (req, res, nex
         studentType: 'college',
         collegeId,
       }).select('_id'),
-      Course.findOne({ _id: courseId, status: 'published' }).select('_id'),
+      Course.findOne({ _id: courseId, status: 'published' }).select('_id title'),
     ])
     if (!student) {
       return res.status(404).json({ message: 'The student was not found in your college.' })
@@ -1964,6 +2043,15 @@ router.post('/college/enrollments', ...requireCollegeAdmin, async (req, res, nex
       assignedBy: req.auth.id,
       status: 'active',
     }])
+    await createStudentNotification({
+      recipientId: student._id,
+      eventKey: `course-assigned:${student._id}:${enrollment._id}`,
+      type: 'course_assigned',
+      title: 'New course assigned',
+      message: `${course.title || 'A course'} has been added to your courses.`,
+      link: `/student/course/${encodeURIComponent(String(course._id))}/learn`,
+      metadata: { courseId: String(course._id), enrollmentId: String(enrollment._id) },
+    })
     return res.status(201).json({ message: 'Course assigned to the student.', enrollment })
   } catch (error) {
     return next(error)

@@ -100,6 +100,9 @@ globalThis.fetch = async (url, options) => {
   }
   return nativeFetch(url, options)
 }
+const restoreNotificationUpsert = stub(Notification, 'findOneAndUpdate', (_filter, update) => (
+  queryResult({ _id: '68a000000000000000000099', ...update.$setOnInsert })
+))
 
 test('stored account roles match canonical collections', () => {
   assert.equal(matchesStoredAccountRole('admin', 'main_admin'), true)
@@ -113,6 +116,7 @@ test('notification feed is authenticated and scoped to the current account role 
   const adminId = '68a000000000000000000010'
   const studentId = '68a000000000000000000020'
   const filters = []
+  const countFilters = []
   const restores = [
     stub(Admin, 'findById', async (id) => ({
       _id: id, role: 'main_admin', status: 'active', isActive: true,
@@ -120,6 +124,12 @@ test('notification feed is authenticated and scoped to the current account role 
     stub(Student, 'findById', async (id) => ({
       _id: id, role: 'student', studentType: 'independent', status: 'active',
       approvalStatus: 'approved', isActive: true,
+    })),
+    stub(Enrollment, 'find', () => ({
+      populate() { return this },
+      sort() { return this },
+      limit() { return this },
+      lean: async () => [],
     })),
     stub(Notification, 'find', (filter) => {
       filters.push(filter)
@@ -129,6 +139,10 @@ test('notification feed is authenticated and scoped to the current account role 
         lean: async () => [],
       }
     }),
+    stub(Notification, 'countDocuments', async (filter) => {
+      countFilters.push(filter)
+      return filter.recipientRole === 'student' ? 2 : 1
+    }),
   ]
   try {
     const adminResponse = await request('/notifications/me', {
@@ -136,16 +150,178 @@ test('notification feed is authenticated and scoped to the current account role 
       subject: adminId,
     })
     assert.equal(adminResponse.status, 200)
+    assert.equal((await adminResponse.json()).unreadCount, 1)
 
     const studentResponse = await request('/notifications/me', {
       role: 'student',
       subject: studentId,
     })
     assert.equal(studentResponse.status, 200)
+    assert.equal((await studentResponse.json()).unreadCount, 2)
     assert.deepEqual(filters, [
-      { recipientRole: 'main_admin' },
-      { recipientRole: 'student', recipientId: studentId },
+      { recipientRole: 'main_admin', deletedAt: null },
+      { recipientRole: 'student', recipientId: studentId, deletedAt: null },
     ])
+    assert.deepEqual(countFilters, [
+      { recipientRole: 'main_admin', deletedAt: null, readAt: null },
+      { recipientRole: 'student', recipientId: studentId, deletedAt: null, readAt: null },
+    ])
+  } finally {
+    restores.reverse().forEach((restore) => restore())
+  }
+})
+
+test('notification feed creates one data-backed daily reminder while enrolled course work is incomplete', async () => {
+  const studentId = '68a000000000000000000020'
+  const courseId = '68a000000000000000000040'
+  const enrollmentId = '68a000000000000000000041'
+  const completedLessonId = '68a000000000000000000042'
+  const pendingLessonId = '68a000000000000000000043'
+  const quizId = '68a000000000000000000044'
+  const assignmentId = '68a000000000000000000045'
+  const enrollment = {
+    _id: enrollmentId,
+    userId: studentId,
+    status: 'active',
+    completedLessonIds: [completedLessonId],
+    courseId: {
+      _id: courseId,
+      title: 'Web Development',
+      status: 'published',
+      modules: [{
+        lessons: [
+          { _id: completedLessonId, title: 'Completed lesson' },
+          { _id: pendingLessonId, title: 'Pending lesson' },
+        ],
+        quiz: { _id: quizId, title: 'Pending quiz', questions: [{ prompt: 'Question' }] },
+      }],
+      assignments: [{
+        _id: assignmentId,
+        title: 'Final project',
+        dueDate: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
+      }],
+    },
+  }
+  let courseCompleted = false
+  const createdEvents = []
+  const restores = [
+    stub(Student, 'findById', async (id) => ({
+      _id: id, role: 'student', studentType: 'independent', status: 'active',
+      approvalStatus: 'approved', isActive: true,
+    })),
+    stub(Enrollment, 'find', (filter) => {
+      assert.deepEqual(filter, {
+        userId: studentId,
+        collegeId: { $exists: false },
+        status: 'active',
+      })
+      return {
+        populate() { return this },
+        sort() { return this },
+        limit() { return this },
+        lean: async () => [enrollment],
+      }
+    }),
+    stub(QuizAttempt, 'find', (filter) => {
+      assert.equal(String(filter.userId), studentId)
+      return {
+        select() { return this },
+        lean: async () => courseCompleted ? [{ enrollmentId, quizId }] : [],
+      }
+    }),
+    stub(AssignmentSubmission, 'find', (filter) => {
+      assert.equal(String(filter.userId), studentId)
+      return {
+        select() { return this },
+        sort() { return this },
+        lean: async () => courseCompleted ? [{ enrollmentId, assignmentId, reviewStatus: 'approved' }] : [],
+      }
+    }),
+    stub(Notification, 'findOneAndUpdate', (filter, update) => {
+      const event = update.$setOnInsert
+      assert.deepEqual(filter, { eventKey: event.eventKey })
+      createdEvents.push(event)
+      return queryResult({ _id: '68a000000000000000000046', ...event })
+    }),
+    stub(Notification, 'find', () => ({
+      sort() { return this },
+      limit() { return this },
+      lean: async () => [],
+    })),
+    stub(Notification, 'countDocuments', async () => 0),
+  ]
+  try {
+    const firstResponse = await request('/notifications/me', { role: 'student', subject: studentId })
+    const secondResponse = await request('/notifications/me', { role: 'student', subject: studentId })
+    assert.equal(firstResponse.status, 200)
+    assert.equal(secondResponse.status, 200)
+    assert.equal(createdEvents.length, 2)
+    assert.equal(createdEvents[0].type, 'course_incomplete')
+    assert.match(createdEvents[0].title, /Web Development/)
+    assert.match(createdEvents[0].message, /1 lesson/)
+    assert.match(createdEvents[0].message, /1 quiz/)
+    assert.match(createdEvents[0].message, /1 assignment to submit/)
+    assert.match(createdEvents[0].message, /Final project/)
+    assert.equal(createdEvents[0].eventKey, createdEvents[1].eventKey)
+
+    courseCompleted = true
+    enrollment.completedLessonIds = [completedLessonId, pendingLessonId]
+    await request('/notifications/me', { role: 'student', subject: studentId })
+    assert.equal(createdEvents.length, 2)
+  } finally {
+    restores.reverse().forEach((restore) => restore())
+  }
+})
+
+test('student notification actions only update notifications owned by the authenticated student', async () => {
+  const studentId = '68a000000000000000000020'
+  const notificationId = '68a000000000000000000030'
+  const updateFilters = []
+  let markAllFilter
+  const restores = [
+    stub(Student, 'findById', async (id) => ({
+      _id: id, role: 'student', studentType: 'independent', status: 'active',
+      approvalStatus: 'approved', isActive: true,
+    })),
+    stub(Notification, 'findOneAndUpdate', (filter) => {
+      updateFilters.push(filter)
+      return queryResult(null)
+    }),
+    stub(Notification, 'updateMany', async (filter) => {
+      markAllFilter = filter
+      return { modifiedCount: 1 }
+    }),
+  ]
+  try {
+    const readResponse = await request(`/notifications/${notificationId}/read`, {
+      role: 'student',
+      subject: studentId,
+      method: 'PATCH',
+    })
+    const deleteResponse = await request(`/notifications/${notificationId}`, {
+      role: 'student',
+      subject: studentId,
+      method: 'DELETE',
+    })
+    const markAllResponse = await request('/notifications/read-all', {
+      role: 'student',
+      subject: studentId,
+      method: 'PATCH',
+    })
+
+    assert.equal(readResponse.status, 404)
+    assert.equal(deleteResponse.status, 404)
+    assert.equal(markAllResponse.status, 200)
+    assert.deepEqual(updateFilters, [
+      { _id: notificationId, recipientRole: 'student', recipientId: studentId, deletedAt: null },
+      { _id: notificationId, recipientRole: 'student', recipientId: studentId, deletedAt: null },
+    ])
+    assert.deepEqual(markAllFilter, {
+      recipientRole: 'student',
+      recipientId: studentId,
+      deletedAt: null,
+      readAt: null,
+    })
   } finally {
     restores.reverse().forEach((restore) => restore())
   }
@@ -194,6 +370,7 @@ test('main admins can update ticket priority and preserve its change history', a
 
 after(async () => {
   globalThis.fetch = nativeFetch
+  restoreNotificationUpsert()
   await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
 })
 
@@ -243,9 +420,10 @@ async function request(path, { role, subject, accountCollection, token, body, me
   })
 }
 
-async function mediaRequest(path, { role = 'main_admin', subject = '68a000000000000000000010', fileName, mimeType, contents } = {}) {
+async function mediaRequest(path, { role = 'main_admin', subject = '68a000000000000000000010', fileName, mimeType, contents, fields = {} } = {}) {
   const form = new FormData()
   form.append('file', new Blob([contents], { type: mimeType }), fileName)
+  for (const [name, value] of Object.entries(fields)) form.append(name, value)
   return fetch(`${baseUrl}${path}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${tokenFor(role, subject)}` },
@@ -629,6 +807,46 @@ test('attention check validation requires the exact number of selected playback 
   assert.equal(valid.error, undefined)
   assert.equal(valid.value.modules[0].contentItems[0].attentionCheck.questionsDuringVideo, 2)
   assert.deepEqual(valid.value.modules[0].contentItems[0].attentionCheck.questions.map((question) => question.selectedForPlayback), [true, true])
+})
+
+test('course validation preserves timestamped transcript cues on video lessons only', () => {
+  const transcriptCues = [
+    { startTimeMs: 2000, endTimeMs: 3000, text: 'Second sentence.' },
+    { startTimeMs: 0, endTimeMs: 1900, text: 'First sentence.' },
+  ]
+  const result = normalizeCourseDetails({
+    title: 'Transcript course',
+    modules: [{
+      title: 'Module',
+      lessons: [{ title: 'Legacy video', transcriptCues }],
+      contentItems: [
+        { type: 'video-lesson', title: 'Video', transcriptCues },
+        { type: 'assignment', title: 'Assignment', transcriptCues },
+      ],
+    }],
+  })
+
+  assert.equal(result.error, undefined)
+  const cues = [
+    { startTimeMs: 0, endTimeMs: 1900, text: 'First sentence.' },
+    { startTimeMs: 2000, endTimeMs: 3000, text: 'Second sentence.' },
+  ]
+  assert.deepEqual(result.value.modules[0].lessons[0].transcriptCues, cues)
+  assert.deepEqual(result.value.modules[0].contentItems[0].transcriptCues, cues)
+  assert.equal('transcriptCues' in result.value.modules[0].contentItems[1], false)
+
+  const invalid = normalizeCourseDetails({
+    title: 'Invalid transcript course',
+    modules: [{
+      title: 'Module',
+      contentItems: [{
+        type: 'video-lesson',
+        title: 'Video',
+        transcriptCues: [{ startTimeMs: 1000, endTimeMs: 500, text: 'Invalid cue.' }],
+      }],
+    }],
+  })
+  assert.match(invalid.error, /transcript cue 1/i)
 })
 
 test('student username availability excludes the authenticated student and checks every account collection', async () => {
@@ -2104,6 +2322,7 @@ test('admin course create stores nested modules and lessons in courses', async (
             videoFormat: 'mp4',
             videoBytes: 1200,
             durationSeconds: 190,
+            transcriptCues: [{ startTimeMs: 0, endTimeMs: 1200, text: 'Legacy transcript sentence.' }],
             attentionCheck: {
               enabled: true,
               questionsDuringVideo: 1,
@@ -2128,6 +2347,7 @@ test('admin course create stores nested modules and lessons in courses', async (
               title: 'Ordered video',
               videoUrl: 'https://example.com/video.mp4',
               content: 'Lesson text',
+              transcriptCues: [{ startTimeMs: 1200, endTimeMs: 2400, text: 'Ordered transcript sentence.' }],
               attentionCheck: {
                 enabled: true,
                 minIntervalSeconds: 45,
@@ -2157,6 +2377,9 @@ test('admin course create stores nested modules and lessons in courses', async (
     assert.equal(savedDocument.modules[0].lessons[0].videoPublicId, 'aihustle/courses/course/modules/module/lesson')
     assert.equal(savedDocument.modules[0].lessons[0].videoBytes, 1200)
     assert.equal(savedDocument.modules[0].lessons[0].durationSeconds, 190)
+    assert.deepEqual(savedDocument.modules[0].lessons[0].transcriptCues, [
+      { startTimeMs: 0, endTimeMs: 1200, text: 'Legacy transcript sentence.' },
+    ])
     assert.equal(savedDocument.modules[0].lessons[0].attentionCheck.enabled, true)
     assert.equal(savedDocument.modules[0].lessons[0].attentionCheck.questionsDuringVideo, 1)
     assert.equal(savedDocument.modules[0].lessons[0].attentionCheck.minIntervalSeconds, 30)
@@ -2167,6 +2390,9 @@ test('admin course create stores nested modules and lessons in courses', async (
     assert.deepEqual(savedDocument.modules[0].quiz.questions[0].correctOptionIndices, [0, 1])
     assert.equal(savedDocument.modules[0].quiz.questions[0].marks, 2)
     assert.deepEqual(savedDocument.modules[0].contentItems.map((item) => item.type), ['video-lesson', 'quiz', 'assignment', 'note'])
+    assert.deepEqual(savedDocument.modules[0].contentItems[0].transcriptCues, [
+      { startTimeMs: 1200, endTimeMs: 2400, text: 'Ordered transcript sentence.' },
+    ])
     assert.deepEqual(savedDocument.modules[0].contentItems[1].quiz.questions[0].correctOptionIndices, [0])
     assert.equal(savedDocument.modules[0].contentItems[0].attentionCheck.questionsDuringVideo, 1)
     assert.equal(savedDocument.modules[0].contentItems[0].attentionCheck.questions[0].selectedForPlayback, true)
@@ -2249,6 +2475,10 @@ test('admin course listing uses a non-conflicting projection for lessons and qui
     assert.equal(projection.split(/\s+/).includes('quizzes'), false)
     assert.ok(projection.includes('modules.lessons.title'))
     assert.ok(projection.includes('modules.lessons.videoUrl'))
+    assert.ok(projection.includes('modules.lessons.videoFileName'))
+    assert.ok(projection.includes('modules.lessons.transcriptUrl'))
+    assert.ok(projection.includes('modules.lessons.transcriptFileName'))
+    assert.ok(projection.includes('modules.lessons.transcriptCues'))
     assert.ok(projection.includes('modules.lessons.resources'))
     assert.equal(projection.split(/\s+/).includes('modules.lessons'), false)
     assert.ok(projection.includes('+modules.lessons.attentionCheck.questions.correctOptionIndices'))
@@ -2257,6 +2487,10 @@ test('admin course listing uses a non-conflicting projection for lessons and qui
     assert.ok(projection.includes('+modules.quiz.questions.correctOptionIndices'))
     assert.equal(projection.split(/\s+/).includes('modules.contentItems'), false)
     assert.ok(projection.includes('modules.contentItems.title'))
+    assert.ok(projection.includes('modules.contentItems.videoFileName'))
+    assert.ok(projection.includes('modules.contentItems.transcriptUrl'))
+    assert.ok(projection.includes('modules.contentItems.transcriptFileName'))
+    assert.ok(projection.includes('modules.contentItems.transcriptCues'))
     assert.ok(projection.includes('modules.contentItems.attentionCheck.questions.prompt'))
     assert.ok(projection.includes('+modules.contentItems.attentionCheck.questions.correctOptionIndices'))
     assert.ok(projection.includes('modules.contentItems.attentionCheck.questionsDuringVideo'))
@@ -2921,6 +3155,322 @@ test('course media uploads reject student accounts before accepting files', asyn
     assert.equal(response.status, 403)
   } finally {
     restoreStudent()
+  }
+})
+
+test('SRT uploads persist transcript metadata and cues on the existing lesson before replacing old assets', async () => {
+  const courseId = '68a000000000000000000020'
+  const moduleId = '68a000000000000000000021'
+  const lessonId = '68a000000000000000000022'
+  const oldPublicId = 'aihustle/courses/old-transcript'
+  let update
+  let uploadOptions
+  const deletedPublicIds = []
+  const course = {
+    _id: courseId,
+    title: 'Python Basics',
+    category: 'Python',
+    difficulty: 'beginner',
+    modules: [{
+      _id: moduleId,
+      title: 'Module 1',
+      lessons: [],
+      contentItems: [{
+        _id: lessonId,
+        type: 'video-lesson',
+        title: 'Variables',
+        videoUrl: 'https://res.cloudinary.com/test/video/upload/lesson.mp4',
+        videoPublicId: `aihustle/courses/${courseId}/modules/${moduleId}/lesson`,
+        videoFileName: 'lesson.mp4',
+        transcriptUrl: 'https://res.cloudinary.com/test/raw/upload/old.srt',
+        transcriptPublicId: oldPublicId,
+      }],
+    }],
+  }
+  const restores = [
+    stub(Admin, 'findById', () => queryResult({
+      _id: '68a000000000000000000010',
+      role: 'main_admin',
+      status: 'active',
+      isActive: true,
+    })),
+    stub(Course, 'findById', () => ({ select() { return this }, lean: async () => course })),
+    stub(Course, 'updateOne', async (...args) => { update = args; return { matchedCount: 1, modifiedCount: 1 } }),
+    stub(Course, 'exists', async () => false),
+    stub(cloudinary.uploader, 'upload', async (_filePath, options) => {
+      uploadOptions = options
+      return {
+        secure_url: 'https://res.cloudinary.com/test/raw/upload/new.srt',
+        public_id: `${options.folder}/${options.public_id}`,
+        bytes: 48,
+        format: 'srt',
+      }
+    }),
+    stub(cloudinary.uploader, 'destroy', async (publicId) => {
+      deletedPublicIds.push(publicId)
+      return { result: 'ok' }
+    }),
+  ]
+  try {
+    const response = await mediaRequest(`/admin/courses/${courseId}/modules/${moduleId}/lessons/${lessonId}/media/transcript`, {
+      fileName: 'lesson.srt',
+      mimeType: 'application/vnd.srt',
+      contents: Buffer.from('subtitle-1\n00:00:00,000 --> 00:00:01,000 X1:0\nHello world.\n'),
+      fields: {
+        lesson: JSON.stringify({
+          _id: lessonId,
+          type: 'video-lesson',
+          title: 'Variables',
+          videoUrl: course.modules[0].contentItems[0].videoUrl,
+          videoPublicId: course.modules[0].contentItems[0].videoPublicId,
+          videoFileName: 'lesson.mp4',
+        }),
+        moduleTitle: 'Module 1',
+      },
+    })
+    assert.equal(response.status, 201)
+    const result = await response.json()
+    assert.equal(result.saved, true)
+    assert.equal(result.transcriptFileName, 'lesson.srt')
+    assert.equal(result.transcriptCues.length, 1)
+    assert.equal(result.transcriptCues[0].text, 'Hello world.')
+    assert.equal(uploadOptions.resource_type, 'raw')
+    assert.equal(update[1].$push, undefined)
+    assert.equal(update[1].$set[`modules.$[contentModule].contentItems.$[contentItem].transcriptPublicId`], result.transcriptPublicId)
+    assert.deepEqual(deletedPublicIds, [oldPublicId])
+  } finally {
+    for (const restore of restores.reverse()) restore()
+  }
+})
+
+test('invalid SRT content is rejected before upload and MongoDB update', async () => {
+  const courseId = '68a000000000000000000020'
+  const moduleId = '68a000000000000000000021'
+  const lessonId = '68a000000000000000000022'
+  let uploadCalled = false
+  const restores = [
+    stub(Admin, 'findById', () => queryResult({
+      _id: '68a000000000000000000010',
+      role: 'main_admin',
+      status: 'active',
+      isActive: true,
+    })),
+    stub(Course, 'findById', () => ({
+      select() {
+        return this
+      },
+      lean: async () => ({
+        title: 'Python Basics',
+        category: 'Python',
+        difficulty: 'beginner',
+        modules: [{ _id: moduleId, title: 'Module 1', lessons: [], contentItems: [] }],
+      }),
+    })),
+    stub(cloudinary.uploader, 'upload', async () => { uploadCalled = true; return {} }),
+  ]
+  try {
+    const response = await mediaRequest(`/admin/courses/${courseId}/modules/${moduleId}/lessons/${lessonId}/media/transcript`, {
+      fileName: 'bad.srt',
+      mimeType: 'application/x-subrip',
+      contents: Buffer.from('not a valid transcript'),
+      fields: {
+        lesson: JSON.stringify({
+          _id: lessonId,
+          type: 'video-lesson',
+          title: 'Variables',
+          videoUrl: 'https://res.cloudinary.com/test/video/upload/lesson.mp4',
+          videoPublicId: 'aihustle/courses/lesson',
+        }),
+        moduleTitle: 'Module 1',
+      },
+    })
+    assert.equal(response.status, 400)
+    assert.match((await response.json()).message, /invalid timestamp/i)
+    assert.equal(uploadCalled, false)
+  } finally {
+    for (const restore of restores.reverse()) restore()
+  }
+})
+
+test('SRT uploads create a new unsaved lesson under the requested module', async () => {
+  const courseId = '68a000000000000000000020'
+  const moduleId = '68a000000000000000000021'
+  const lessonId = '68a000000000000000000022'
+  let update
+  const restores = [
+    stub(Admin, 'findById', () => queryResult({
+      _id: '68a000000000000000000010',
+      role: 'main_admin',
+      status: 'active',
+      isActive: true,
+    })),
+    stub(Course, 'findById', () => ({
+      select() {
+        return this
+      },
+      lean: async () => ({
+        title: 'Python Basics',
+        category: 'Python',
+        difficulty: 'beginner',
+        modules: [],
+      }),
+    })),
+    stub(Course, 'updateOne', async (...args) => { update = args; return { matchedCount: 1, modifiedCount: 1 } }),
+    stub(cloudinary.uploader, 'upload', async (_filePath, options) => ({
+      secure_url: 'https://res.cloudinary.com/test/raw/upload/lesson.srt',
+      public_id: `${options.folder}/${options.public_id}`,
+      bytes: 48,
+      format: 'srt',
+    })),
+  ]
+  try {
+    const response = await mediaRequest(`/admin/courses/${courseId}/modules/${moduleId}/lessons/${lessonId}/media/transcript`, {
+      fileName: 'lesson.srt',
+      mimeType: 'application/x-subrip',
+      contents: Buffer.from('1\n00:00:00,000 --> 00:00:01,000\nHello world.\n'),
+      fields: {
+        lesson: JSON.stringify({
+          _id: lessonId,
+          type: 'video-lesson',
+          title: 'New lesson',
+          videoUrl: 'https://res.cloudinary.com/test/video/upload/lesson.mp4',
+          videoPublicId: `aihustle/courses/${courseId}/modules/${moduleId}/lesson`,
+          videoFileName: 'lesson.mp4',
+          attentionCheck: {
+            enabled: false,
+            questionsDuringVideo: 1,
+            minIntervalSeconds: 120,
+            maxIntervalSeconds: 300,
+            questions: [],
+          },
+        }),
+        moduleTitle: 'New module',
+      },
+    })
+    assert.equal(response.status, 201)
+    assert.equal(update[1].$push.modules._id, moduleId)
+    assert.equal(update[1].$push.modules.contentItems.length, 1)
+    assert.equal(update[1].$push.modules.contentItems[0]._id, lessonId)
+    assert.equal(update[1].$push.modules.contentItems[0].transcriptCues[0].text, 'Hello world.')
+  } finally {
+    for (const restore of restores.reverse()) restore()
+  }
+})
+
+test('SRT Cloudinary assets are removed when the lesson update fails', async () => {
+  const courseId = '68a000000000000000000020'
+  const moduleId = '68a000000000000000000021'
+  const lessonId = '68a000000000000000000022'
+  let uploadedPublicId
+  let removedPublicId
+  const restores = [
+    stub(Admin, 'findById', () => queryResult({
+      _id: '68a000000000000000000010',
+      role: 'main_admin',
+      status: 'active',
+      isActive: true,
+    })),
+    stub(Course, 'findById', () => ({
+      select() {
+        return this
+      },
+      lean: async () => ({
+        title: 'Python Basics',
+        category: 'Python',
+        difficulty: 'beginner',
+        modules: [{ _id: moduleId, title: 'Module 1', lessons: [], contentItems: [] }],
+      }),
+    })),
+    stub(Course, 'updateOne', async () => { throw new Error('database unavailable') }),
+    stub(Course, 'exists', async () => false),
+    stub(cloudinary.uploader, 'upload', async (_filePath, options) => {
+      uploadedPublicId = `${options.folder}/${options.public_id}`
+      return {
+        secure_url: 'https://res.cloudinary.com/test/raw/upload/lesson.srt',
+        public_id: uploadedPublicId,
+        bytes: 48,
+        format: 'srt',
+      }
+    }),
+    stub(cloudinary.uploader, 'destroy', async (publicId) => {
+      removedPublicId = publicId
+      return { result: 'ok' }
+    }),
+  ]
+  try {
+    const response = await mediaRequest(`/admin/courses/${courseId}/modules/${moduleId}/lessons/${lessonId}/media/transcript`, {
+      fileName: 'lesson.srt',
+      mimeType: 'application/x-subrip',
+      contents: Buffer.from('1\n00:00:00,000 --> 00:00:01,000\nHello world.\n'),
+      fields: {
+        lesson: JSON.stringify({
+          _id: lessonId,
+          type: 'video-lesson',
+          title: 'Lesson',
+          videoUrl: 'https://res.cloudinary.com/test/video/upload/lesson.mp4',
+          videoPublicId: `aihustle/courses/${courseId}/modules/${moduleId}/lesson`,
+        }),
+        moduleTitle: 'Module 1',
+      },
+    })
+    assert.equal(response.status, 500)
+    assert.match((await response.json()).message, /could not be saved/i)
+    assert.equal(removedPublicId, uploadedPublicId)
+  } finally {
+    for (const restore of restores.reverse()) restore()
+  }
+})
+
+test('removing a lesson transcript clears its persisted cues and deletes the unreferenced SRT asset', async () => {
+  const courseId = '68a000000000000000000020'
+  const moduleId = '68a000000000000000000021'
+  const lessonId = '68a000000000000000000022'
+  const transcriptPublicId = 'aihustle/courses/transcript-to-remove'
+  let update
+  let deletedPublicId
+  const restores = [
+    stub(Admin, 'findById', () => queryResult({
+      _id: '68a000000000000000000010',
+      role: 'main_admin',
+      status: 'active',
+      isActive: true,
+    })),
+    stub(Course, 'findById', () => ({
+      select() {
+        return this
+      },
+      lean: async () => ({
+        modules: [{
+          _id: moduleId,
+          lessons: [],
+          contentItems: [{
+            _id: lessonId,
+            type: 'video-lesson',
+            transcriptPublicId,
+          }],
+        }],
+      }),
+    })),
+    stub(Course, 'updateOne', async (...args) => { update = args; return { matchedCount: 1, modifiedCount: 1 } }),
+    stub(Course, 'exists', async () => false),
+    stub(cloudinary.uploader, 'destroy', async (publicId) => {
+      deletedPublicId = publicId
+      return { result: 'ok' }
+    }),
+  ]
+  try {
+    const response = await request(`/admin/courses/${courseId}/modules/${moduleId}/lessons/${lessonId}/media/transcript`, {
+      role: 'main_admin',
+      subject: '68a000000000000000000010',
+      method: 'DELETE',
+    })
+    assert.equal(response.status, 200)
+    assert.equal((await response.json()).removed, true)
+    assert.deepEqual(update[1].$set[`modules.$[contentModule].contentItems.$[contentItem].transcriptCues`], [])
+    assert.equal(update[1].$unset[`modules.$[contentModule].contentItems.$[contentItem].transcriptPublicId`], '')
+    assert.equal(deletedPublicId, transcriptPublicId)
+  } finally {
+    for (const restore of restores.reverse()) restore()
   }
 })
 
@@ -3884,11 +4434,18 @@ test('student learning content returns the enrolled course with every published 
     modules: [{
       _id: '68a000000000000000000053',
       title: 'Module 1',
+      lessons: [{
+        _id: '68a000000000000000000059',
+        title: 'Video',
+        videoUrl: 'https://example.com/video.mp4',
+        transcriptCues: [{ startTimeMs: 0, endTimeMs: 1800, text: 'The sentence spoken in the video.' }],
+      }],
       contentItems: [
         {
           _id: '68a000000000000000000054',
           type: 'video-lesson',
           title: 'Video',
+          videoUrl: 'https://example.com/video.mp4',
           attentionCheck: {
             enabled: true,
             minIntervalSeconds: 10,
@@ -3937,6 +4494,9 @@ test('student learning content returns the enrolled course with every published 
       return {
         select(fields) {
           assert.match(fields, /reviewStatus/)
+          assert.match(fields, /reviewComment/)
+          assert.match(fields, /marksObtained/)
+          assert.match(fields, /feedback/)
           return this
         },
         sort(sort) {
@@ -3948,6 +4508,9 @@ test('student learning content returns the enrolled course with every published 
           assignmentId,
           fileName: 'work.pdf',
           reviewStatus: 'pending',
+          reviewComment: 'Please wait for review.',
+          marksObtained: 8,
+          feedback: 'Clear explanation.',
         }],
       }
     }),
@@ -3975,6 +4538,9 @@ test('student learning content returns the enrolled course with every published 
     ])
     assert.equal(result.enrollment.courseId.modules[0].contentItems[2].points, 10)
     assert.equal(result.enrollment.courseId.modules[0].contentItems[3].resources[0].url, 'https://res.cloudinary.com/test/raw/upload/handout.pdf')
+    assert.deepEqual(result.enrollment.courseId.modules[0].contentItems[0].transcriptCues, [
+      { startTimeMs: 0, endTimeMs: 1800, text: 'The sentence spoken in the video.' },
+    ])
     assert.equal('correctOptionIndices' in result.enrollment.courseId.modules[0].contentItems[1].quiz.questions[0], false)
     assert.deepEqual(result.enrollment.courseId.modules[0].contentItems[0].attentionCheck, {
       enabled: true,
@@ -3984,6 +4550,9 @@ test('student learning content returns the enrolled course with every published 
     })
     assert.equal(result.assignmentSubmissions[0].assignmentId, assignmentId)
     assert.equal(result.assignmentSubmissions[0].reviewStatus, 'pending')
+    assert.equal(result.assignmentSubmissions[0].reviewComment, 'Please wait for review.')
+    assert.equal(result.assignmentSubmissions[0].marksObtained, 8)
+    assert.equal(result.assignmentSubmissions[0].feedback, 'Clear explanation.')
   } finally {
     restores.reverse().forEach((restore) => restore())
   }
@@ -4725,6 +5294,7 @@ test('student assignment upload is stored only for an assignment in the enrolled
   const enrollmentId = '68a000000000000000000072'
   const assignmentId = '68a000000000000000000073'
   let savedSubmission
+  let savedNotification
   const restores = [
     stub(Student, 'findById', async () => ({
       _id: studentId,
@@ -4749,6 +5319,10 @@ test('student assignment upload is stored only for an assignment in the enrolled
       savedSubmission = document
       return { ...document, _id: '68a000000000000000000074', submittedAt: new Date('2026-11-11T00:00:00.000Z') }
     }),
+    stub(Notification, 'findOneAndUpdate', (filter, update) => {
+      savedNotification = { ...update.$setOnInsert, filter }
+      return queryResult({ _id: '68a000000000000000000075', ...update.$setOnInsert })
+    }),
   ]
   try {
     const response = await studentAssignmentUpload(
@@ -4768,6 +5342,10 @@ test('student assignment upload is stored only for an assignment in the enrolled
     assert.equal(savedSubmission.assignmentId, assignmentId)
     assert.equal(savedSubmission.fileData.toString('ascii', 0, 5), '%PDF-')
     assert.equal('fileData' in result.submission, false)
+    assert.equal(savedNotification.type, 'assignment_submitted')
+    assert.equal(String(savedNotification.recipientId), studentId)
+    assert.match(savedNotification.eventKey, new RegExp(`assignment-submitted:${studentId}:`))
+    assert.equal(savedNotification.metadata.assignmentId, assignmentId)
   } finally {
     restores.reverse().forEach((restore) => restore())
   }
@@ -5316,6 +5894,7 @@ test('student video playback position is stored per lesson and validated', async
   const enrollmentId = '68a000000000000000000051'
   const lessonId = '68a000000000000000000052'
   let updateDocument
+  let updateQuery
   const restoreStudent = stub(Student, 'findById', async () => ({
     _id: studentId,
     role: 'student',
@@ -5337,7 +5916,8 @@ test('student video playback position is stored per lesson and validated', async
       },
     }),
   }))
-  const restoreEnrollmentUpdate = stub(Enrollment, 'updateOne', async (_query, update) => {
+  const restoreEnrollmentUpdate = stub(Enrollment, 'updateOne', async (query, update) => {
+    updateQuery = query
     updateDocument = update
     return { matchedCount: 1 }
   })
@@ -5355,10 +5935,10 @@ test('student video playback position is stored per lesson and validated', async
       startedLessonIds: [lessonId],
       lessonPlaybackPositions: { [lessonId]: 37 },
     })
-    assert.deepEqual(updateDocument, {
-      $addToSet: { startedLessonIds: lessonId },
-      $set: { [`lessonPlaybackPositions.${lessonId}`]: 37 },
-    })
+    assert.deepEqual(updateDocument.$addToSet, { startedLessonIds: lessonId })
+    assert.equal(updateDocument.$set[`lessonPlaybackPositions.${lessonId}`], 37)
+    assert.equal(updateQuery[`lessonPlaybackPositions.${lessonId}`], 18)
+    assert.equal(updateDocument.$inc, undefined)
 
     const invalidResponse = await request(`/enrollments/${enrollmentId}/progress`, {
       role: 'student',

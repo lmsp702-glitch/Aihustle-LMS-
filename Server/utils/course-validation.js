@@ -190,6 +190,39 @@ function normalizeAttentionCheck(attentionCheck, lessonIndex, moduleIndex) {
   }
 }
 
+function normalizeTranscriptCues(transcriptCues, label) {
+  if (transcriptCues === undefined) return { value: [] }
+  if (!Array.isArray(transcriptCues) || transcriptCues.length > 10000) {
+    return { error: `${label} can contain up to 10,000 transcript cues.` }
+  }
+
+  const cues = []
+  for (const [cueIndex, cue] of transcriptCues.entries()) {
+    if (
+      !cue
+      || typeof cue !== 'object'
+      || Array.isArray(cue)
+      || !Number.isInteger(cue.startTimeMs)
+      || cue.startTimeMs < 0
+      || cue.startTimeMs > 43200000
+      || !Number.isInteger(cue.endTimeMs)
+      || cue.endTimeMs <= cue.startTimeMs
+      || cue.endTimeMs > 43200000
+      || typeof cue.text !== 'string'
+      || !cue.text.trim()
+      || cue.text.trim().length > 5000
+    ) {
+      return { error: `Check transcript cue ${cueIndex + 1} for ${label}.` }
+    }
+    cues.push({
+      startTimeMs: cue.startTimeMs,
+      endTimeMs: cue.endTimeMs,
+      text: cue.text.trim(),
+    })
+  }
+  return { value: cues.sort((left, right) => left.startTimeMs - right.startTimeMs) }
+}
+
 export function normalizeCourseDetails(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return { error: 'Enter valid course details.' }
   const {
@@ -248,8 +281,14 @@ export function normalizeCourseDetails(input) {
         (lesson.videoUrl !== undefined && (typeof lesson.videoUrl !== 'string' || lesson.videoUrl.length > 2048 || !validHttpUrl(lesson.videoUrl))) ||
         (lesson.durationSeconds !== undefined && (!Number.isFinite(Number(lesson.durationSeconds)) || Number(lesson.durationSeconds) < 0 || Number(lesson.durationSeconds) > 43200)) ||
         (lesson.videoPublicId !== undefined && (typeof lesson.videoPublicId !== 'string' || lesson.videoPublicId.length > 255)) ||
+        (lesson.videoFileName !== undefined && (typeof lesson.videoFileName !== 'string' || lesson.videoFileName.length > 255)) ||
         (lesson.videoFormat !== undefined && (typeof lesson.videoFormat !== 'string' || lesson.videoFormat.length > 20)) ||
         (lesson.videoBytes !== undefined && (!Number.isSafeInteger(Number(lesson.videoBytes)) || Number(lesson.videoBytes) < 0)) ||
+        (lesson.transcriptUrl !== undefined && (typeof lesson.transcriptUrl !== 'string' || lesson.transcriptUrl.length > 2048 || !validHttpUrl(lesson.transcriptUrl))) ||
+        (lesson.transcriptPublicId !== undefined && (typeof lesson.transcriptPublicId !== 'string' || lesson.transcriptPublicId.length > 255)) ||
+        (lesson.transcriptFileName !== undefined && (typeof lesson.transcriptFileName !== 'string' || lesson.transcriptFileName.length > 255)) ||
+        (lesson.transcriptFormat !== undefined && (typeof lesson.transcriptFormat !== 'string' || lesson.transcriptFormat.length > 20)) ||
+        (lesson.transcriptBytes !== undefined && (!Number.isSafeInteger(Number(lesson.transcriptBytes)) || Number(lesson.transcriptBytes) < 0 || Number(lesson.transcriptBytes) > 2 * 1024 * 1024)) ||
         (lesson.resources !== undefined && (!Array.isArray(lesson.resources) || lesson.resources.length > 30)) ||
         (lesson.resources || []).some((resource) => !resource || typeof resource !== 'object' || Array.isArray(resource) ||
           (resource._id !== undefined && !validDocumentId(resource._id)) ||
@@ -263,6 +302,11 @@ export function normalizeCourseDetails(input) {
       }
       const attentionCheck = normalizeAttentionCheck(lesson.attentionCheck, lessonIndex, moduleIndex)
       if (attentionCheck.error) return attentionCheck
+      const transcript = normalizeTranscriptCues(
+        lesson.transcriptCues,
+        `lesson ${lessonIndex + 1} in module ${moduleIndex + 1}`,
+      )
+      if (transcript.error) return transcript
       lessons.push({
         ...(lesson._id ? { _id: normalizedDocumentId(lesson._id) } : {}),
         title: lesson.title.trim(),
@@ -270,9 +314,16 @@ export function normalizeCourseDetails(input) {
         content: lesson.content?.trim() || '',
         videoUrl: lesson.videoUrl?.trim() || '',
         videoPublicId: lesson.videoPublicId?.trim() || '',
+        videoFileName: lesson.videoFileName?.trim() || '',
         videoFormat: lesson.videoFormat?.trim() || '',
         videoBytes: lesson.videoBytes === undefined ? undefined : Number(lesson.videoBytes),
         durationSeconds: lesson.durationSeconds === undefined ? 0 : Number(lesson.durationSeconds),
+        transcriptUrl: lesson.transcriptUrl?.trim() || '',
+        transcriptPublicId: lesson.transcriptPublicId?.trim() || '',
+        transcriptFileName: lesson.transcriptFileName?.trim() || '',
+        transcriptFormat: lesson.transcriptFormat?.trim() || '',
+        transcriptBytes: lesson.transcriptBytes === undefined ? undefined : Number(lesson.transcriptBytes),
+        transcriptCues: transcript.value,
         requiredForCertificate: lesson.requiredForCertificate !== false,
         ...(attentionCheck.value ? { attentionCheck: attentionCheck.value } : {}),
         resources: (lesson.resources || []).map((resource) => ({
@@ -300,9 +351,15 @@ export function normalizeCourseDetails(input) {
         (item.content !== undefined && (typeof item.content !== 'string' || item.content.length > 20000)) ||
         (item.videoUrl !== undefined && (typeof item.videoUrl !== 'string' || item.videoUrl.length > 2048 || !validHttpUrl(item.videoUrl))) ||
         (item.videoPublicId !== undefined && (typeof item.videoPublicId !== 'string' || item.videoPublicId.length > 255)) ||
+        (item.videoFileName !== undefined && (typeof item.videoFileName !== 'string' || item.videoFileName.length > 255)) ||
         (item.videoFormat !== undefined && (typeof item.videoFormat !== 'string' || item.videoFormat.length > 20)) ||
         (item.videoBytes !== undefined && (!Number.isSafeInteger(Number(item.videoBytes)) || Number(item.videoBytes) < 0)) ||
         (item.durationSeconds !== undefined && (!Number.isFinite(Number(item.durationSeconds)) || Number(item.durationSeconds) < 0 || Number(item.durationSeconds) > 43200)) ||
+        (item.transcriptUrl !== undefined && (typeof item.transcriptUrl !== 'string' || item.transcriptUrl.length > 2048 || !validHttpUrl(item.transcriptUrl))) ||
+        (item.transcriptPublicId !== undefined && (typeof item.transcriptPublicId !== 'string' || item.transcriptPublicId.length > 255)) ||
+        (item.transcriptFileName !== undefined && (typeof item.transcriptFileName !== 'string' || item.transcriptFileName.length > 255)) ||
+        (item.transcriptFormat !== undefined && (typeof item.transcriptFormat !== 'string' || item.transcriptFormat.length > 20)) ||
+        (item.transcriptBytes !== undefined && (!Number.isSafeInteger(Number(item.transcriptBytes)) || Number(item.transcriptBytes) < 0 || Number(item.transcriptBytes) > 2 * 1024 * 1024)) ||
         (item.resources !== undefined && (!Array.isArray(item.resources) || item.resources.length > 30)) ||
         (item.resources || []).some((resource) => !resource || typeof resource !== 'object' || Array.isArray(resource) ||
           (resource._id !== undefined && !validDocumentId(resource._id)) ||
@@ -322,6 +379,10 @@ export function normalizeCourseDetails(input) {
         ? normalizeAttentionCheck(item.attentionCheck, itemIndex, moduleIndex)
         : { value: undefined }
       if (attentionCheck.error) return attentionCheck
+      const transcript = item.type === 'video-lesson'
+        ? normalizeTranscriptCues(item.transcriptCues, `content item ${itemIndex + 1} in module ${moduleIndex + 1}`)
+        : { value: [] }
+      if (transcript.error) return transcript
       contentItems.push({
         ...(item._id ? { _id: normalizedDocumentId(item._id) } : {}),
         type: item.type,
@@ -330,9 +391,16 @@ export function normalizeCourseDetails(input) {
         content: item.content?.trim() || '',
         videoUrl: item.videoUrl?.trim() || '',
         videoPublicId: item.videoPublicId?.trim() || '',
+        videoFileName: item.videoFileName?.trim() || '',
         videoFormat: item.videoFormat?.trim() || '',
         videoBytes: item.videoBytes === undefined ? undefined : Number(item.videoBytes),
         durationSeconds: item.durationSeconds === undefined ? 0 : Number(item.durationSeconds),
+        transcriptUrl: item.transcriptUrl?.trim() || '',
+        transcriptPublicId: item.transcriptPublicId?.trim() || '',
+        transcriptFileName: item.transcriptFileName?.trim() || '',
+        transcriptFormat: item.transcriptFormat?.trim() || '',
+        transcriptBytes: item.transcriptBytes === undefined ? undefined : Number(item.transcriptBytes),
+        ...(item.type === 'video-lesson' ? { transcriptCues: transcript.value } : {}),
         requiredForCertificate: item.requiredForCertificate !== false,
         resources: (item.resources || []).map((resource) => ({
           ...(resource._id ? { _id: normalizedDocumentId(resource._id) } : {}),

@@ -73,3 +73,106 @@
     flex-direction: column;
   }
 }
+
+.notification-feed--student {
+  margin-top: 8px;
+}
+
+.notification-feed--student .notification-feed__item {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+  padding: 11px 0;
+  border-bottom-color: #e8e2d4;
+}
+
+.notification-feed--student .notification-feed__item.is-unread {
+  background: linear-gradient(90deg, rgba(247, 241, 223, 0.48), transparent 80%);
+}
+
+.notification-feed__student-icon {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border-radius: 12px;
+  background: #fbf0d7;
+  color: #a97913;
+}
+
+.notification-feed__student-icon svg {
+  width: 21px;
+  height: 21px;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.notification-feed--student .notification-feed__copy {
+  min-width: 0;
+}
+
+.notification-feed__student-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.notification-feed--student .notification-feed__copy h3 {
+  color: #26332f;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.notification-feed--student .notification-feed__copy p {
+  margin: 3px 0;
+  color: #53615c;
+  font-size: 11px;
+  line-height: 1.45;
+  opacity: 1;
+}
+
+.notification-feed--student .notification-feed__copy time {
+  color: #68746e;
+  font-size: 10px;
+  opacity: 1;
+}
+
+.notification-feed__read-status {
+  flex: 0 0 auto;
+  color: #7a8077;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.notification-feed__read-status.is-unread {
+  color: #8a661a;
+  font-weight: 650;
+}
+
+:root[data-theme='dark'] .notification-feed--student .notification-feed__item {
+  border-bottom-color: var(--theme-border);
+}
+
+:root[data-theme='dark'] .notification-feed--student .notification-feed__item.is-unread {
+  background: linear-gradient(90deg, rgba(105, 88, 42, 0.2), transparent 80%);
+}
+
+:root[data-theme='dark'] .notification-feed__student-icon {
+  background: #3a3424;
+  color: #e4c56f;
+}
+
+:root[data-theme='dark'] .notification-feed--student .notification-feed__copy h3 {
+  color: var(--theme-ink);
+}
+
+:root[data-theme='dark'] .notification-feed--student .notification-feed__copy p,
+:root[data-theme='dark'] .notification-feed--student .notification-feed__copy time,
+:root[data-theme='dark'] .notification-feed__read-status {
+  color: var(--theme-muted);
+}

@@ -34,6 +34,15 @@ const attentionCheckSchema = new mongoose.Schema(
   { _id: false },
 )
 
+const transcriptCueSchema = new mongoose.Schema(
+  {
+    startTimeMs: { type: Number, required: true, min: 0, max: 43200000 },
+    endTimeMs: { type: Number, required: true, min: 1, max: 43200000 },
+    text: { type: String, required: true, trim: true, maxlength: 5000 },
+  },
+  { _id: false },
+)
+
 const lessonSchema = new mongoose.Schema(
   {
     title: { type: String, required: true, trim: true, maxlength: 200 },
@@ -41,9 +50,16 @@ const lessonSchema = new mongoose.Schema(
     content: { type: String, trim: true, maxlength: 20000 },
     videoUrl: { type: String, trim: true, maxlength: 2048 },
     videoPublicId: { type: String, trim: true, maxlength: 255 },
+    videoFileName: { type: String, trim: true, maxlength: 255 },
     videoFormat: { type: String, trim: true, maxlength: 20 },
     videoBytes: { type: Number, min: 0 },
     durationSeconds: { type: Number, min: 0, default: 0 },
+    transcriptUrl: { type: String, trim: true, maxlength: 2048 },
+    transcriptPublicId: { type: String, trim: true, maxlength: 255 },
+    transcriptFileName: { type: String, trim: true, maxlength: 255 },
+    transcriptFormat: { type: String, trim: true, maxlength: 20 },
+    transcriptBytes: { type: Number, min: 0 },
+    transcriptCues: { type: [transcriptCueSchema], default: [] },
     requiredForCertificate: { type: Boolean, default: true },
     resources: { type: [resourceSchema], default: [] },
     attentionCheck: { type: attentionCheckSchema, default: undefined },
@@ -85,9 +101,16 @@ const moduleContentItemSchema = new mongoose.Schema(
     content: { type: String, trim: true, maxlength: 20000 },
     videoUrl: { type: String, trim: true, maxlength: 2048 },
     videoPublicId: { type: String, trim: true, maxlength: 255 },
+    videoFileName: { type: String, trim: true, maxlength: 255 },
     videoFormat: { type: String, trim: true, maxlength: 20 },
     videoBytes: { type: Number, min: 0 },
     durationSeconds: { type: Number, min: 0, default: 0 },
+    transcriptUrl: { type: String, trim: true, maxlength: 2048 },
+    transcriptPublicId: { type: String, trim: true, maxlength: 255 },
+    transcriptFileName: { type: String, trim: true, maxlength: 255 },
+    transcriptFormat: { type: String, trim: true, maxlength: 20 },
+    transcriptBytes: { type: Number, min: 0 },
+    transcriptCues: { type: [transcriptCueSchema], default: [] },
     resources: { type: [resourceSchema], default: [] },
     dueDate: { type: Date },
     points: { type: Number, min: 0, default: 0 },

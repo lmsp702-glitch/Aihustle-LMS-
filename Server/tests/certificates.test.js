@@ -3,10 +3,12 @@ import { test } from 'node:test'
 import AssignmentSubmission from '../models/AssignmentSubmission.js'
 import Certificate from '../models/Certificate.js'
 import CertificateTemplate from '../models/CertificateTemplate.js'
+import Notification from '../models/Notification.js'
 import QuizAttempt from '../models/QuizAttempt.js'
 import {
   evaluateCertificateEligibility,
   generateCertificatePdf,
+  getCourseActivities,
   getRequiredCertificateActivities,
   issueCertificateIfEligible,
 } from '../utils/certificates.js'
@@ -67,6 +69,7 @@ test('required certificate activities include legacy and content item structures
   }
 
   const activities = getRequiredCertificateActivities(course)
+  const allCourseActivities = getCourseActivities(course)
   assert.deepEqual(activities.videos.map(({ id }) => id), [
     '68a000000000000000000001',
     '68a000000000000000000004',
@@ -79,6 +82,8 @@ test('required certificate activities include legacy and content item structures
     '68a000000000000000000006',
     '68a000000000000000000008',
   ])
+  assert.ok(allCourseActivities.videos.some(({ id }) => id === '68a000000000000000000002'))
+  assert.ok(allCourseActivities.quizzes.some(({ id }) => id === '68a000000000000000000005'))
 })
 
 test('course validation defaults existing activity requirements to required and preserves opt-outs', () => {
@@ -274,6 +279,9 @@ test('certificate issuance snapshots the account name and exact course name and 
   let insertCount = 0
   let insertedDocument
   const restores = [
+    stub(Notification, 'findOneAndUpdate', (_filter, update) => (
+      queryResult({ _id: '68a000000000000000000099', ...update.$setOnInsert })
+    )),
     stub(Certificate, 'findOne', () => queryResult(existing)),
     stub(Certificate, 'findOneAndUpdate', (_query, update) => {
       insertCount += 1
