@@ -299,3 +299,11 @@ export async function sendSupportTicketComplaintEmail({ email, fullName, ticket 
     ].join('\n'),
   })
 }
+
+export function emailNotificationsConfigured() {
+  return Boolean(
+    config.resendApiKey ||
+    (config.smtpHost && config.smtpUser && config.smtpPassword)
+  )
+}
+

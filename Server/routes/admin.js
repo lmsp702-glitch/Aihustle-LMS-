@@ -15,11 +15,13 @@ import Course from '../models/Course.js'
 import Certificate from '../models/Certificate.js'
 import Enrollment from '../models/Enrollment.js'
 import Notification from '../models/Notification.js'
+import { sendNotification } from '../utils/notification-service.js'
 import AssignmentSubmission from '../models/AssignmentSubmission.js'
 import QuizAttempt from '../models/QuizAttempt.js'
 import ReferralCode from '../models/ReferralCode.js'
 import CertificateTemplate from '../models/CertificateTemplate.js'
 import VideoAttentionResponse from '../models/VideoAttentionResponse.js'
+import Resource from '../models/Resource.js'
 import {
   CollegeAdmin,
   CollegeStudent,
@@ -43,6 +45,10 @@ import { generateQuizQuestions } from '../utils/quiz-question-generator.js'
 import { parseStudentCsv } from '../utils/student-csv.js'
 import { toMongoBuffer } from '../utils/mongo-binary.js'
 import { getActiveCertificateTemplateId, issueCertificateIfEligible } from '../utils/certificates.js'
+import {
+  getSignedResourceDeliveryUrls,
+  fetchResourcePdfBuffer,
+} from '../utils/resource-delivery.js'
 
 const router = Router()
 const requireAdmin = [authenticate, requireRoles('main_admin')]
@@ -785,6 +791,196 @@ router.post('/colleges', ...requireAdmin, async (req, res, next) => {
   }
 })
 
+router.put('/colleges/:id', ...requireAdmin, async (req, res, next) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ message: 'Invalid college ID.' })
+    }
+
+    const { name, code, address, city, state, country, contactName, contactPhone, contactEmail } = req.body ?? {}
+    const college = await College.findById(req.params.id)
+    if (!college) return res.status(404).json({ message: 'College not found.' })
+
+    if (typeof name === 'string' && name.trim()) college.name = name.trim().slice(0, 200)
+    if (typeof code === 'string' && code.trim()) {
+      const trimmedCode = code.trim().toUpperCase()
+      if (!/^[a-zA-Z0-9-]{2,40}$/.test(trimmedCode)) {
+        return res.status(400).json({ message: 'College code must be 2–40 letters, numbers, or hyphens.' })
+      }
+      const existing = await College.findOne({ _id: { $ne: college._id }, code: trimmedCode }).lean()
+      if (existing) return res.status(409).json({ message: 'College code is already in use.' })
+      college.code = trimmedCode
+    }
+
+    if (typeof address === 'string') college.address = address.trim().slice(0, 500)
+    if (typeof city === 'string') college.city = city.trim().slice(0, 120)
+    if (typeof state === 'string') college.state = state.trim().slice(0, 120)
+    if (typeof country === 'string') college.country = country.trim().slice(0, 120)
+    if (typeof contactName === 'string') college.contactName = contactName.trim().slice(0, 120)
+    if (typeof contactPhone === 'string') college.contactPhone = contactPhone.trim().slice(0, 40)
+    if (typeof contactEmail === 'string' && contactEmail.trim()) {
+      const email = contactEmail.trim().toLowerCase()
+      if (!emailPattern.test(email)) return res.status(400).json({ message: 'Enter a valid contact email.' })
+      college.contactEmail = email.slice(0, 254)
+    }
+
+    await college.save()
+    return res.json({ message: 'College details updated successfully.', college })
+  } catch (error) {
+    return next(error)
+  }
+})
+
+router.patch('/colleges/:id/status', ...requireAdmin, async (req, res, next) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ message: 'Invalid college ID.' })
+    }
+
+    const { status } = req.body ?? {}
+    if (!['active', 'inactive'].includes(status)) {
+      return res.status(400).json({ message: 'Status must be active or inactive.' })
+    }
+
+    const college = await College.findById(req.params.id)
+    if (!college) return res.status(404).json({ message: 'College not found.' })
+
+    college.status = status
+    await college.save()
+
+    // Sync sub-admin active status if deactivated
+    if (status === 'inactive') {
+      await CollegeAdmin.updateMany(
+        { collegeId: college._id },
+        { $set: { isActive: false, status: 'inactive' } },
+      )
+    } else {
+      await CollegeAdmin.updateMany(
+        { collegeId: college._id, status: { $ne: 'invitation_pending' } },
+        { $set: { isActive: true, status: 'active' } },
+      )
+    }
+
+    return res.json({
+      message: `College ${status === 'active' ? 'activated' : 'deactivated'} successfully.`,
+      college: { id: String(college._id), status: college.status },
+    })
+  } catch (error) {
+    return next(error)
+  }
+})
+
+router.post('/colleges/:id/credentials', ...requireAdmin, async (req, res, next) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ message: 'Invalid college ID.' })
+    }
+
+    const { password, username, email, fullName } = req.body ?? {}
+    const collegeId = new mongoose.Types.ObjectId(req.params.id)
+    const college = await College.findById(collegeId)
+    if (!college) return res.status(404).json({ message: 'College not found.' })
+
+    let subAdmin = await CollegeAdmin.findOne({ collegeId })
+
+    if (subAdmin) {
+      if (typeof password === 'string' && password.trim().length >= 8) {
+        subAdmin.passwordHash = await bcrypt.hash(password.trim(), 12)
+        subAdmin.status = 'active'
+        subAdmin.isActive = true
+        subAdmin.activationTokenHash = undefined
+        subAdmin.activationTokenExpiresAt = undefined
+      }
+      if (typeof fullName === 'string' && fullName.trim()) subAdmin.fullName = fullName.trim().slice(0, 120)
+      await subAdmin.save()
+
+      if (college.status !== 'active') {
+        college.status = 'active'
+        await college.save()
+      }
+
+      return res.json({
+        message: 'College account credentials updated successfully. The college can now log in.',
+        account: {
+          id: String(subAdmin._id),
+          email: subAdmin.email,
+          username: subAdmin.username,
+          status: subAdmin.status,
+          isActive: subAdmin.isActive,
+        },
+      })
+    }
+
+    // If no sub-admin exists yet, create one
+    if (!email || !username || !password || password.length < 8) {
+      return res.status(400).json({ message: 'Provide a valid email, username, and password (at least 8 characters).' })
+    }
+
+    const normalizedEmail = email.trim().toLowerCase()
+    const normalizedUsername = username.trim().toLowerCase()
+
+    const [emailExists, usernameExists] = await Promise.all([
+      accountIdentifierExists('email', normalizedEmail),
+      accountIdentifierExists('username', normalizedUsername),
+    ])
+    if (emailExists) return res.status(409).json({ message: 'Email is already registered.' })
+    if (usernameExists) return res.status(409).json({ message: 'Username is already taken.' })
+
+    const passwordHash = await bcrypt.hash(password.trim(), 12)
+    const accountId = new mongoose.Types.ObjectId()
+    const session = await mongoose.startSession()
+
+    try {
+      await session.withTransaction(async () => {
+        await AccountIdentity.create(
+          [{
+            email: normalizedEmail,
+            username: normalizedUsername,
+            accountCollection: CollegeAdmin.collection.name,
+            accountId,
+          }],
+          { session },
+        )
+        ;[subAdmin] = await CollegeAdmin.create(
+          [{
+            _id: accountId,
+            fullName: (fullName || college.contactName || college.name).trim(),
+            email: normalizedEmail,
+            username: normalizedUsername,
+            passwordHash,
+            role: 'college_admin',
+            collegeId,
+            status: 'active',
+            isActive: true,
+            permissions: [],
+          }],
+          { session },
+        )
+      })
+    } finally {
+      await session.endSession()
+    }
+
+    if (college.status !== 'active') {
+      college.status = 'active'
+      await college.save()
+    }
+
+    return res.status(201).json({
+      message: 'College account created and activated. The college can now log in via the common login page.',
+      account: {
+        id: String(subAdmin._id),
+        email: subAdmin.email,
+        username: subAdmin.username,
+        status: subAdmin.status,
+        isActive: subAdmin.isActive,
+      },
+    })
+  } catch (error) {
+    return next(error)
+  }
+})
+
 function createActivationToken() {
   const token = randomBytes(32).toString('base64url')
   return {
@@ -1312,6 +1508,336 @@ router.post('/course-assets/delete', ...requireAdmin, async (req, res, next) => 
   }
 })
 
+/* ==========================================================================
+   Admin Resources Management APIs (Course Cheat Sheets & Supplementary PDFs)
+   ========================================================================== */
+
+router.get('/resources', ...requireAdmin, async (req, res, next) => {
+  try {
+    const { courseId, search } = req.query
+    const filter = {}
+    if (courseId && mongoose.isValidObjectId(courseId)) {
+      filter.courseId = courseId
+    }
+    if (search && typeof search === 'string' && search.trim()) {
+      const term = search.trim().toLowerCase()
+      filter.$or = [
+        { title: { $regex: term, $options: 'i' } },
+        { description: { $regex: term, $options: 'i' } },
+        { originalFileName: { $regex: term, $options: 'i' } },
+      ]
+    }
+    const resources = await Resource.find(filter)
+      .populate('courseId', 'title category thumbnailUrl')
+      .sort({ createdAt: -1 })
+      .lean()
+
+    const enrichedResources = (resources || []).map((resource) => {
+      const { deliveryUrl, downloadUrl } = getSignedResourceDeliveryUrls(resource)
+      return {
+        ...resource,
+        url: deliveryUrl || resource.url,
+        signedUrl: deliveryUrl || resource.url,
+        downloadUrl: downloadUrl || deliveryUrl || resource.url,
+      }
+    })
+
+    return res.json({ resources: enrichedResources })
+  } catch (error) {
+    return next(error)
+  }
+})
+
+router.get('/resources/:resourceId/file', ...requireAdmin, async (req, res, next) => {
+  try {
+    const { resourceId } = req.params
+    if (!mongoose.isValidObjectId(resourceId)) {
+      return res.status(400).json({ message: 'Valid resource ID is required.' })
+    }
+
+    const resource = await Resource.findById(resourceId).lean()
+    if (!resource) {
+      return res.status(404).json({ message: 'Resource not found.' })
+    }
+
+    const buffer = await fetchResourcePdfBuffer(resource)
+    const isDownload = req.query.download === 'true' || req.query.download === '1'
+    const originalName = resource.originalFileName || `${resource.title || 'resource'}.pdf`
+    const safeFilename = path.basename(originalName).replace(/["\r\n]/g, '_')
+
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader(
+      'Content-Disposition',
+      `${isDownload ? 'attachment' : 'inline'}; filename="${safeFilename}"`
+    )
+    res.setHeader('Content-Length', buffer.length)
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0')
+    res.setHeader('X-Content-Type-Options', 'nosniff')
+    return res.end(buffer)
+  } catch (error) {
+    return next(error)
+  }
+})
+
+router.get('/resources/:resourceId/access', ...requireAdmin, async (req, res, next) => {
+  try {
+    const { resourceId } = req.params
+    if (!mongoose.isValidObjectId(resourceId)) {
+      return res.status(400).json({ message: 'Valid resource ID is required.' })
+    }
+
+    const resource = await Resource.findById(resourceId)
+      .populate('courseId', 'title category thumbnailUrl')
+      .lean()
+
+    if (!resource) {
+      return res.status(404).json({ message: 'Resource not found.' })
+    }
+
+    const { deliveryUrl, downloadUrl } = getSignedResourceDeliveryUrls(resource)
+    const proxyUrl = `/api/admin/resources/${resource._id}/file`
+
+    return res.json({
+      success: true,
+      resourceId: resource._id,
+      title: resource.title,
+      fileName: resource.originalFileName || `${resource.title || 'resource'}.pdf`,
+      fileSize: resource.fileSize,
+      url: deliveryUrl || resource.url,
+      signedUrl: deliveryUrl,
+      downloadUrl: downloadUrl || deliveryUrl || resource.url,
+      proxyUrl,
+    })
+  } catch (error) {
+    return next(error)
+  }
+})
+
+router.post(
+  '/resources',
+  ...requireAdmin,
+  receiveCourseResource,
+  async (req, res, next) => {
+    try {
+      const { title, description, courseId } = req.body || {}
+      if (!title || typeof title !== 'string' || !title.trim()) {
+        return res.status(400).json({ message: 'Resource title is required.' })
+      }
+      if (!courseId || !mongoose.isValidObjectId(courseId)) {
+        return res.status(400).json({ message: 'Select a valid course for this resource.' })
+      }
+      if (!req.file) {
+        return res.status(400).json({ message: 'Choose a PDF cheat sheet file to upload.' })
+      }
+
+      const course = await Course.findById(courseId).select('_id title').lean()
+      if (!course) {
+        return res.status(404).json({ message: 'The selected course does not exist.' })
+      }
+
+      if (!await mediaHasExpectedSignature(req.file, 'resource')) {
+        return res.status(415).json({ message: 'The uploaded file is not a valid PDF document.' })
+      }
+
+      const folder = `aihustle/courses/${courseId}/resources`
+      const ext = path.extname(req.file.originalname).slice(1).toLowerCase() || 'pdf'
+      const uploadOptions = {
+        folder,
+        public_id: `${randomUUID()}.${ext}`,
+        resource_type: 'raw',
+        overwrite: false,
+        unique_filename: false,
+        timeout: 30 * 60 * 1000,
+      }
+
+      let uploaded
+      if (cloudinaryIsConfigured()) {
+        try {
+          uploaded = await cloudinary.uploader.upload(req.file.path, uploadOptions)
+        } catch (error) {
+          const providerMessage = safeCloudinaryErrorMessage(error)
+          return res.status(502).json({
+            message: providerMessage
+              ? `Cloudinary upload failed: ${providerMessage}`
+              : 'File upload to storage provider failed.',
+          })
+        }
+      } else {
+        uploaded = {
+          secure_url: `https://res.cloudinary.com/aihustle/raw/upload/${uploadOptions.public_id}`,
+          public_id: uploadOptions.public_id,
+          bytes: req.file.size,
+          format: 'pdf',
+        }
+      }
+
+      const { deliveryUrl, downloadUrl } = getSignedResourceDeliveryUrls({
+        publicId: uploaded.public_id,
+        url: uploaded.secure_url || uploaded.url,
+        format: uploaded.format || 'pdf',
+      })
+
+      const resource = await Resource.create({
+        title: title.trim().slice(0, 200),
+        description: typeof description === 'string' ? description.trim().slice(0, 2000) : '',
+        courseId,
+        url: deliveryUrl || uploaded.secure_url || uploaded.url,
+        publicId: uploaded.public_id || '',
+        resourceType: 'raw',
+        format: uploaded.format || 'pdf',
+        fileSize: uploaded.bytes || req.file.size,
+        originalFileName: req.file.originalname,
+        createdBy: req.auth.id,
+      })
+
+      // Sync into Course.resources array
+      try {
+        await Course.findByIdAndUpdate(courseId, {
+          $push: {
+            resources: {
+              _id: resource._id,
+              title: resource.title,
+              url: resource.url,
+              publicId: resource.publicId,
+              resourceType: 'raw',
+              format: resource.format,
+              bytes: resource.fileSize,
+            },
+          },
+        })
+      } catch {
+        // non-fatal
+      }
+
+      const populated = await Resource.findById(resource._id)
+        .populate('courseId', 'title category thumbnailUrl')
+        .lean()
+
+      const populatedEnriched = populated ? {
+        ...populated,
+        url: deliveryUrl || populated.url,
+        signedUrl: deliveryUrl || populated.url,
+        downloadUrl: downloadUrl || deliveryUrl || populated.url,
+      } : resource
+
+      return res.status(201).json({
+        message: 'Resource uploaded successfully.',
+        resource: populatedEnriched,
+      })
+    } catch (error) {
+      return next(error)
+    } finally {
+      if (req.file?.path) await unlink(req.file.path).catch(() => {})
+    }
+  },
+)
+
+router.put('/resources/:resourceId', ...requireAdmin, async (req, res, next) => {
+  try {
+    const { resourceId } = req.params
+    if (!mongoose.isValidObjectId(resourceId)) {
+      return res.status(400).json({ message: 'Valid resource ID is required.' })
+    }
+
+    const resource = await Resource.findById(resourceId)
+    if (!resource) {
+      return res.status(404).json({ message: 'Resource not found.' })
+    }
+
+    const { title, description, courseId } = req.body || {}
+    if (title !== undefined) {
+      if (!title || typeof title !== 'string' || !title.trim()) {
+        return res.status(400).json({ message: 'Resource title cannot be empty.' })
+      }
+      resource.title = title.trim().slice(0, 200)
+    }
+
+    if (description !== undefined) {
+      resource.description = typeof description === 'string' ? description.trim().slice(0, 2000) : ''
+    }
+
+    const previousCourseId = resource.courseId
+    if (courseId !== undefined && mongoose.isValidObjectId(courseId) && String(courseId) !== String(previousCourseId)) {
+      const course = await Course.findById(courseId).select('_id title').lean()
+      if (!course) {
+        return res.status(404).json({ message: 'The selected course does not exist.' })
+      }
+      resource.courseId = courseId
+
+      await Course.findByIdAndUpdate(previousCourseId, {
+        $pull: { resources: { _id: resource._id } },
+      }).catch(() => {})
+      await Course.findByIdAndUpdate(courseId, {
+        $push: {
+          resources: {
+            _id: resource._id,
+            title: resource.title,
+            url: resource.url,
+            publicId: resource.publicId,
+            resourceType: resource.resourceType,
+            format: resource.format,
+            bytes: resource.fileSize,
+          },
+        },
+      }).catch(() => {})
+    } else {
+      await Course.updateOne(
+        { _id: resource.courseId, 'resources._id': resource._id },
+        { $set: { 'resources.$.title': resource.title } },
+      ).catch(() => {})
+    }
+
+    resource.updatedAt = new Date()
+    await resource.save()
+
+    const populated = await Resource.findById(resource._id)
+      .populate('courseId', 'title category thumbnailUrl')
+      .lean()
+
+    return res.json({
+      message: 'Resource updated successfully.',
+      resource: populated || resource,
+    })
+  } catch (error) {
+    return next(error)
+  }
+})
+
+router.delete('/resources/:resourceId', ...requireAdmin, async (req, res, next) => {
+  try {
+    const { resourceId } = req.params
+    if (!mongoose.isValidObjectId(resourceId)) {
+      return res.status(400).json({ message: 'Valid resource ID is required.' })
+    }
+
+    const resource = await Resource.findById(resourceId)
+    if (!resource) {
+      return res.status(404).json({ message: 'Resource not found.' })
+    }
+
+    if (resource.publicId && cloudinaryIsConfigured()) {
+      try {
+        await cloudinary.uploader.destroy(resource.publicId, {
+          resource_type: resource.resourceType || 'raw',
+          invalidate: true,
+        })
+      } catch {
+        // non-fatal
+      }
+    }
+
+    await Course.findByIdAndUpdate(resource.courseId, {
+      $pull: { resources: { _id: resource._id } },
+    }).catch(() => {})
+
+    await Resource.findByIdAndDelete(resourceId)
+
+    return res.json({ message: 'Resource deleted successfully.' })
+  } catch (error) {
+    return next(error)
+  }
+})
+
 router.put('/courses/:courseId', ...requireAdmin, async (req, res, next) => {
   try {
     const { courseId } = req.params
@@ -1342,12 +1868,32 @@ router.patch('/courses/:courseId/status', ...requireAdmin, async (req, res, next
     const { status } = req.body ?? {}
     if (!mongoose.isValidObjectId(courseId)) return res.status(400).json({ message: 'Select a valid course.' })
     if (!['draft', 'published'].includes(status)) return res.status(400).json({ message: 'Choose draft or published for the course status.' })
-    const existing = await Course.findById(courseId).select('modules').lean()
+    const existing = await Course.findById(courseId).select('status modules title').lean()
     if (!existing) return res.status(404).json({ message: 'The course was not found.' })
     if (status === 'published' && !hasPublishableContent(existing)) {
       return res.status(400).json({ message: 'Add at least one module and one lesson before publishing.' })
     }
     const course = await Course.findByIdAndUpdate(courseId, { $set: { status } }, { new: true, runValidators: true })
+
+    if (status === 'published' && existing.status !== 'published') {
+      try {
+        const enrollments = await Enrollment.find({ courseId, status: 'active' }).select('userId').lean()
+        for (const enrollment of enrollments) {
+          await sendNotification({
+            recipientRole: 'student',
+            recipientId: enrollment.userId,
+            category: 'new_course_updates',
+            type: 'course_published',
+            title: 'Course published',
+            message: `The course "${course.title || existing.title || 'Course'}" has been published and is ready for learning.`,
+            link: `/student/course/${course._id}/details`,
+            metadata: { courseId: String(course._id) },
+          })
+        }
+      } catch {
+        // Non-fatal notification broadcast
+      }
+    }
     return res.json({ message: status === 'published' ? 'Course published.' : 'Course moved to drafts.', course })
   } catch (error) {
     return next(error)

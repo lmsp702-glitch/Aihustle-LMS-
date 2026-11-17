@@ -161,6 +161,7 @@ const courseSchema = new mongoose.Schema(
     modules: { type: [moduleSchema], default: [] },
     assignments: { type: [assignmentSchema], default: [] },
     quizzes: { type: [quizSchema], default: [] },
+    resources: { type: [resourceSchema], default: [] },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin', required: true },
     status: {
       type: String,

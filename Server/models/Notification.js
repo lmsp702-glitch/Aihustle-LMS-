@@ -2,11 +2,16 @@ import mongoose from 'mongoose'
 
 const notificationSchema = new mongoose.Schema(
   {
-    recipientRole: { type: String, enum: ['main_admin', 'student'], required: true },
+    recipientRole: {
+      type: String,
+      enum: ['main_admin', 'student', 'college_admin', 'college'],
+      required: true,
+    },
     recipientId: { type: mongoose.Schema.Types.ObjectId },
+    collegeId: { type: mongoose.Schema.Types.ObjectId, ref: 'College' },
+    isRead: { type: Boolean, default: false },
     type: {
       type: String,
-      enum: ['independent_student_registered', 'independent_student_approved', 'independent_student_rejected'],
       required: true,
     },
     title: { type: String, required: true, trim: true, maxlength: 160 },
@@ -18,6 +23,7 @@ const notificationSchema = new mongoose.Schema(
 )
 
 notificationSchema.index({ recipientRole: 1, recipientId: 1, createdAt: -1 })
+notificationSchema.index({ collegeId: 1, recipientRole: 1, createdAt: -1 })
 
 const Notification =
   mongoose.models.Notification ||

@@ -25,12 +25,27 @@ const DASHBOARD_PATHS = {
   student: '/student/dashboard',
   main_admin: '/admin/dashboard',
   college_admin: '/college-admin/dashboard',
+  college: '/college-admin/dashboard',
 }
 const DASHBOARD_API_ROLES = {
   student: 'student',
   main_admin: 'main_admin',
   college_admin: 'college_admin',
+  college: 'college_admin',
 }
+
+const HEAR_ABOUT_US_OPTIONS = [
+  'College / University Referral',
+  'Friend / Student Referral',
+  'Social Media',
+  'Online Advertisement',
+  'Google / Search Engine',
+  'YouTube',
+  'College Event / Workshop',
+  'Other Website / Blog',
+  'Other',
+]
+
 const AUTH_ROLE_KEYS = {
   Student: 'student',
   'Main Admin': 'main_admin',
@@ -213,6 +228,8 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
   const [registrationEmailResendCountdown, setRegistrationEmailResendCountdown] = useState(0)
   const [isSendingRegistrationEmailCode, setIsSendingRegistrationEmailCode] = useState(false)
   const [isVerifyingRegistrationEmailCode, setIsVerifyingRegistrationEmailCode] = useState(false)
+  const [hearAboutUs, setHearAboutUs] = useState('')
+  const [hearAboutUsOther, setHearAboutUsOther] = useState('')
   const [referralCode, setReferralCode] = useState(
     () => new URLSearchParams(window.location.search).get('referralCode') || '',
   )
@@ -545,6 +562,10 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
                 emailVerificationToken: registrationEmailVerificationToken,
                 role: 'student',
                 accountType: 'independent',
+            hearAboutUs: hearAboutUs.trim(),
+            ...(hearAboutUs.trim() === 'Other' && hearAboutUsOther.trim()
+              ? { hearAboutUsOther: hearAboutUsOther.trim() }
+              : {}),
                 registrationDetails,
                 ...(form.elements.referralCode.value.trim()
                   ? { referralCode: form.elements.referralCode.value.trim() }
@@ -1045,6 +1066,47 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
         )}
 
         {isRegistering && (
+          
+            <div className="field">
+              <label htmlFor="hear-about-us">
+                How did you hear about us? <span aria-hidden="true">*</span>
+              </label>
+              <select
+                id="hear-about-us"
+                name="hearAboutUs"
+                value={hearAboutUs}
+                required
+                onChange={(event) => {
+                  const value = event.currentTarget.value
+                  setHearAboutUs(value)
+                  if (value !== 'Other') setHearAboutUsOther('')
+                }}
+              >
+                <option value="">Select an option</option>
+                {HEAR_ABOUT_US_OPTIONS.map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))}
+              </select>
+              {hearAboutUs === 'Other' && (
+                <>
+                  <label htmlFor="hear-about-us-other" style={{ marginTop: '8px', display: 'block' }}>Please specify</label>
+                  <input
+                    id="hear-about-us-other"
+                    name="hearAboutUsOther"
+                    type="text"
+                    placeholder="Specify how you heard about us"
+                    value={hearAboutUsOther}
+                    onChange={(event) => setHearAboutUsOther(event.currentTarget.value)}
+                    maxLength={200}
+                  />
+                </>
+              )}
+            </div>
+        )}
+
+        {isRegistering && (
           <div className="field">
             <label htmlFor="registration-referral-code">Referral Code (optional)</label>
             <div className="referral-code-input">
@@ -1416,6 +1478,42 @@ function getCachedDashboardUser(role) {
   }
 }
 
+
+class DashboardErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props)
+    this.state = { hasError: false, error: null }
+  }
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error }
+  }
+  componentDidCatch(error, errorInfo) {
+    console.error('Dashboard uncaught error:', error, errorInfo)
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <main className="dashboard-landing" style={{ padding: '40px 20px', textAlign: 'center' }}>
+          <section className="dashboard-card" style={{ maxWidth: '600px', margin: '0 auto', padding: '30px' }}>
+            <h2 style={{ color: '#b91c1c', marginBottom: '10px' }}>Something went wrong</h2>
+            <p style={{ color: '#4b5563', marginBottom: '20px' }}>
+              {this.state.error?.message || 'An error occurred while loading this dashboard.'}
+            </p>
+            <button
+              type="button"
+              onClick={() => { this.setState({ hasError: false, error: null }); window.location.reload() }}
+              style={{ padding: '8px 16px', background: '#3b82f6', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer' }}
+            >
+              Reload page
+            </button>
+          </section>
+        </main>
+      )
+    }
+    return this.props.children
+  }
+}
+
 function DashboardPage({ role, isDark, onToggleTheme, themePreference, onSetTheme }) {
   const location = useLocation()
   const [user, setUser] = useState(() => getCachedDashboardUser(role))
@@ -1478,7 +1576,7 @@ function DashboardPage({ role, isDark, onToggleTheme, themePreference, onSetThem
           setError('This account does not match the selected dashboard role.')
           return
         }
-        if (role === 'college_admin' && !userIsActive) {
+        if ((role === 'college_admin' || role === 'college') && !userIsActive) {
           setError('Your college administrator account is not active.')
           return
         }
@@ -1620,7 +1718,7 @@ function DashboardPage({ role, isDark, onToggleTheme, themePreference, onSetThem
       />
     )
   }
-  if (role === 'college_admin' && user && location.pathname.startsWith('/college-admin/settings')) {
+  if ((role === 'college_admin' || role === 'college') && user && location.pathname.startsWith('/college-admin/settings')) {
     return (
       <>
         <WorkspaceTopbar
@@ -1645,7 +1743,7 @@ function DashboardPage({ role, isDark, onToggleTheme, themePreference, onSetThem
       </>
     )
   }
-  if (role === 'college_admin' && user) {
+  if ((role === 'college_admin' || role === 'college') && user) {
     return (
       <CollegeAdminDashboard
         user={user}
@@ -1698,6 +1796,16 @@ function App() {
     return storedTheme === 'dark' ? 'dark' : 'light'
   })
   const isDark = themePreference === 'dark'
+
+  useEffect(() => {
+    function handleStorage(event) {
+      if (event.key === 'lms.theme' && (event.newValue === 'light' || event.newValue === 'dark')) {
+        setThemePreference(event.newValue)
+      }
+    }
+    window.addEventListener('storage', handleStorage)
+    return () => window.removeEventListener('storage', handleStorage)
+  }, [])
   useEffect(() => {
     document.documentElement.dataset.theme = isDark ? 'dark' : 'light'
     localStorage.setItem('lms.theme', themePreference)
@@ -1730,6 +1838,16 @@ function App() {
     return (
       <Navigate
         to={{ pathname: DASHBOARD_PATHS.student, search: location.search, hash: location.hash }}
+        replace
+      />
+    )
+  }
+
+  
+  if (location.pathname === '/college-admin' || location.pathname === '/college') {
+    return (
+      <Navigate
+        to={{ pathname: DASHBOARD_PATHS.college_admin, search: location.search, hash: location.hash }}
         replace
       />
     )
