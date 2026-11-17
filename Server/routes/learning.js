@@ -36,6 +36,12 @@ import {
   getRequiredCertificateActivities,
   issueCertificateIfEligible,
 } from '../utils/certificates.js'
+import {
+  calculateCourseProgress,
+  recalculateEnrollmentCourseProgress,
+  recalculateEnrollmentsCourseProgress,
+  syncEnrollmentStatus,
+} from '../utils/course-progress.js'
 import { createStudentNotification } from '../utils/student-notifications.js'
 
 const router = Router()
@@ -46,6 +52,7 @@ const maxAssignmentSubmissionBytes = 10 * 1024 * 1024
 const maxCertificateTemplateBytes = 4 * 1024 * 1024
 const quizAttemptLimit = 3
 const quizAttemptCooldownMs = 24 * 60 * 60 * 1000
+const assignmentDeadlineMs = 7 * 24 * 60 * 60 * 1000
 const attentionCheckResponseTimeoutMs = 10 * 1000
 const loggedInvalidAttentionConfigurations = new Set()
 const assignmentFileTypes = new Map([
@@ -163,7 +170,9 @@ function getCertificateCourseProgress(activities, pendingRequirements = [], earn
   return {
     completedActivities,
     totalActivities,
-    percentage: earned ? 100 : totalActivities ? Math.round((completedActivities / totalActivities) * 100) : 0,
+    percentage: earned ? 100 : totalActivities
+      ? Math.min(99, Math.floor((completedActivities / totalActivities) * 100))
+      : 0,
   }
 }
 
@@ -311,12 +320,18 @@ function hideQuizAnswers(course) {
   }
 }
 
-function courseHasLesson(course, lessonId) {
-  return course?.modules?.some((module) => {
+function findCourseLesson(course, lessonId) {
+  for (const module of course?.modules || []) {
     const videoItems = module.contentItems?.filter((item) => item.type === 'video-lesson') || []
     const lessons = videoItems.length ? videoItems : module.lessons || []
-    return lessons.some((lesson) => String(lesson._id) === lessonId)
-  })
+    const lesson = lessons.find((item) => String(item._id) === String(lessonId))
+    if (lesson) return lesson
+  }
+  return null
+}
+
+function courseHasLesson(course, lessonId) {
+  return Boolean(findCourseLesson(course, lessonId))
 }
 
 function getCourseLessonIds(course) {
@@ -358,6 +373,57 @@ function getLearningStreak(dates, now = new Date()) {
   return streak
 }
 
+function isValidLearningActivityDate(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const date = new Date(`${value}T00:00:00.000Z`)
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value
+}
+
+function summarizeLearningActivity(enrollments, dateKeys) {
+  const activityByDate = new Map(dateKeys.map((date) => [date, {
+    seconds: 0,
+    videoLessonIds: new Set(),
+    completedLessonIds: new Set(),
+  }]))
+
+  for (const enrollment of enrollments) {
+    const dailyActivity = enrollment.dailyLearningActivity instanceof Map
+      ? [...enrollment.dailyLearningActivity.entries()]
+      : Object.entries(enrollment.dailyLearningActivity || {})
+    for (const [date, activity] of dailyActivity) {
+      const summary = activityByDate.get(date)
+      if (!summary) continue
+      const seconds = Number(activity?.seconds)
+      if (Number.isFinite(seconds) && seconds > 0) summary.seconds += seconds
+      for (const lessonId of activity?.videoLessonIds || []) {
+        summary.videoLessonIds.add(String(lessonId))
+      }
+    }
+
+    const completionDates = enrollment.lessonCompletionDates instanceof Map
+      ? [...enrollment.lessonCompletionDates.entries()]
+      : Object.entries(enrollment.lessonCompletionDates || {})
+    for (const [lessonId, completedAt] of completionDates) {
+      const date = new Date(completedAt)
+      if (!Number.isFinite(date.getTime())) continue
+      const summary = activityByDate.get(date.toISOString().slice(0, 10))
+      if (!summary) continue
+      summary.completedLessonIds.add(String(lessonId))
+      summary.videoLessonIds.add(String(lessonId))
+    }
+  }
+
+  return dateKeys.map((date) => {
+    const summary = activityByDate.get(date)
+    return {
+      date,
+      seconds: Math.floor(summary.seconds),
+      videosWatched: summary.videoLessonIds.size,
+      lessonsCompleted: summary.completedLessonIds.size,
+    }
+  })
+}
+
 function summarizeStudentLearning(enrollments, assignmentSubmissions, now = new Date()) {
   const enrollmentsByCourse = new Map()
   for (const enrollment of enrollments) {
@@ -370,6 +436,8 @@ function summarizeStudentLearning(enrollments, assignmentSubmissions, now = new 
   }
 
   let completedCourses = 0
+  let completedActivities = 0
+  let totalActivities = 0
   let completedLessons = 0
   let inProgressLessons = 0
   let notStartedLessons = 0
@@ -384,15 +452,14 @@ function summarizeStudentLearning(enrollments, assignmentSubmissions, now = new 
 
   for (const enrollment of enrollmentsByCourse.values()) {
     const course = enrollment.courseId
+    const courseProgress = enrollment.courseProgress || { completedActivities: 0, totalActivities: 0, isComplete: false }
     const lessonIds = getCourseLessonIds(course)
     const lessonIdSet = new Set(lessonIds)
     const completedIds = new Set((enrollment.completedLessonIds || []).map(String))
     const startedIds = new Set((enrollment.startedLessonIds || []).map(String))
-    let completedInCourse = 0
 
     for (const lessonId of lessonIdSet) {
       if (completedIds.has(lessonId)) {
-        completedInCourse += 1
         completedLessons += 1
       } else if (startedIds.has(lessonId)) {
         inProgressLessons += 1
@@ -402,7 +469,9 @@ function summarizeStudentLearning(enrollments, assignmentSubmissions, now = new 
     }
 
     totalLessons += lessonIdSet.size
-    if (lessonIdSet.size > 0 && completedInCourse === lessonIdSet.size) completedCourses += 1
+    if (courseProgress.isComplete) completedCourses += 1
+    completedActivities += courseProgress.completedActivities
+    totalActivities += courseProgress.totalActivities
     for (const assignmentId of getCourseAssignmentCount(course)) {
       if (!submittedAssignments.has(`${enrollment._id}:${assignmentId}`)) pendingAssignments += 1
     }
@@ -426,7 +495,11 @@ function summarizeStudentLearning(enrollments, assignmentSubmissions, now = new 
     inProgressLessons,
     notStartedLessons,
     totalLessons,
-    completionPercentage: totalLessons ? Math.round((completedLessons / totalLessons) * 100) : 0,
+    completionPercentage: totalActivities
+      ? completedActivities === totalActivities
+        ? 100
+        : Math.min(99, Math.floor((completedActivities / totalActivities) * 100))
+      : 0,
   }
 }
 
@@ -648,6 +721,28 @@ function findAssignment(course, assignmentId) {
     if (assignment) return assignment
   }
   return null
+}
+
+function getAssignmentDeadline(enrollmentCreatedAt) {
+  if (!enrollmentCreatedAt) return null
+  const enrollmentTime = new Date(enrollmentCreatedAt).getTime()
+  return Number.isFinite(enrollmentTime)
+    ? new Date(enrollmentTime + assignmentDeadlineMs)
+    : null
+}
+
+function applyAssignmentDeadline(course, enrollmentCreatedAt) {
+  const dueDate = getAssignmentDeadline(enrollmentCreatedAt)
+  return {
+    ...course,
+    assignments: (course.assignments || []).map((assignment) => ({ ...assignment, dueDate })),
+    modules: (course.modules || []).map((module) => ({
+      ...module,
+      contentItems: (module.contentItems || []).map((item) => (
+        item.type === 'assignment' ? { ...item, dueDate } : item
+      )),
+    })),
+  }
 }
 
 function sanitizeSubmissionFileName(fileName) {
@@ -923,16 +1018,46 @@ router.get('/learning/summary', ...requireStudent, async (req, res, next) => {
       status: { $ne: 'cancelled' },
     }
     const enrollments = await Enrollment.find(enrollmentQuery)
-      .populate('courseId', 'modules assignments')
+      .populate('courseId', 'modules assignments quizzes')
       .sort({ createdAt: -1 })
       .lean()
+    const enrollmentsWithProgress = await recalculateEnrollmentsCourseProgress(enrollments)
     const assignmentSubmissions = enrollments.length
       ? await AssignmentSubmission.find({
         userId: req.auth.id,
         enrollmentId: { $in: enrollments.map((enrollment) => enrollment._id) },
       }).select('enrollmentId assignmentId').lean()
       : []
-    return res.json({ summary: summarizeStudentLearning(enrollments, assignmentSubmissions) })
+    return res.json({ summary: summarizeStudentLearning(enrollmentsWithProgress, assignmentSubmissions) })
+  } catch (error) {
+    return next(error)
+  }
+})
+
+router.get('/learning/activity', ...requireStudent, async (req, res, next) => {
+  try {
+    const { start, end } = req.query
+    if (!isValidLearningActivityDate(start) || !isValidLearningActivityDate(end)) {
+      return res.status(400).json({ message: 'Select a valid learning activity date range.' })
+    }
+    const startTime = Date.parse(`${start}T00:00:00.000Z`)
+    const endTime = Date.parse(`${end}T00:00:00.000Z`)
+    const dayCount = Math.floor((endTime - startTime) / 86400000) + 1
+    if (dayCount < 1 || dayCount > 14) {
+      return res.status(400).json({ message: 'The learning activity range must cover between 1 and 14 days.' })
+    }
+    const dateKeys = Array.from({ length: dayCount }, (_value, index) => (
+      new Date(startTime + index * 86400000).toISOString().slice(0, 10)
+    ))
+    const enrollmentQuery = {
+      userId: req.auth.id,
+      ...getStudentEnrollmentScope(req),
+      status: { $ne: 'cancelled' },
+    }
+    const enrollments = await Enrollment.find(enrollmentQuery)
+      .select('dailyLearningActivity lessonCompletionDates')
+      .lean()
+    return res.json({ days: summarizeLearningActivity(enrollments, dateKeys) })
   } catch (error) {
     return next(error)
   }
@@ -954,6 +1079,7 @@ router.get('/courses/:courseId/learning-content', ...requireStudent, async (req,
       .select('+modules.quiz.questions.correctOptionIndices +modules.contentItems.quiz.questions.correctOptionIndices +quizzes.questions.correctOptionIndex')
       .lean()
     if (!course) return res.status(404).json({ message: 'The enrolled course could not be found.' })
+    const courseWithAssignmentDeadlines = applyAssignmentDeadline(course, enrollment.createdAt)
 
     const [assignmentSubmissions, quizAttempts] = await Promise.all([
       AssignmentSubmission.find({ userId: req.auth.id, enrollmentId: enrollment._id })
@@ -965,11 +1091,20 @@ router.get('/courses/:courseId/learning-content', ...requireStudent, async (req,
         .sort({ createdAt: -1 })
         .lean(),
     ])
+    const courseProgress = calculateCourseProgress({
+      course,
+      enrollment,
+      quizAttempts,
+      assignmentSubmissions,
+    })
+    const enrollmentStatus = await syncEnrollmentStatus(enrollment, courseProgress)
     return res.json({
       enrollment: {
         ...enrollment,
+        status: enrollmentStatus,
+        courseProgress,
         lessonPlaybackPositions: getLessonPlaybackPositions(enrollment),
-        courseId: hideQuizAnswers(course),
+        courseId: hideQuizAnswers(courseWithAssignmentDeadlines),
       },
       assignmentSubmissions: assignmentSubmissions.map((submission) => ({
         ...submission,
@@ -1520,6 +1655,7 @@ router.post('/courses/:courseId/quizzes/:quizId/attempts/:attemptId/submit', ...
     }
     if (!updatedState) throw new Error('Quiz attempt state could not be updated after submission.')
     const quizStatus = getQuizAttemptStatus(updatedState, submittedAt)
+    const courseProgress = await recalculateEnrollmentCourseProgress({ enrollment, course })
 
     await createStudentNotification({
       recipientId: req.auth.id,
@@ -1577,6 +1713,8 @@ router.post('/courses/:courseId/quizzes/:quizId/attempts/:attemptId/submit', ...
           }))),
       },
       quizStatus,
+      courseProgress,
+      status: courseProgress.status,
     })
   } catch (error) {
     return next(error)
@@ -1603,9 +1741,17 @@ router.post(
         status: { $ne: 'cancelled' },
       }).sort({ createdAt: -1 }).lean()
       if (!enrollment) return res.status(404).json({ message: 'An active enrollment is required to submit this assignment.' })
-      const course = await Course.findById(courseId).select('assignments modules.contentItems').lean()
-      if (!course || !findAssignment(course, assignmentId)) {
+      const course = await Course.findById(courseId).select('assignments modules quizzes').lean()
+      const assignment = findAssignment(course, assignmentId)
+      if (!course || !assignment) {
         return res.status(404).json({ message: 'This assignment is not available in the enrolled course.' })
+      }
+      const deadline = getAssignmentDeadline(enrollment.createdAt)
+      if (!deadline) {
+        return res.status(409).json({ message: 'The assignment deadline could not be calculated from your enrollment date.' })
+      }
+      if (Date.now() > deadline.getTime()) {
+        return res.status(403).json({ message: 'The one-week submission deadline for this assignment has passed.' })
       }
       const submission = await AssignmentSubmission.create({
         userId: req.auth.id,
@@ -1618,7 +1764,7 @@ router.post(
         fileSize: req.file.size,
         fileData: req.file.buffer,
       })
-      const assignment = findAssignment(course, assignmentId)
+      const courseProgress = await recalculateEnrollmentCourseProgress({ enrollment, course })
       await createStudentNotification({
         recipientId: req.auth.id,
         eventKey: `assignment-submitted:${req.auth.id}:${submission._id}`,
@@ -1638,6 +1784,8 @@ router.post(
           submittedAt: submission.submittedAt,
           reviewStatus: submission.reviewStatus,
         },
+        courseProgress,
+        status: courseProgress.status,
       })
     } catch (error) {
       return next(error)
@@ -1693,8 +1841,9 @@ router.get('/enrollments/me', ...requireStudent, async (req, res, next) => {
       )
       .sort({ createdAt: -1 })
       .lean()
+    const enrollmentsWithProgress = await recalculateEnrollmentsCourseProgress(enrollments)
     return res.json({
-      enrollments: enrollments.map((enrollment) => ({
+      enrollments: enrollmentsWithProgress.map((enrollment) => ({
         ...enrollment,
         courseId: hideQuizAnswers(enrollment.courseId),
       })),
@@ -1807,16 +1956,67 @@ router.get('/certificates/:certificateId/pdf', ...requireStudent, async (req, re
   }
 })
 
+router.post('/enrollments/:enrollmentId/learning-activity', ...requireStudent, async (req, res, next) => {
+  try {
+    const { enrollmentId } = req.params
+    const { lessonId, seconds, activityDate } = req.body ?? {}
+    const today = new Date()
+    const todayUtc = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())
+    const activityTime = isValidLearningActivityDate(activityDate)
+      ? Date.parse(`${activityDate}T00:00:00.000Z`)
+      : Number.NaN
+    if (
+      !isValidObjectId(enrollmentId)
+      || !isValidObjectId(lessonId)
+      || !Number.isInteger(seconds)
+      || seconds < 1
+      || seconds > 60
+      || !Number.isFinite(activityTime)
+      || Math.abs(activityTime - todayUtc) > 86400000
+    ) {
+      return res.status(400).json({ message: 'A valid enrollment, video lesson, date, and watch duration are required.' })
+    }
+
+    const enrollmentQuery = {
+      _id: enrollmentId,
+      userId: req.auth.id,
+      ...getStudentEnrollmentScope(req),
+      status: { $ne: 'cancelled' },
+    }
+    const enrollment = await Enrollment.findOne(enrollmentQuery)
+      .populate('courseId', 'modules')
+      .lean()
+    if (!enrollment) return res.status(404).json({ message: 'The enrollment was not found.' })
+    if (!courseHasLesson(enrollment.courseId, lessonId)) {
+      return res.status(404).json({ message: 'The video lesson was not found in this course.' })
+    }
+
+    const activityPath = `dailyLearningActivity.${activityDate}`
+    const result = await Enrollment.updateOne(enrollmentQuery, {
+      $inc: { [`${activityPath}.seconds`]: seconds },
+      $addToSet: { [`${activityPath}.videoLessonIds`]: lessonId },
+    })
+    if (!result.matchedCount) return res.status(404).json({ message: 'The enrollment was not found.' })
+    return res.json({ message: 'Learning activity recorded.' })
+  } catch (error) {
+    return next(error)
+  }
+})
+
 router.patch('/enrollments/:enrollmentId/progress', ...requireStudent, async (req, res, next) => {
   try {
     const { enrollmentId } = req.params
-    const { lessonId, completed, started, positionSeconds } = req.body ?? {}
+    const { lessonId, completed, started, positionSeconds, videoDurationSeconds } = req.body ?? {}
     const hasPositionSeconds = Object.prototype.hasOwnProperty.call(req.body || {}, 'positionSeconds')
+    const hasVideoDurationSeconds = Object.prototype.hasOwnProperty.call(req.body || {}, 'videoDurationSeconds')
     if (
       !isValidObjectId(enrollmentId)
       || !isValidObjectId(lessonId)
       || (typeof completed !== 'boolean' && started !== true && !hasPositionSeconds)
       || (hasPositionSeconds && (!Number.isFinite(positionSeconds) || positionSeconds < 0 || positionSeconds > 43200))
+      || (hasVideoDurationSeconds && (
+        !Number.isFinite(videoDurationSeconds) || videoDurationSeconds <= 0 || videoDurationSeconds > 43200
+      ))
     ) {
       return res.status(400).json({ message: 'A valid enrollment, lesson, and progress state are required.' })
     }
@@ -1834,8 +2034,18 @@ router.patch('/enrollments/:enrollmentId/progress', ...requireStudent, async (re
       .populate('courseId', 'title modules assignments quizzes generateCertificate')
       .lean()
     if (!enrollment) return res.status(404).json({ message: 'The enrollment was not found.' })
-    if (!courseHasLesson(enrollment.courseId, lessonId)) {
+    const courseLesson = findCourseLesson(enrollment.courseId, lessonId)
+    if (!courseLesson) {
       return res.status(404).json({ message: 'The lesson was not found in this course.' })
+    }
+    if (completed === true) {
+      if (
+        !hasPositionSeconds
+        || !hasVideoDurationSeconds
+        || positionSeconds < videoDurationSeconds
+      ) {
+        return res.status(400).json({ message: 'Watch the entire video before completing this lesson.' })
+      }
     }
 
     const isAlreadyCompleted = (enrollment.completedLessonIds || []).some((id) => String(id) === lessonId)
@@ -1856,11 +2066,13 @@ router.patch('/enrollments/:enrollmentId/progress', ...requireStudent, async (re
         ...update.$set,
         [`lessonPlaybackPositions.${lessonId}`]: positionSeconds,
       }
-      const previousPositionValue = getMapValue(enrollment.lessonPlaybackPositions, lessonId)
-      const previousPositionQuery = previousPositionValue === undefined
-        ? { $exists: false }
-        : previousPositionValue
-      enrollmentQuery[`lessonPlaybackPositions.${lessonId}`] = previousPositionQuery
+      if (typeof completed !== 'boolean') {
+        const previousPositionValue = getMapValue(enrollment.lessonPlaybackPositions, lessonId)
+        const previousPositionQuery = previousPositionValue === undefined
+          ? { $exists: false }
+          : previousPositionValue
+        enrollmentQuery[`lessonPlaybackPositions.${lessonId}`] = previousPositionQuery
+      }
     }
     const result = await Enrollment.updateOne(enrollmentQuery, update)
     if (!result.matchedCount) {
@@ -1894,12 +2106,19 @@ router.patch('/enrollments/:enrollmentId/progress', ...requireStudent, async (re
         course: enrollment.courseId,
       })
     }
+    const courseProgress = typeof completed === 'boolean'
+      ? await recalculateEnrollmentCourseProgress({
+        enrollment: { ...enrollment, completedLessonIds: [...completedLessonIds] },
+        course: enrollment.courseId,
+      })
+      : null
     const lessonPlaybackPositions = getLessonPlaybackPositions(enrollment)
     if (hasPositionSeconds) lessonPlaybackPositions[lessonId] = positionSeconds
     return res.json({
       completedLessonIds: [...completedLessonIds],
       startedLessonIds: [...startedLessonIds],
       lessonPlaybackPositions,
+      ...(courseProgress ? { courseProgress, status: courseProgress.status } : {}),
     })
   } catch (error) {
     return next(error)

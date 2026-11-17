@@ -1059,14 +1059,18 @@
   line-height: 1.4;
 }
 
+.auth-form:not(.login-form) .username-availability.is-available,
 .username-availability.is-available {
-  color: #347b5c;
+  color: #14532d;
 }
 
+.auth-form:not(.login-form) .username-availability.is-taken,
+.auth-form:not(.login-form) .username-availability.is-invalid,
+.auth-form:not(.login-form) .username-availability.is-error,
 .username-availability.is-taken,
 .username-availability.is-invalid,
 .username-availability.is-error {
-  color: #b64c3c;
+  color: #b3261e;
 }
 
 .username-availability__spinner {

@@ -1,5 +1,13 @@
 import mongoose from 'mongoose'
 
+const dailyLearningActivitySchema = new mongoose.Schema(
+  {
+    seconds: { type: Number, min: 0, default: 0 },
+    videoLessonIds: { type: [{ type: mongoose.Schema.Types.ObjectId }], default: [] },
+  },
+  { _id: false },
+)
+
 const enrollmentSchema = new mongoose.Schema(
   {
     userId: {
@@ -34,6 +42,11 @@ const enrollmentSchema = new mongoose.Schema(
     lessonCompletionDates: {
       type: Map,
       of: Date,
+      default: () => new Map(),
+    },
+    dailyLearningActivity: {
+      type: Map,
+      of: dailyLearningActivitySchema,
       default: () => new Map(),
     },
   },

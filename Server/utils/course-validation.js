@@ -412,7 +412,7 @@ export function normalizeCourseDetails(input) {
           bytes: resource.bytes === undefined ? undefined : Number(resource.bytes),
         })),
         dueDate: item.dueDate || undefined,
-        points: item.points === undefined ? 0 : Number(item.points),
+        points: item.points === undefined ? (item.type === 'assignment' ? 100 : 0) : Number(item.points),
         ...(attentionCheck.value ? { attentionCheck: attentionCheck.value } : {}),
         ...(itemQuiz.value ? { quiz: itemQuiz.value } : {}),
         order: itemIndex,
@@ -440,7 +440,7 @@ export function normalizeCourseDetails(input) {
       (assignment.points !== undefined && (!Number.isFinite(Number(assignment.points)) || Number(assignment.points) < 0))) {
       return { error: `Check assignment ${index + 1}.` }
     }
-    normalizedAssignments.push({ ...(assignment._id ? { _id: normalizedDocumentId(assignment._id) } : {}), title: assignment.title.trim(), description: assignment.description?.trim() || '', dueDate: assignment.dueDate || undefined, points: assignment.points === undefined ? 0 : Number(assignment.points), requiredForCertificate: assignment.requiredForCertificate !== false })
+    normalizedAssignments.push({ ...(assignment._id ? { _id: normalizedDocumentId(assignment._id) } : {}), title: assignment.title.trim(), description: assignment.description?.trim() || '', dueDate: assignment.dueDate || undefined, points: assignment.points === undefined ? 100 : Number(assignment.points), requiredForCertificate: assignment.requiredForCertificate !== false })
   }
 
   const normalizedQuizzes = []

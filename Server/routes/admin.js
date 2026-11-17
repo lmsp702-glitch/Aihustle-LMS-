@@ -44,6 +44,7 @@ import { generateQuizQuestions } from '../utils/quiz-question-generator.js'
 import { parseStudentCsv } from '../utils/student-csv.js'
 import { toMongoBuffer } from '../utils/mongo-binary.js'
 import { getActiveCertificateTemplateId, issueCertificateIfEligible } from '../utils/certificates.js'
+import { recalculateEnrollmentCourseProgress } from '../utils/course-progress.js'
 import { createStudentNotification } from '../utils/student-notifications.js'
 
 const router = Router()
@@ -425,16 +426,17 @@ router.patch('/assignment-submissions/:submissionId/review', ...requireAdmin, as
     )
     if (!submission) return res.status(404).json({ message: 'The assignment submission was not found.' })
 
-    if (reviewStatus === 'approved') {
-      const enrollment = await Enrollment.findById(submission.enrollmentId)
-        .populate('courseId', 'title modules assignments quizzes generateCertificate')
-        .lean()
-      if (
-        enrollment
-        && enrollment.status !== 'cancelled'
-        && String(enrollment.userId) === String(submission.userId)
-        && String(enrollment.courseId?._id) === String(submission.courseId)
-      ) {
+    const enrollment = await Enrollment.findById(submission.enrollmentId)
+      .populate('courseId', 'title modules assignments quizzes generateCertificate')
+      .lean()
+    if (
+      enrollment
+      && enrollment.status !== 'cancelled'
+      && String(enrollment.userId) === String(submission.userId)
+      && String(enrollment.courseId?._id) === String(submission.courseId)
+    ) {
+      await recalculateEnrollmentCourseProgress({ enrollment, course: enrollment.courseId })
+      if (reviewStatus === 'approved') {
         const student = await Student.findById(submission.userId).select('fullName').lean()
           || await CollegeStudent.findById(submission.userId).select('fullName').lean()
         if (student?.fullName?.trim()) {

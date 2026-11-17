@@ -128,7 +128,7 @@ function emptyContentItem(type) {
     resources: [],
     ...(type === 'video-lesson' ? { attentionCheck: emptyAttentionCheck() } : {}),
     dueDate: '',
-    points: 0,
+    points: type === 'assignment' ? 100 : 0,
   }
 }
 
@@ -180,6 +180,7 @@ function courseFromServer(course) {
     prerequisites: course.prerequisites || [],
     assignments: (course.assignments || []).map((assignment) => ({
       ...assignment,
+      points: assignment.points ?? 100,
       requiredForCertificate: assignment.requiredForCertificate !== false,
     })),
     quizzes: (course.quizzes || []).map((quiz) => ({
@@ -211,6 +212,7 @@ function courseFromServer(course) {
         contentItems: (module.contentItems?.length ? module.contentItems : legacyItems).map((item) => ({
           ...item,
           _localId: item._id || localKey(),
+          points: item.points ?? (item.type === 'assignment' ? 100 : 0),
           requiredForCertificate: item.requiredForCertificate !== false && item.quiz?.requiredForCertificate !== false,
           ...(item.type === 'video-lesson' ? {
             attentionCheck: attentionCheckDraft(item.attentionCheck),
@@ -251,7 +253,7 @@ function serializeCourse(course, status = course.status) {
       title: assignment.title,
       description: assignment.description || '',
       dueDate: apiDateValue(assignment.dueDate),
-      points: Number(assignment.points) || 0,
+      points: assignment.points === undefined ? 100 : Number(assignment.points) || 0,
       requiredForCertificate: assignment.requiredForCertificate !== false,
     })),
     quizzes: (course.quizzes || []).map((quiz) => ({
@@ -337,7 +339,7 @@ function serializeCourse(course, status = course.status) {
           bytes: Number(resource.bytes) || 0,
         })),
         dueDate: apiDateValue(item.dueDate),
-        points: Number(item.points) || 0,
+        points: item.points === undefined ? (item.type === 'assignment' ? 100 : 0) : Number(item.points) || 0,
         ...(item.type === 'video-lesson' ? {
           transcriptUrl: item.transcriptUrl || '',
           transcriptPublicId: item.transcriptPublicId || '',
@@ -497,13 +499,6 @@ function formatDuration(minutes) {
   const hours = Math.floor(value / 60)
   const remainder = value % 60
   return remainder ? `${hours} hr ${remainder} min` : `${hours} hr`
-}
-
-function dateTimeLocalValue(value) {
-  if (!value) return ''
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return ''
-  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
 }
 
 function apiDateValue(value) {
@@ -1948,7 +1943,7 @@ export default function AdminCourseManagement({ onLogout }) {
                       >
                         <button type="button" className="ac-content-drag" draggable aria-label={`Reorder ${item.title}`} onDragStart={(event) => { event.stopPropagation(); setContentDrag({ kind: 'item', moduleIndex, fromIndex: itemIndex }) }} onDragEnd={() => setContentDrag(null)}>⠿</button>
                         <span className={`ac-content-type ac-content-type--${item.type}`} aria-hidden="true">{item.type === 'video-lesson' ? '▶' : item.type === 'quiz' ? '?' : item.type === 'assignment' ? '✓' : '▤'}</span>
-                        <div className="ac-content-item__text"><strong>{item.title || typeLabels[item.type]}</strong><small>{typeLabels[item.type]}{item.type === 'quiz' ? ` · ${item.quiz?.questions?.length || 0} questions` : item.type === 'assignment' && item.dueDate ? ` · Due ${new Date(item.dueDate).toLocaleDateString()}` : ''}</small></div>
+                        <div className="ac-content-item__text"><strong>{item.title || typeLabels[item.type]}</strong><small>{typeLabels[item.type]}{item.type === 'quiz' ? ` · ${item.quiz?.questions?.length || 0} questions` : ''}</small></div>
                         <div className="ac-content-item__actions">
                           <button type="button" className="ac-icon-button ac-icon-button--small" aria-label={`Edit ${item.title}`} onClick={() => openContentEditor(moduleIndex, item.type, itemIndex)}>✎</button>
                           <button type="button" className="ac-icon-button ac-icon-button--small ac-icon-button--danger" aria-label={`Delete ${item.title}`} onClick={() => deleteContentItem(moduleIndex, itemIndex)}>×</button>
@@ -2071,7 +2066,7 @@ export default function AdminCourseManagement({ onLogout }) {
                       </>}
                       {contentDraft.type === 'assignment' && <>
                         <label className="ac-field"><span>Instructions</span><textarea rows="4" maxLength="10000" value={contentDraft.description} onChange={(event) => updateDraft('description', event.target.value)} /></label>
-                        <div className="ac-form-columns"><label className="ac-field"><span>Due date</span><input type="datetime-local" value={dateTimeLocalValue(contentDraft.dueDate)} onChange={(event) => updateDraft('dueDate', event.target.value)} /></label><label className="ac-field"><span>Points</span><input type="number" min="0" max="100000" value={contentDraft.points} onChange={(event) => updateDraft('points', event.target.value)} /></label></div>
+                        <div className="ac-form-columns"><label className="ac-field"><span>Points</span><input type="number" min="0" max="100000" value={contentDraft.points} onChange={(event) => updateDraft('points', event.target.value)} /></label></div>
                       </>}
                       {contentDraft.type === 'note' && <>
                         <label className="ac-field"><span>Notes</span><textarea rows="5" maxLength="20000" value={contentDraft.content} onChange={(event) => updateDraft('content', event.target.value)} placeholder="Write the lesson notes here." /></label>

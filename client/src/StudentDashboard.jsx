@@ -123,6 +123,8 @@ function Icon({ name, size = 19 }) {
     chart: <><path d="M4 19V5m0 14h17" /><path d="m7 15 4-4 3 2 5-6m-4 0h4v4" /></>,
     folder: <><path d="M3 6.5A2.5 2.5 0 0 1 5.5 4H10l2 2h6.5A2.5 2.5 0 0 1 21 8.5v9a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z" /><path d="M3 9h18" /></>,
     folderOpen: <><path d="M3 7V5.5A1.5 1.5 0 0 1 4.5 4H10l2 2h6.5A1.5 1.5 0 0 1 20 7.5V9" /><path d="M3 10h18l-2.1 8.4a2 2 0 0 1-1.9 1.6H5a2 2 0 0 1-2-2z" /></>,
+    eye: <><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z" /><circle cx="12" cy="12" r="3" /></>,
+    download: <><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="m7 10 5 5 5-5M12 15V3" /></>,
     message: <><path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5 8 8 0 0 1-3.5-.8L4 20l1.5-4A7.5 7.5 0 1 1 20 11.5Z" /><path d="M8 11h.01M12 11h.01M16 11h.01" /></>,
     award: <><circle cx="12" cy="8" r="5" /><path d="m8.5 12-1 9 4.5-2.5 4.5 2.5-1-9" /></>,
     user: <><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" /></>,
@@ -660,6 +662,64 @@ async function fetchStudentLearningSummary(onLogout, signal) {
   return result.summary
 }
 
+function getLocalLearningDateKey(date) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function getLearningActivityDateRanges(now = new Date()) {
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const monday = new Date(today)
+  monday.setDate(today.getDate() - ((today.getDay() + 6) % 7))
+  const previousMonday = new Date(monday)
+  previousMonday.setDate(monday.getDate() - 7)
+  const datesForWeek = (mondayDate) => Array.from({ length: 7 }, (_value, index) => {
+    const date = new Date(mondayDate)
+    date.setDate(mondayDate.getDate() + index)
+    return getLocalLearningDateKey(date)
+  })
+  const currentWeek = datesForWeek(monday)
+  const previousWeek = datesForWeek(previousMonday)
+  return {
+    today: getLocalLearningDateKey(today),
+    currentWeek,
+    previousWeek,
+    start: previousWeek[0],
+    end: currentWeek[currentWeek.length - 1],
+  }
+}
+
+async function fetchStudentLearningActivity(onLogout, startDate, endDate, signal) {
+  const savedAuth = sessionStorage.getItem('lms.auth')
+  const auth = savedAuth ? JSON.parse(savedAuth) : null
+  if (typeof auth?.token !== 'string') {
+    onLogout()
+    throw new Error('Your session has ended. Please sign in again.')
+  }
+  const query = new URLSearchParams({ start: startDate, end: endDate })
+  const response = await fetchWithAuth(`${API_BASE_URL}/learning/activity?${query}`, {
+    headers: { Authorization: `Bearer ${auth.token}` },
+    signal,
+  }, API_BASE_URL, auth.token)
+  const result = await response.json()
+  if (isInvalidSessionResponse(response, result)) {
+    onLogout()
+    throw new Error('Your session has ended. Please sign in again.')
+  }
+  if (!response.ok) throw new Error(result.message || 'Learning activity could not be loaded.')
+  if (!Array.isArray(result.days) || result.days.some((day) => (
+    typeof day.date !== 'string'
+    || !Number.isFinite(day.seconds)
+    || !Number.isFinite(day.videosWatched)
+    || !Number.isFinite(day.lessonsCompleted)
+  ))) {
+    throw new Error('The server returned invalid learning activity data.')
+  }
+  return result.days
+}
+
 async function fetchStudentCourseContent(courseId, onLogout, signal) {
   const savedAuth = sessionStorage.getItem('lms.auth')
   const auth = savedAuth ? JSON.parse(savedAuth) : null
@@ -875,6 +935,65 @@ function getLatestEnrollmentsByCourse(enrollments) {
   return latestEnrollmentByCourse
 }
 
+function getStudentResourceRecords(enrollments) {
+  const resourcesByCourseAndUrl = new Map()
+  for (const enrollment of getLatestEnrollmentsByCourse(enrollments).values()) {
+    const course = enrollment.courseId
+    if (!course || typeof course !== 'object') continue
+    const courseId = String(course._id || '')
+    if (!courseId) continue
+
+    for (const module of course.modules || []) {
+      const contentItems = [
+        ...(module.lessons || []),
+        ...(module.contentItems || []),
+      ]
+      for (const item of contentItems) {
+        for (const resource of item.resources || []) {
+          const url = typeof resource.url === 'string' ? resource.url.trim() : ''
+          if (!url) continue
+          const key = `${courseId}:${url}`
+          if (resourcesByCourseAndUrl.has(key)) continue
+          const fileName = url.split(/[?#]/, 1)[0].split('/').pop()
+          const format = resource.format
+            || (fileName?.includes('.') ? fileName.split('.').pop() : '')
+            || 'FILE'
+          resourcesByCourseAndUrl.set(key, {
+            key,
+            title: resource.title?.trim() || fileName || 'Learning resource',
+            url,
+            format: String(format).toUpperCase(),
+            bytes: resource.bytes,
+            topic: course.category || module.title || course.title || 'Course',
+            courseId,
+            courseName: course.title || 'Course',
+            date: item.updatedAt || course.updatedAt || enrollment.createdAt,
+          })
+        }
+      }
+    }
+  }
+  return [...resourcesByCourseAndUrl.values()]
+}
+
+function formatStudentResourceSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return ''
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function formatStudentResourceDate(value) {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  }).format(date)
+}
+
 function createStudentAssignmentRows(courseResults) {
   return courseResults.flatMap(({ enrollment, submissions }) => {
     const course = enrollment.courseId
@@ -1022,6 +1141,174 @@ function StudentDashboardUpcomingAssignments({ onLogout }) {
         >
           Try again
         </button>
+      )}
+    </div>
+  )
+}
+
+function StudentResourcesPage({ onLogout }) {
+  const cachedEnrollments = getCachedStudentPageEnrollments()
+  const [enrollments, setEnrollments] = useState(cachedEnrollments)
+  const [isLoading, setIsLoading] = useState(!cachedEnrollments)
+  const [loadError, setLoadError] = useState('')
+  const [search, setSearch] = useState('')
+  const [selectedCourseId, setSelectedCourseId] = useState('all')
+  const [previewResource, setPreviewResource] = useState(null)
+  const [retryCount, setRetryCount] = useState(0)
+
+  useEffect(() => {
+    let isCurrent = true
+    if (!getCachedStudentPageEnrollments()) setIsLoading(true)
+    setLoadError('')
+    fetchStudentPageEnrollments(onLogout)
+      .then((result) => {
+        if (isCurrent) setEnrollments(result)
+      })
+      .catch((error) => {
+        if (isCurrent) {
+          setLoadError(error instanceof Error ? error.message : 'Learning resources could not be loaded.')
+        }
+      })
+      .finally(() => {
+        if (isCurrent) setIsLoading(false)
+      })
+    return () => { isCurrent = false }
+  }, [onLogout, retryCount])
+
+  const enrolledCourses = [...getLatestEnrollmentsByCourse(enrollments || []).entries()]
+    .flatMap(([courseId, enrollment]) => {
+      const course = enrollment.courseId
+      return course && typeof course === 'object'
+        ? [{ id: courseId, title: course.title || 'Course' }]
+        : []
+    })
+  const resources = getStudentResourceRecords(enrollments || [])
+  const visibleResources = resources.filter((resource) => {
+    const matchesCourse = selectedCourseId === 'all' || resource.courseId === selectedCourseId
+    const term = search.trim().toLocaleLowerCase()
+    const matchesSearch = !term || [resource.title, resource.topic, resource.courseName]
+      .some((value) => value.toLocaleLowerCase().includes(term))
+    return matchesCourse && matchesSearch
+  })
+
+  return (
+    <div className="student-resource-library">
+      <header className="student-resource-library__intro">
+        <p className="student-resource-library__eyebrow">KEEP EXPLORING</p>
+        <h1>Learning Resources</h1>
+        <p>Explore study materials and learning resources for your enrolled courses.</p>
+      </header>
+
+      <section className="student-resource-library__filters" aria-label="Filter learning resources">
+        <label className="student-resource-library__search">
+          <Icon name="search" size={20} />
+          <input
+            type="search"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search resources by title or topic..."
+            aria-label="Search resources by title or topic"
+          />
+        </label>
+        <label className="student-resource-library__course-filter">
+          <span>Filter by Course</span>
+          <select
+            value={selectedCourseId}
+            onChange={(event) => setSelectedCourseId(event.target.value)}
+            disabled={enrolledCourses.length === 0}
+            aria-label="Filter resources by course"
+          >
+            <option value="all">All Enrolled Courses ({enrolledCourses.length})</option>
+            {enrolledCourses.map((course) => (
+              <option key={course.id} value={course.id}>{course.title}</option>
+            ))}
+          </select>
+        </label>
+      </section>
+
+      {loadError && (
+        <div className="student-resource-library__error" role="alert">
+          <span>{loadError}</span>
+          <button type="button" onClick={() => setRetryCount((count) => count + 1)}>Try again</button>
+        </div>
+      )}
+
+      {isLoading && !enrollments ? (
+        <p className="student-resource-library__state" role="status" aria-busy="true">Loading your learning resources...</p>
+      ) : visibleResources.length ? (
+        <div className="student-resource-library__grid">
+          {visibleResources.map((resource) => (
+            <article className="student-resource-card" key={resource.key}>
+              <div className="student-resource-card__topline">
+                <span className="student-resource-card__format">{resource.format}</span>
+                {formatStudentResourceSize(resource.bytes) && (
+                  <span className="student-resource-card__size">{formatStudentResourceSize(resource.bytes)}</span>
+                )}
+              </div>
+              <h2>{resource.title}</h2>
+              <p className="student-resource-card__topic">{resource.topic}</p>
+              <footer>
+                <time dateTime={resource.date || undefined}>{formatStudentResourceDate(resource.date)}</time>
+                <div className="student-resource-card__actions">
+                  <button type="button" onClick={() => setPreviewResource(resource)}>
+                    <Icon name="eye" size={17} />
+                    Preview
+                  </button>
+                  <a href={resource.url} download={resource.title}>
+                    <Icon name="download" size={17} />
+                    Download
+                  </a>
+                </div>
+              </footer>
+            </article>
+          ))}
+        </div>
+      ) : !isLoading && !loadError ? (
+        <div className="student-resource-library__state">
+          <h2>
+            {resources.length
+              ? 'No resources match your search'
+              : enrolledCourses.length
+                ? 'No learning materials yet'
+                : 'No enrolled courses yet'}
+          </h2>
+          <p>
+            {resources.length
+              ? 'Try another title or topic, or select a different course.'
+              : enrolledCourses.length
+                ? 'Course materials will appear here when they are shared with your enrolled courses.'
+                : 'Enroll in a course to find its study materials here.'}
+          </p>
+          {(search || selectedCourseId !== 'all') && (
+            <button
+              type="button"
+              onClick={() => {
+                setSearch('')
+                setSelectedCourseId('all')
+              }}
+            >Clear filters</button>
+          )}
+        </div>
+      ) : null}
+
+      {previewResource && (
+        <div
+          className="student-resource-preview"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Preview ${previewResource.title}`}
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setPreviewResource(null)
+          }}
+        >
+          <div className="student-resource-preview__panel">
+            <header>
+              <strong>{previewResource.title}</strong>
+              <button type="button" onClick={() => setPreviewResource(null)} aria-label="Close preview">×</button>
+            </header>
+            <iframe title={`Preview of ${previewResource.title}`} src={previewResource.url} />
+          </div>
+        </div>
       )}
     </div>
   )
@@ -1708,6 +1995,19 @@ function isValidLessonId(value) {
   return /^[a-f\d]{24}$/i.test(String(value || ''))
 }
 
+function getVideoCompletionDuration(video, lesson) {
+  const duration = Number(video?.duration)
+  if (Number.isFinite(duration) && duration > 0) return duration
+
+  if (video?.seekable?.length) {
+    const seekableEnd = Number(video.seekable.end(video.seekable.length - 1))
+    if (Number.isFinite(seekableEnd) && seekableEnd > 0) return seekableEnd
+  }
+
+  const storedDuration = Number(lesson?.durationSeconds)
+  return Number.isFinite(storedDuration) && storedDuration > 0 ? storedDuration : 0
+}
+
 function getCourseLessons(course) {
   return (course?.modules || []).flatMap((module, moduleIndex) => {
     const videoItems = (module.contentItems || []).filter((item) => item.type === 'video-lesson')
@@ -1741,13 +2041,31 @@ function createEmptyAttentionSession(lessonId = '') {
 }
 
 function getCourseProgress(enrollment) {
-  const lessons = getCourseLessons(enrollment.courseId)
-  const completedIds = new Set((enrollment.completedLessonIds || []).map(String))
-  const completedCount = lessons.filter(({ lesson }) => completedIds.has(String(lesson._id))).length
+  const progress = enrollment.courseProgress
+  const activityGroups = ['videos', 'quizzes', 'assignments'].map((type) => ({
+    completed: Math.max(0, Math.floor(Number(progress?.[type]?.completed) || 0)),
+    total: Math.max(0, Math.floor(Number(progress?.[type]?.total) || 0)),
+  }))
+  const activityCompletedCount = activityGroups.reduce((total, group) => total + group.completed, 0)
+  const activityTotalCount = activityGroups.reduce((total, group) => total + group.total, 0)
+  const reportedTotalCount = Math.max(0, Math.floor(Number(progress?.totalActivities) || 0))
+  const reportedCompletedCount = Math.max(0, Math.floor(Number(progress?.completedActivities) || 0))
+  const totalCount = reportedTotalCount || activityTotalCount
+  const completedCount = Math.min(totalCount, reportedCompletedCount || activityCompletedCount)
+  const isComplete = enrollment.status === 'completed'
+    || progress?.isComplete === true
+    || (totalCount > 0 && completedCount === totalCount)
+  const reportedPercentage = Number(progress?.percentage)
   return {
     completedCount,
-    totalCount: lessons.length,
-    percentage: lessons.length ? Math.round((completedCount / lessons.length) * 100) : 0,
+    totalCount,
+    percentage: isComplete
+      ? 100
+      : Number.isFinite(reportedPercentage)
+        ? Math.max(0, Math.min(99, reportedPercentage))
+        : totalCount
+          ? Math.min(99, Math.floor((completedCount / totalCount) * 100))
+          : 0,
   }
 }
 
@@ -2155,16 +2473,21 @@ function EnrollmentCourseCard({ enrollment }) {
         <div className="student-enrolled-course__progress">
           <div className="student-enrolled-course__progress-copy">
             <span>Learning progress</span>
-            <strong>{completedCount} of {totalCount} lessons · {percentage}%</strong>
+            <strong>{completedCount} of {totalCount} activities · {percentage}%</strong>
           </div>
           <div className="student-enrolled-course__progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={percentage} aria-label={`${course.title} progress`}>
             <span style={{ width: `${percentage}%` }} />
           </div>
         </div>
-        <Link className="student-enrolled-course__continue" to={coursePath}>
-          Continue Learning
-          <Icon name="arrow" size={16} />
-        </Link>
+        <div className="student-enrolled-course__actions">
+          <Link className="student-enrolled-course__continue" to={coursePath}>
+            Continue Learning
+            <Icon name="arrow" size={16} />
+          </Link>
+          {enrollment.status === 'completed' && (
+            <span className="student-enrolled-course__completed">Completed</span>
+          )}
+        </div>
       </div>
     </article>
   )
@@ -2211,11 +2534,19 @@ function StudentDashboardCourses({ onLogout, selectedCategory }) {
   const [enrollments, setEnrollments] = useState(initialEnrollments || [])
   const [loading, setLoading] = useState(initialEnrollments === null)
   const [error, setError] = useState('')
+  const [averageScores, setAverageScores] = useState({})
+  const [scoresLoading, setScoresLoading] = useState(false)
+  const [scoreError, setScoreError] = useState('')
 
   useEffect(() => {
     let active = true
-    fetchStudentPageEnrollments(onLogout)
-      .then((loadedEnrollments) => { if (active) setEnrollments(loadedEnrollments) })
+    fetchMyEnrollments(onLogout)
+      .then((loadedEnrollments) => {
+        if (!active) return
+        const cacheKey = getStudentPageCacheKey()
+        if (cacheKey) studentEnrollmentCache.set(cacheKey, { enrollments: loadedEnrollments, savedAt: Date.now() })
+        setEnrollments(loadedEnrollments)
+      })
       .catch((loadError) => {
         if (active) setError(loadError instanceof Error ? loadError.message : 'Your courses could not be loaded.')
       })
@@ -2231,23 +2562,168 @@ function StudentDashboardCourses({ onLogout, selectedCategory }) {
     ))
     : enrollments.slice(0, 3)
 
+  const scoreCourseIds = [...new Set(categoryEnrollments
+    .filter((entry) => entry.courseId && typeof entry.courseId === 'object' && entry.courseId._id)
+    .map((entry) => String(entry.courseId._id)))]
+  const scoreCourseIdsKey = scoreCourseIds.join('|')
+
+  useEffect(() => {
+    let active = true
+    if (!scoreCourseIdsKey) {
+      setAverageScores({})
+      setScoreError('')
+      setScoresLoading(false)
+      return () => { active = false }
+    }
+
+    setScoresLoading(true)
+    setScoreError('')
+    const courseIds = scoreCourseIdsKey.split('|')
+    Promise.allSettled(courseIds.map(async (courseId) => {
+      const result = await fetchStudentPageCourseContent(courseId, onLogout)
+      return getStudentAverageQuizScore(result.quizAttempts)
+    }))
+      .then((results) => {
+        if (!active) return
+        const nextScores = {}
+        let failed = false
+        results.forEach((result, index) => {
+          if (result.status === 'fulfilled') nextScores[courseIds[index]] = result.value
+          else failed = true
+        })
+        setAverageScores(nextScores)
+        if (failed) setScoreError('Some course average scores could not be loaded.')
+      })
+      .finally(() => {
+        if (active) setScoresLoading(false)
+      })
+
+    return () => { active = false }
+  }, [onLogout, scoreCourseIdsKey])
+
   return loading
-    ? <EnrollmentCourseSkeletons />
+    ? <StudentDashboardCourseTableSkeleton />
     : error && initialEnrollments === null
       ? <p className="student-courses__message is-error" role="alert">{error}</p>
       : <>
         {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
-        <EnrollmentCourseCards
-        enrollments={categoryEnrollments}
-        emptyTitle={selectedCategory ? `No ${selectedCategory} courses yet` : 'No enrolled courses yet'}
-        emptyDescription={selectedCategory
-          ? `Enrolled courses in ${selectedCategory} will appear here.`
-          : 'Courses assigned or enrolled for your account will appear here.'}
-      />
+        {scoreError && <p className="student-courses__message is-error" role="alert">{scoreError}</p>}
+        <StudentDashboardCourseTable
+          enrollments={categoryEnrollments}
+          averageScores={averageScores}
+          scoresLoading={scoresLoading}
+          emptyTitle={selectedCategory ? `No ${selectedCategory} courses yet` : 'No enrolled courses yet'}
+          emptyDescription={selectedCategory
+            ? `Enrolled courses in ${selectedCategory} will appear here.`
+            : 'Courses assigned or enrolled for your account will appear here.'}
+        />
       </>
 }
 
-function StudentAvailableCourseCard({ course, enrollment, onEnroll, enrolling, error }) {
+function getStudentAverageQuizScore(attempts) {
+  const scores = attempts
+    .filter((attempt) => attempt.status === 'submitted')
+    .map(getAttemptScore)
+    .filter((score) => score !== null)
+  return scores.length
+    ? Math.round(scores.reduce((total, score) => total + score, 0) / scores.length)
+    : null
+}
+
+function StudentDashboardCourseTable({
+  enrollments,
+  averageScores,
+  scoresLoading,
+  emptyTitle,
+  emptyDescription,
+}) {
+  const availableEnrollments = enrollments.filter((entry) => entry.courseId && typeof entry.courseId === 'object')
+  if (!availableEnrollments.length) {
+    return enrollments.length
+      ? <p className="student-courses__message is-error" role="alert">Your enrollment exists, but its course details are unavailable. Please contact your administrator.</p>
+      : <EmptyState icon="book" title={emptyTitle} description={emptyDescription} />
+  }
+
+  return (
+    <div className="student-dashboard-course-table" role="table" aria-label="My courses" aria-busy={scoresLoading}>
+      <div className="student-dashboard-course-table__header" role="row">
+        <span role="columnheader">Course</span>
+        <span role="columnheader">Progress</span>
+        <span role="columnheader">Average Score</span>
+      </div>
+      <div role="rowgroup">
+        {availableEnrollments.map((enrollment) => {
+          const course = enrollment.courseId
+          const courseId = String(course._id)
+          const { completedCount, totalCount, percentage } = getCourseProgress(enrollment)
+          const averageScore = averageScores[courseId]
+          return (
+            <div className="student-dashboard-course-table__row" role="row" key={enrollment._id}>
+              <div className="student-dashboard-course-table__course" role="cell">
+                <Link to={`/student/course/${encodeURIComponent(courseId)}/learn`} aria-label={`Continue learning ${course.title || 'course'}`}>
+                  {course.thumbnailUrl
+                    ? <img src={course.thumbnailUrl} alt="" />
+                    : <span className="student-dashboard-course-table__thumbnail-fallback"><Icon name="book" size={20} /></span>}
+                  <strong>{course.title || 'Course'}</strong>
+                </Link>
+              </div>
+              <div className="student-dashboard-course-table__progress" role="cell">
+                <span className="student-dashboard-course-table__mobile-label">Progress</span>
+                <div className="student-dashboard-course-table__progress-copy">
+                  <strong>{percentage}%</strong>
+                  <small>{completedCount} of {totalCount} lessons</small>
+                </div>
+                <div
+                  className="student-dashboard-course-table__progress-track"
+                  role="progressbar"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={percentage}
+                  aria-label={`${course.title || 'Course'} progress`}
+                >
+                  <span style={{ width: `${percentage}%` }} />
+                </div>
+              </div>
+              <div className="student-dashboard-course-table__score" role="cell">
+                <span>Average Score</span>
+                <strong>{averageScore === null || averageScore === undefined ? '—' : `${averageScore}%`}</strong>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function StudentDashboardCourseTableSkeleton() {
+  return (
+    <div className="student-dashboard-course-table student-dashboard-course-table--loading" role="status" aria-label="Loading courses" aria-busy="true">
+      <div className="student-dashboard-course-table__header" aria-hidden="true">
+        <span>Course</span>
+        <span>Progress</span>
+        <span>Average Score</span>
+      </div>
+      {[0, 1].map((row) => (
+        <div className="student-dashboard-course-table__row" key={row} aria-hidden="true">
+          <div className="student-dashboard-course-table__course">
+            <span className="student-page-skeleton student-dashboard-course-table__skeleton-thumbnail" />
+            <span className="student-page-skeleton student-dashboard-course-table__skeleton-title" />
+          </div>
+          <div className="student-dashboard-course-table__progress">
+            <span className="student-page-skeleton student-dashboard-course-table__skeleton-progress-copy" />
+            <span className="student-page-skeleton student-dashboard-course-table__skeleton-progress-track" />
+          </div>
+          <div className="student-dashboard-course-table__score">
+            <span className="student-page-skeleton student-dashboard-course-table__skeleton-score" />
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function StudentAvailableCourseCard({ course, enrollment }) {
   const counts = getCourseCounts(course)
   const difficultyLabels = {
     beginner: 'Beginner',
@@ -2276,24 +2752,21 @@ function StudentAvailableCourseCard({ course, enrollment, onEnroll, enrolling, e
           <span>{counts.lessons} lessons</span>
           <span>{formatCourseDuration(course.estimatedDurationMinutes)}</span>
         </div>
-        {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
         {enrollment
           ? <Link className="student-available-course__action" to={`/student/course/${encodeURIComponent(course._id)}/learn`}>
             Continue Learning <Icon name="arrow" size={15} />
           </Link>
-          : <button className="student-available-course__action" type="button" onClick={() => onEnroll(course)} disabled={enrolling}>
-            {enrolling ? 'Enrolling…' : 'Enroll Now'} <Icon name="arrow" size={15} />
-          </button>}
+          : <Link className="student-available-course__action" to={`/student/course/${encodeURIComponent(course._id)}`}>
+            View Details <Icon name="arrow" size={15} />
+          </Link>}
       </div>
     </article>
   )
 }
 
-function StudentAvailableCourses({ user, onLogout, onLearningDataChanged, onCategoriesLoaded, selectedCategory }) {
+function StudentAvailableCourses({ user, onLogout, onCategoriesLoaded, selectedCategory }) {
   const [courses, setCourses] = useState([])
   const [enrollments, setEnrollments] = useState([])
-  const [enrollingCourseId, setEnrollingCourseId] = useState('')
-  const [enrollmentErrors, setEnrollmentErrors] = useState({})
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
@@ -2382,9 +2855,6 @@ function StudentAvailableCourses({ user, onLogout, onLearningDataChanged, onCate
                 key={course._id}
                 course={course}
                 enrollment={enrollmentsByCourseId.get(String(course._id))}
-                onEnroll={enrollInCourse}
-                enrolling={enrollingCourseId === String(course._id)}
-                error={enrollmentErrors[String(course._id)]}
               />
             ))}
           </div>
@@ -2480,6 +2950,8 @@ function StudentCourseLearning({
   const assignmentStatusRefreshRef = useRef(false)
   const lessonPlaybackPositionsRef = useRef({ ...(enrollment.lessonPlaybackPositions || {}) })
   const playbackPositionSaveRef = useRef(new Map())
+  const learningActivitySampleRef = useRef({ lessonId: '', positionSeconds: 0, sampledAt: 0 })
+  const learningActivityPendingRef = useRef(new Map())
   const initialAttentionLesson = lessons.find(({ lesson, lessonKey }) => (
     String(lesson._id || lessonKey) === activeLessonId
   ))?.lesson
@@ -3040,6 +3512,7 @@ function StudentCourseLearning({
     if (attentionCheckChallenge || attentionCheckLoading || attentionSessionRef.current.blocked) return
     const id = String(entry.lesson._id || entry.lessonKey)
     if (videoPlayerRef.current && activeEntry) {
+      recordLearningActivity(activeEntry, videoPlayerRef.current, true)
       saveLessonPlaybackPosition(activeEntry, videoPlayerRef.current.currentTime, true)
       videoPlayerRef.current.pause()
     }
@@ -3180,6 +3653,97 @@ function StudentCourseLearning({
     })()
   }
 
+  function resetLearningActivitySample(entry, video) {
+    learningActivitySampleRef.current = {
+      lessonId: String(entry?.lesson?._id || ''),
+      positionSeconds: Number(video?.currentTime) || 0,
+      sampledAt: performance.now(),
+    }
+  }
+
+  function flushLearningActivity(entry) {
+    const lessonId = String(entry?.lesson?._id || '')
+    if (!isValidLessonId(lessonId)) return
+    const activityState = learningActivityPendingRef.current.get(lessonId)
+    if (!activityState || activityState.inFlight) return
+    const seconds = Math.min(60, Math.floor(activityState.seconds))
+    if (seconds < 1) return
+
+    activityState.seconds -= seconds
+    activityState.inFlight = true
+    let saved = false
+    void (async () => {
+      try {
+        const savedAuth = sessionStorage.getItem('lms.auth')
+        const auth = savedAuth ? JSON.parse(savedAuth) : null
+        if (typeof auth?.token !== 'string') {
+          onLogout()
+          return
+        }
+        const response = await fetchWithAuth(
+          `${API_BASE_URL}/enrollments/${encodeURIComponent(enrollment._id)}/learning-activity`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${auth.token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              lessonId,
+              seconds,
+              activityDate: getLocalLearningDateKey(new Date()),
+            }),
+          },
+          API_BASE_URL,
+          auth.token,
+        )
+        const result = await response.json()
+        if (isInvalidSessionResponse(response, result)) {
+          onLogout()
+          return
+        }
+        if (!response.ok) throw new Error(result.message || 'Video learning time could not be saved.')
+        saved = true
+      } catch (activityError) {
+        activityState.seconds += seconds
+        setProgressError(activityError instanceof Error
+          ? activityError.message
+          : 'Video learning time could not be saved.')
+      } finally {
+        activityState.inFlight = false
+        if (saved && activityState.seconds >= 15) flushLearningActivity(entry)
+      }
+    })()
+  }
+
+  function recordLearningActivity(entry, video, flush = false) {
+    const lessonId = String(entry?.lesson?._id || '')
+    if (!isValidLessonId(lessonId) || !video) return
+    const now = performance.now()
+    const positionSeconds = Number(video.currentTime) || 0
+    const previousSample = learningActivitySampleRef.current
+    const elapsedSeconds = (now - previousSample.sampledAt) / 1000
+    const positionDelta = positionSeconds - previousSample.positionSeconds
+
+    if (
+      previousSample.lessonId === lessonId
+      && !video.paused
+      && !video.seeking
+      && elapsedSeconds > 0
+      && elapsedSeconds <= 4
+      && positionDelta > 0
+      && positionDelta <= elapsedSeconds * Math.max(1, Number(video.playbackRate) || 1) + 1
+    ) {
+      const activityState = learningActivityPendingRef.current.get(lessonId) || { seconds: 0, inFlight: false }
+      activityState.seconds += Math.min(2, elapsedSeconds)
+      learningActivityPendingRef.current.set(lessonId, activityState)
+    }
+
+    learningActivitySampleRef.current = { lessonId, positionSeconds, sampledAt: now }
+    const activityState = learningActivityPendingRef.current.get(lessonId)
+    if (activityState && (flush || activityState.seconds >= 15)) flushLearningActivity(entry)
+  }
+
   function handleVideoMetadata(video, entry) {
     initializeAttentionCheckSession(video, entry)
     video.currentTime = 0
@@ -3230,13 +3794,18 @@ function StudentCourseLearning({
     }
   }
 
-  async function setLessonCompleted(entry, completed) {
+  async function setLessonCompleted(entry, completed, video = videoPlayerRef.current) {
     const lessonId = String(entry.lesson._id || '')
+    const videoDuration = getVideoCompletionDuration(video, entry.lesson)
     if (!isValidLessonId(lessonId)) {
       setProgressError('This lesson cannot be tracked because it has no saved lesson ID.')
       return
     }
-    if (completed && !videoPlayerRef.current?.ended) {
+    if (completed && (
+      !video?.ended
+      || videoDuration <= 0
+      || !Number.isFinite(video.currentTime)
+    )) {
       setProgressError('Watch the entire video before completing this lesson.')
       return
     }
@@ -3255,7 +3824,14 @@ function StudentCourseLearning({
           Authorization: `Bearer ${auth.token}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ lessonId, completed }),
+        body: JSON.stringify({
+          lessonId,
+          completed,
+          ...(completed ? {
+            positionSeconds: videoDuration,
+            videoDurationSeconds: videoDuration,
+          } : {}),
+        }),
       }, API_BASE_URL, auth.token)
       const result = await response.json()
       if (isInvalidSessionResponse(response, result)) {
@@ -3265,6 +3841,8 @@ function StudentCourseLearning({
       if (!response.ok) throw new Error(result.message || 'Lesson progress could not be saved.')
       onEnrollmentUpdated({
         ...enrollment,
+        status: result.status || enrollment.status,
+        courseProgress: result.courseProgress || enrollment.courseProgress,
         completedLessonIds: result.completedLessonIds || [],
         lessonPlaybackPositions: { ...lessonPlaybackPositionsRef.current },
       })
@@ -3601,8 +4179,10 @@ function StudentCourseLearning({
                       handleVideoMetadata(event.currentTarget, activeEntry)
                       updateTranscriptPlaybackTime(event.currentTarget)
                     }}
+                    onPlaying={(event) => resetLearningActivitySample(activeEntry, event.currentTarget)}
                     onPlay={(event) => {
                       updateTranscriptPlaybackTime(event.currentTarget)
+                      resetLearningActivitySample(activeEntry, event.currentTarget)
                       saveLessonPlaybackPosition(activeEntry, event.currentTarget.currentTime, true)
                       const settings = activeEntry.lesson.attentionCheck
                       if (settings?.enabled === true) {
@@ -3612,24 +4192,34 @@ function StudentCourseLearning({
                     }}
                     onTimeUpdate={(event) => {
                       updateTranscriptPlaybackTime(event.currentTarget)
+                      recordLearningActivity(activeEntry, event.currentTarget)
                       saveLessonPlaybackPosition(activeEntry, event.currentTarget.currentTime)
                       checkAttentionSchedule(event.currentTarget)
                     }}
                     onSeeking={(event) => {
                       updateTranscriptPlaybackTime(event.currentTarget)
+                      resetLearningActivitySample(activeEntry, event.currentTarget)
                       handleAttentionVideoSeeking(event.currentTarget)
                     }}
-                    onSeeked={(event) => updateTranscriptPlaybackTime(event.currentTarget)}
+                    onSeeked={(event) => {
+                      updateTranscriptPlaybackTime(event.currentTarget)
+                      resetLearningActivitySample(activeEntry, event.currentTarget)
+                    }}
+                    onWaiting={(event) => resetLearningActivitySample(activeEntry, event.currentTarget)}
                     onPause={(event) => {
                       updateTranscriptPlaybackTime(event.currentTarget)
+                      recordLearningActivity(activeEntry, event.currentTarget, true)
                       saveLessonPlaybackPosition(activeEntry, event.currentTarget.currentTime, true)
                     }}
-                    onEnded={() => {
+                    onEnded={(event) => {
+                      recordLearningActivity(activeEntry, event.currentTarget, true)
                       endCurrentAttentionCheckSession()
-                      const video = videoPlayerRef.current
-                      if (video) updateTranscriptPlaybackTime(video)
-                      saveLessonPlaybackPosition(activeEntry, video?.currentTime || 0, true)
-                      if (!completedLessonIds.has(String(activeEntry.lesson._id))) setLessonCompleted(activeEntry, true)
+                      const video = event.currentTarget
+                      updateTranscriptPlaybackTime(video)
+                      saveLessonPlaybackPosition(activeEntry, video.currentTime, true)
+                      if (!completedLessonIds.has(String(activeEntry.lesson._id))) {
+                        void setLessonCompleted(activeEntry, true, video)
+                      }
                     }}
                   >
                     Your browser does not support video playback.
@@ -4202,25 +4792,27 @@ function StudentCourseDetailsPage({ user, onLogout, onLearningDataChanged }) {
   const [course, setCourse] = useState(null)
   const [loading, setLoading] = useState(true)
   const [enrolling, setEnrolling] = useState(false)
+  const [isEnrolled, setIsEnrolled] = useState(false)
   const [error, setError] = useState('')
   const isCollegeStudent = user?.studentType === 'college' || Boolean(user?.collegeId)
-  const courseLessons = course ? getCourseLessons(course) : []
   const courseCounts = course ? getCourseCounts(course) : { modules: 0, lessons: 0 }
 
   useEffect(() => {
     const controller = new AbortController()
+    setLoading(true)
+    setCourse(null)
+    setIsEnrolled(false)
+    setError('')
     Promise.all([
       fetchPublishedCourses(onLogout, controller.signal),
       fetchMyEnrollments(onLogout, controller.signal),
     ])
       .then(([publishedCourses, enrollments]) => {
-        const enrolled = enrollments.find((entry) => String(entry.courseId?._id || entry.courseId) === courseId)
-        if (enrolled) {
-          navigate(`/student/course/${encodeURIComponent(courseId)}/learn`, { replace: true })
-          return
-        }
         const selectedCourse = publishedCourses.find((item) => String(item._id) === courseId)
         if (!selectedCourse) throw new Error('This course is not currently published or available.')
+        setIsEnrolled(enrollments.some((entry) => (
+          String(entry.courseId?._id || entry.courseId) === courseId && entry.status !== 'cancelled'
+        )))
         setCourse(selectedCourse)
       })
       .catch((loadError) => {
@@ -4274,24 +4866,49 @@ function StudentCourseDetailsPage({ user, onLogout, onLearningDataChanged }) {
           <Link className="student-section-link" to="/student/dashboard">← Back to dashboard</Link>
           <section className="student-course-details__intro">
             <header className="student-course-details__header">
+              {course.thumbnailUrl
+                ? <img
+                  className="student-course-details__thumbnail"
+                  src={course.thumbnailUrl}
+                  alt={`${course.title} course thumbnail`}
+                />
+                : <div className="student-course-details__thumbnail student-course-details__thumbnail--empty" aria-label="No course thumbnail">
+                  <Icon name="book" size={34} />
+                </div>}
               <div className="student-course-details__identity">
                 <p className="student-course-details__category">
                   {course.category || 'Other'} <span>·</span> {course.difficulty?.replaceAll('-', ' ') || 'Beginner'}
                 </p>
                 <h1>{course.title}</h1>
-                <span className="student-course-details__published">Published</span>
+                <span className="student-course-details__published">{isEnrolled ? 'Enrolled' : 'Published'}</span>
               </div>
               <div className="student-course-details__enroll">
-                {isCollegeStudent
+                {isEnrolled
+                  ? <Link
+                    className="student-enrolled-course__continue"
+                    to={`/student/course/${encodeURIComponent(courseId)}/learn`}
+                  >
+                    Continue Learning
+                  </Link>
+                  : isCollegeStudent
                   ? <p>Enrollment for this course is managed by your college administrator.</p>
                   : <button type="button" className="student-enrolled-course__continue" disabled={enrolling} onClick={enroll}>
-                    {enrolling ? 'Enrolling…' : 'Enroll for free'}
+                    {enrolling ? 'Enrolling…' : 'Enroll Now (Free)'}
                   </button>}
               </div>
             </header>
-            <p className="student-course-details__description">{course.description || course.detailedDescription || 'No course description added yet.'}</p>
+            {course.description && <p className="student-course-details__description">{course.description}</p>}
+            {course.detailedDescription && course.detailedDescription !== course.description && (
+              <p className="student-course-details__description student-course-details__description--detailed">
+                {course.detailedDescription}
+              </p>
+            )}
+            {!course.description && !course.detailedDescription && (
+              <p className="student-course-details__description">No course description added yet.</p>
+            )}
           </section>
           <section className="student-course-details__facts" aria-label="Course overview">
+            <div><span>Difficulty</span><strong>{course.difficulty?.replaceAll('-', ' ') || 'Beginner'}</strong></div>
             <div><span>Course duration</span><strong>{formatCourseDuration(course.estimatedDurationMinutes)}</strong></div>
             <div><span>Modules</span><strong>{courseCounts.modules}</strong></div>
             <div><span>Lessons</span><strong>{courseCounts.lessons}</strong></div>
@@ -4316,20 +4933,52 @@ function StudentCourseDetailsPage({ user, onLogout, onLearningDataChanged }) {
             <h2>Course modules</h2>
             {course.modules?.length ? course.modules.map((module, moduleIndex) => {
               const moduleKey = String(module._id || `${module.title}-${moduleIndex}`)
-              const moduleLessons = courseLessons.filter((entry) => entry.moduleKey === moduleKey)
+              const items = getModuleLearningItems(module, moduleIndex)
               return (
-                <article className="student-course-details__module" key={moduleKey}>
-                  <h3>{module.title}</h3>
-                  {module.description && <p>{module.description}</p>}
-                  {moduleLessons.length
-                    ? <ul>{moduleLessons.map(({ lesson, lessonKey }) => (
-                      <li key={lessonKey}>
-                        <strong>{lesson.title}</strong>
-                        {lesson.content && <p>{lesson.content}</p>}
-                      </li>
-                    ))}</ul>
-                    : <p>No lessons have been added to this module.</p>}
-                </article>
+                <details className="student-course-details__module" key={moduleKey} open>
+                  <summary className="student-course-details__module-summary">
+                    <span className="student-course-details__module-heading">
+                      <small>MODULE {moduleIndex + 1}</small>
+                      <strong>{module.title}</strong>
+                    </span>
+                    <span className="student-course-details__module-count">
+                      {items.length} {items.length === 1 ? 'item' : 'items'}
+                      <span aria-hidden="true">⌄</span>
+                    </span>
+                  </summary>
+                  {module.description && (
+                    <p className="student-course-details__module-description">{module.description}</p>
+                  )}
+                  {items.length ? (
+                    <ul className="student-course-details__module-items">
+                      {items.map((item) => {
+                        const durationMinutes = Math.ceil((Number(item.durationSeconds) || 0) / 60)
+                        const itemDescription = item.type === 'video-lesson'
+                          ? `Video Lesson${durationMinutes ? ` · ${durationMinutes} min` : ''}`
+                          : item.type === 'quiz'
+                            ? 'Quiz Checkpoint'
+                            : item.type === 'assignment'
+                              ? `Module Assessment${Number(item.points) ? ` · ${Number(item.points)} pts` : ''}`
+                              : 'Course Resource'
+                        const itemIcon = item.type === 'video-lesson'
+                          ? 'play'
+                          : item.type === 'note' ? 'folderOpen' : 'clipboardCheck'
+                        return (
+                          <li className="student-course-details__module-item" key={item._learningKey}>
+                            <span className={`student-course-details__item-icon is-${item.type}`}>
+                              <Icon name={itemIcon} size={16} />
+                            </span>
+                            <span className="student-course-details__item-copy">
+                              <strong>{item.title}</strong>
+                              <small>{itemDescription}</small>
+                            </span>
+                            <span className="student-course-details__item-status">Pending</span>
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  ) : <p className="student-course-details__module-empty">No content has been added to this module.</p>}
+                </details>
               )
             }) : <EmptyState icon="book" title="Course content is not available yet" description="This course does not currently have any modules or lessons." />}
           </section>
@@ -4404,18 +5053,23 @@ function StudentCourseLearningPage({
 }
 
 function StudentCourses({ user, onLogout }) {
-  const [initialEnrollments] = useState(getCachedStudentPageEnrollments)
-  const [enrollments, setEnrollments] = useState(initialEnrollments || [])
+  const [enrollments, setEnrollments] = useState([])
   const [error, setError] = useState('')
-  const [loading, setLoading] = useState(initialEnrollments === null)
+  const [loading, setLoading] = useState(true)
   const location = useLocation()
   const requestedFilter = new URLSearchParams(location.search).get('filter')
   const enrollmentFilter = ['enrolled', 'completed', 'active'].includes(requestedFilter) ? requestedFilter : ''
 
   useEffect(() => {
     let active = true
-    fetchStudentPageEnrollments(onLogout)
-      .then((loadedEnrollments) => { if (active) setEnrollments(loadedEnrollments) })
+    setLoading(true)
+    fetchMyEnrollments(onLogout)
+      .then((loadedEnrollments) => {
+        if (!active) return
+        const cacheKey = getStudentPageCacheKey()
+        if (cacheKey) studentEnrollmentCache.set(cacheKey, { enrollments: loadedEnrollments, savedAt: Date.now() })
+        setEnrollments(loadedEnrollments)
+      })
       .catch((loadError) => {
         if (active) {
           setError(loadError instanceof Error ? loadError.message : 'Unable to load your enrolled courses.')
@@ -4437,9 +5091,9 @@ function StudentCourses({ user, onLogout }) {
       : 'My Courses'
 
   return (
-    <StudentRoutePage title={pageTitle} showHeading>
+    <StudentRoutePage title={pageTitle} showHeading className="student-courses-page">
       {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
-      {loading ? <EnrollmentCourseSkeletons /> : (!error || initialEnrollments !== null) && (
+      {loading ? <EnrollmentCourseSkeletons /> : !error && (
         <EnrollmentCourseCards
           enrollments={filteredEnrollments}
           emptyTitle={enrollmentFilter === 'completed'
@@ -4490,15 +5144,15 @@ function StudentAchievements({ onLogout }) {
   )
 }
 
-function StudentLearningActivity({ onLogout }) {
+function StudentLearningActivity({ onLogout, user }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [hasEnrollments, setHasEnrollments] = useState(false)
+  const [learningStreak, setLearningStreak] = useState(0)
 
   useEffect(() => {
     const controller = new AbortController()
-    fetchMyEnrollments(onLogout, controller.signal)
-      .then((enrollments) => setHasEnrollments(enrollments.length > 0))
+    fetchStudentLearningSummary(onLogout, controller.signal)
+      .then((summary) => setLearningStreak(summary.learningStreak))
       .catch((loadError) => {
         if (loadError.name !== 'AbortError') setError(loadError instanceof Error ? loadError.message : 'Learning activity could not be loaded.')
       })
@@ -4509,11 +5163,223 @@ function StudentLearningActivity({ onLogout }) {
   return (
     <StudentRoutePage eyebrow="YOUR LEARNING ACTIVITY" title="Learning Streak">
       {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
-      {loading ? <p role="status">Checking your learning activity…</p> : !error && (
-        <EmptyState icon="spark" title={hasEnrollments ? 'Learning activity tracking is not available yet' : 'No learning activity recorded'} description={hasEnrollments ? 'Course enrollments are available, but lesson activity and daily streaks are not yet recorded by the platform.' : 'Your learning streak will begin when learning activity tracking is available and records your sessions.'} />
+      {loading ? <p role="status">Loading your learning activity…</p> : !error && (
+        <StudentLearningActivityPanel
+          onLogout={onLogout}
+          studentId={user?.id}
+          learningStreak={learningStreak}
+          streakLoading={false}
+          showHeading={false}
+        />
       )}
     </StudentRoutePage>
   )
+}
+
+function StudentLearningActivityPanel({
+  onLogout,
+  studentId,
+  learningStreak,
+  streakLoading,
+  showHeading = true,
+}) {
+  const [calendar] = useState(() => getLearningActivityDateRanges())
+  const [days, setDays] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [selectedWeek, setSelectedWeek] = useState('current')
+  const goalOptions = [30, 60, 90, 120]
+  const goalStorageKey = `lms.learning-goal:${studentId || 'student'}`
+  const [goalMinutes, setGoalMinutes] = useState(() => {
+    const savedGoal = Number(localStorage.getItem(goalStorageKey))
+    return goalOptions.includes(savedGoal) ? savedGoal : 60
+  })
+
+  useEffect(() => {
+    const controller = new AbortController()
+    fetchStudentLearningActivity(onLogout, calendar.start, calendar.end, controller.signal)
+      .then((loadedDays) => {
+        if (!controller.signal.aborted) {
+          setDays(loadedDays)
+          setError('')
+        }
+      })
+      .catch((loadError) => {
+        if (!controller.signal.aborted) {
+          setError(loadError instanceof Error ? loadError.message : 'Learning activity could not be loaded.')
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false)
+      })
+    return () => controller.abort()
+  }, [calendar, onLogout])
+
+  useEffect(() => {
+    localStorage.setItem(goalStorageKey, String(goalMinutes))
+  }, [goalMinutes, goalStorageKey])
+
+  const activityByDate = new Map(days.map((day) => [day.date, day]))
+  const weekDates = selectedWeek === 'current' ? calendar.currentWeek : calendar.previousWeek
+  const weekData = weekDates.map((date) => activityByDate.get(date))
+  const activityLoaded = !loading && !error
+  const todayActivity = activityByDate.get(calendar.today)
+  const totalWeekSeconds = activityLoaded
+    ? weekData.reduce((total, day) => total + (day?.seconds || 0), 0)
+    : null
+  const averageDaySeconds = totalWeekSeconds === null ? null : totalWeekSeconds / 7
+  const mostActiveDay = activityLoaded
+    ? weekData.reduce((mostActive, day) => (
+      day && (!mostActive || day.seconds > mostActive.seconds) ? day : mostActive
+    ), null)
+    : null
+  const maxDaySeconds = Math.max(3600, ...weekData.map((day) => day?.seconds || 0))
+  const todaySeconds = activityLoaded ? todayActivity?.seconds || 0 : null
+  const goalProgress = todaySeconds === null
+    ? 0
+    : Math.min(100, Math.round((todaySeconds / (goalMinutes * 60)) * 100))
+  const remainingGoalMinutes = todaySeconds === null
+    ? null
+    : Math.ceil(Math.max(0, goalMinutes * 60 - todaySeconds) / 60)
+
+  return (
+    <section
+      className="student-learning-activity"
+      aria-labelledby={showHeading ? 'student-learning-activity-title' : undefined}
+      aria-label={showHeading ? undefined : 'Your learning activity'}
+      aria-busy={loading}
+    >
+      {showHeading && (
+        <header className="student-learning-activity__heading">
+          <span className="student-eyebrow">YOUR LEARNING ACTIVITY</span>
+          <h2 id="student-learning-activity-title">Your Learning Activity</h2>
+          <p>Track your daily learning habits and weekly progress.</p>
+        </header>
+      )}
+      {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
+      <div className="student-learning-activity__grid">
+        <article className="student-learning-activity__card student-learning-activity__daily">
+          <div className="student-learning-activity__card-heading">
+            <div>
+              <span className="student-eyebrow">TODAY’S HABIT</span>
+              <h3>Daily Learning Summary</h3>
+            </div>
+            <label className="student-learning-activity__goal-select">
+              <span>Goal:</span>
+              <select value={goalMinutes} onChange={(event) => setGoalMinutes(Number(event.target.value))}>
+                {goalOptions.map((minutes) => (
+                  <option value={minutes} key={minutes}>{minutes} mins</option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="student-learning-activity__daily-main">
+            <div className="student-learning-activity__time">
+              <strong>{todaySeconds === null ? '—' : formatLearningActivityDuration(todaySeconds)}</strong>
+              <span>Total learning time today</span>
+            </div>
+            <div
+              className="student-learning-activity__goal-ring"
+              role="img"
+              aria-label={todaySeconds === null
+                ? 'Daily learning goal progress unavailable'
+                : `${goalProgress}% of daily learning goal`}
+              style={{ background: `conic-gradient(#4e8d78 ${goalProgress}%, #e7e5dc ${goalProgress}% 100%)` }}
+            >
+              <span><strong>{todaySeconds === null ? '—' : `${goalProgress}%`}</strong><small>GOAL</small></span>
+            </div>
+          </div>
+          <div className="student-learning-activity__goal-copy">
+            <span>{todaySeconds === null ? 'Daily goal progress unavailable' : `${Math.floor(todaySeconds / 60)} of ${goalMinutes} min daily goal`}</span>
+            <strong>{remainingGoalMinutes === null ? '—' : `${remainingGoalMinutes} min to go`}</strong>
+          </div>
+          <div
+            className="student-learning-activity__goal-track"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={goalMinutes}
+            aria-valuenow={todaySeconds === null ? 0 : Math.min(goalMinutes, Math.floor(todaySeconds / 60))}
+            aria-label="Daily learning goal"
+          >
+            <span style={{ width: `${goalProgress}%` }} />
+          </div>
+          <div className="student-learning-activity__daily-counts">
+            <div>
+              <span className="student-learning-activity__count-icon"><Icon name="check" size={17} /></span>
+              <strong>{todaySeconds === null ? '—' : todayActivity?.lessonsCompleted || 0}</strong>
+              <small>Lessons completed today</small>
+            </div>
+            <div>
+              <span className="student-learning-activity__count-icon is-video"><Icon name="play" size={17} /></span>
+              <strong>{todaySeconds === null ? '—' : todayActivity?.videosWatched || 0}</strong>
+              <small>Videos watched today</small>
+            </div>
+          </div>
+        </article>
+
+        <article className="student-learning-activity__card student-learning-activity__weekly">
+          <div className="student-learning-activity__card-heading">
+            <div>
+              <span className="student-eyebrow">7-DAY ACTIVITY</span>
+              <h3>Weekly Learning Activity</h3>
+            </div>
+            <div className="student-learning-activity__week-switch" role="group" aria-label="Choose activity week">
+              <button
+                className={selectedWeek === 'current' ? 'is-selected' : ''}
+                type="button"
+                aria-pressed={selectedWeek === 'current'}
+                onClick={() => setSelectedWeek('current')}
+              >
+                This Week
+              </button>
+              <button
+                className={selectedWeek === 'previous' ? 'is-selected' : ''}
+                type="button"
+                aria-pressed={selectedWeek === 'previous'}
+                onClick={() => setSelectedWeek('previous')}
+              >
+                Previous Week
+              </button>
+            </div>
+          </div>
+          <div className="student-learning-activity__chart" role="group" aria-label={`${selectedWeek === 'current' ? 'This week' : 'Previous week'} daily learning time`}>
+            {weekDates.map((date, index) => {
+              const day = weekData[index]
+              const seconds = day?.seconds || 0
+              const fillHeight = seconds ? Math.max(4, Math.min(100, (seconds / maxDaySeconds) * 100)) : 0
+              const weekday = new Date(`${date}T12:00:00`).toLocaleDateString('en-US', { weekday: 'short' })
+              return (
+                <div className="student-learning-activity__day" key={date} role="img" aria-label={`${weekday}: ${activityLoaded ? formatLearningActivityDuration(seconds) : 'unavailable'}`}>
+                  <div className="student-learning-activity__bar"><span style={{ height: `${fillHeight}%` }} /></div>
+                  <small>{weekday}</small>
+                </div>
+              )
+            })}
+          </div>
+          <div className="student-learning-activity__week-stats">
+            <div><small>{selectedWeek === 'current' ? 'Total this week' : 'Total last week'}</small><strong>{totalWeekSeconds === null ? '—' : formatLearningActivityMinutes(totalWeekSeconds)}</strong></div>
+            <div><small>Daily average</small><strong>{averageDaySeconds === null ? '—' : `${formatLearningActivityMinutes(averageDaySeconds)} / day`}</strong></div>
+            <div><small>Most active day</small><strong>{mostActiveDay?.seconds ? new Date(`${mostActiveDay.date}T12:00:00`).toLocaleDateString('en-US', { weekday: 'short' }) : '—'}</strong></div>
+          </div>
+        </article>
+      </div>
+      <div className="student-learning-activity__streak">
+        <span><Icon name="spark" size={17} /> {streakLoading ? '—' : learningStreak} {learningStreak === 1 ? 'Day' : 'Days'} Streak</span>
+      </div>
+    </section>
+  )
+}
+
+function formatLearningActivityDuration(seconds) {
+  const totalSeconds = Math.max(0, Math.floor(seconds))
+  if (totalSeconds < 60) return `${totalSeconds}s`
+  const minutes = Math.floor(totalSeconds / 60)
+  const remainder = totalSeconds % 60
+  return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`
+}
+
+function formatLearningActivityMinutes(seconds) {
+  return `${Math.floor(Math.max(0, seconds) / 60)}m`
 }
 
 function StudentSearch({ onLogout, navigateTo }) {
@@ -5152,9 +6018,9 @@ function StudentDashboard({
                 </div>
               </section>
 
-              <section className="student-panel" aria-labelledby="student-courses-title">
+              <section className="student-panel student-dashboard-my-courses" aria-labelledby="student-courses-eyebrow">
                 <div className="student-section-heading">
-                  <div><span className="student-eyebrow">PICK UP WHERE YOU LEFT OFF</span><h2 id="student-courses-title">My Courses</h2></div>
+                  <div><span className="student-eyebrow" id="student-courses-eyebrow">PICK UP WHERE YOU LEFT OFF</span></div>
                   <div className="student-dashboard-courses__actions">
                     {selectedCourseCategory && (
                       <button
@@ -5201,6 +6067,13 @@ function StudentDashboard({
                 </section>
               </div>
 
+              <StudentLearningActivityPanel
+                onLogout={onLogout}
+                studentId={user?.id}
+                learningStreak={learningSummary.learningStreak}
+                streakLoading={learningSummaryLoading || Boolean(learningSummaryError)}
+              />
+
               <section className="student-tools" aria-labelledby="student-tools-title">
                 <div className="student-section-heading">
                   <div><span className="student-eyebrow">MORE FOR YOUR JOURNEY</span><h2 id="student-tools-title">Student tools</h2></div>
@@ -5240,9 +6113,7 @@ function StudentDashboard({
                 <StudentResultsPage onLogout={onLogout} />
               } />
               <Route path="/student/resources" element={
-                <StudentRoutePage eyebrow="KEEP EXPLORING" title="Learning Resources">
-                  <EmptyState icon="folder" title="Learning resources are not connected yet" description="Curated learning resources will appear here when the LMS content catalog is connected." />
-                </StudentRoutePage>
+                <StudentResourcesPage onLogout={onLogout} />
               } />
               <Route path="/student/messages" element={
                 <StudentRoutePage eyebrow="YOUR LEARNING COMMUNITY" title="Messages">
@@ -5261,7 +6132,7 @@ function StudentDashboard({
               <Route path="/student/profile" element={<StudentProfile user={user} onLogout={onLogout} />} />
               <Route path="/student/purchases" element={<StudentPurchases />} />
               <Route path="/student/achievements" element={<StudentAchievements onLogout={onLogout} />} />
-              <Route path="/student/learning-activity" element={<StudentLearningActivity onLogout={onLogout} />} />
+              <Route path="/student/learning-activity" element={<StudentLearningActivity onLogout={onLogout} user={user} />} />
               <Route path="/student/updates" element={<StudentUpdates />} />
               <Route path="/student/settings" element={
                 <StudentRoutePage eyebrow="PREFERENCES" title="Settings">

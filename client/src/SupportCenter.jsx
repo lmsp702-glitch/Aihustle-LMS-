@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { API_BASE_URL } from './api-base-url.js'
 import './SupportCenter.css'
@@ -79,6 +79,13 @@ function Icon({ name }) {
     arrow: <><path d="M5 12h14m-6-6 6 6-6 6" /></>,
     upload: <><path d="M12 16V4m-5 5 5-5 5 5" /><path d="M5 14v5h14v-5" /></>,
     download: <><path d="M12 4v12m-5-5 5 5 5-5" /><path d="M5 19h14" /></>,
+    tag: <><path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L3 13V4h9l8.6 8.6a.6.6 0 0 1 0 .8Z" /><circle cx="7.5" cy="8" r="1" /></>,
+    grid: <><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></>,
+    flag: <><path d="M5 21V5m0 0c5-4 9 4 14 0v11c-5 4-9-4-14 0" /></>,
+    document: <><path d="M7 3h7l5 5v13H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" /><path d="M14 3v6h6M9 13h6m-6 4h6" /></>,
+    send: <><path d="m22 2-7 20-4-9-9-4Z" /><path d="M22 2 11 13" /></>,
+    reset: <><path d="M3 12a9 9 0 1 0 2.6-6.4L3 8" /><path d="M3 3v5h5" /><path d="M12 7v5l3 2" /></>,
+    cloudUpload: <><path d="M17.5 19H9a7 7 0 1 1 6.7-9h1.8a4.5 4.5 0 0 1 0 9Z" /><path d="m9 15 3-3 3 3m-3-3v7" /></>,
   }
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -87,11 +94,11 @@ function Icon({ name }) {
   )
 }
 
-function SupportPage({ eyebrow, title, children, backTo = '/student/help', backLabel = 'Back to Help Center' }) {
+function SupportPage({ eyebrow, title, children, backTo = '/student/help', backLabel = 'Back to Help Center', className = '' }) {
   return (
     <div className="support-center-page">
       <Link className="support-back-link" to={backTo}><span aria-hidden="true">←</span> {backLabel}</Link>
-      <section className="student-panel student-route-page support-page-panel">
+      <section className={`student-panel student-route-page support-page-panel ${className}`}>
         <div className="student-section-heading">
           <div>
             <span className="student-eyebrow">{eyebrow}</span>
@@ -118,7 +125,6 @@ export function HelpCenterHome() {
   const cards = [
     { title: 'Email Support', description: 'Send a support request to the LMS team.', icon: 'email', to: '/student/help/email' },
     { title: 'Submit a Support Ticket', description: 'Report an issue and track its status.', icon: 'ticket', to: '/student/help/submit-ticket' },
-    { title: 'Submit a Complaint', description: 'Send a complaint to the Main Admin for review.', icon: 'message', to: '/student/help/complaint' },
     { title: 'Browse FAQs', description: 'Find answers to common questions.', icon: 'faq', to: '/student/help/faqs' },
     { title: 'My Support Requests', description: 'View previous tickets and replies.', icon: 'list', to: '/student/help/requests' },
   ]
@@ -218,7 +224,9 @@ function fileAsBase64(file) {
 
 export function SubmitSupportTicketPage() {
   const navigate = useNavigate()
+  const fileInputRef = useRef(null)
   const [values, setValues] = useState({ subject: '', category: '', priority: 'Medium', description: '' })
+  const [otherCategoryDetail, setOtherCategoryDetail] = useState('')
   const [file, setFile] = useState(null)
   const [error, setError] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -226,14 +234,20 @@ export function SubmitSupportTicketPage() {
   function updateValue(event) {
     const { name, value } = event.currentTarget
     setValues((current) => ({ ...current, [name]: value }))
+    if (name === 'category' && value !== 'Other') setOtherCategoryDetail('')
     setError('')
   }
 
-  function updateFile(event) {
-    const selected = event.currentTarget.files?.[0] || null
+  function updateOtherCategoryDetail(event) {
+    setOtherCategoryDetail(event.currentTarget.value)
+    setError('')
+  }
+
+  function setSelectedFile(selected, input) {
     if (selected && (selected.size > 5 * 1024 * 1024 || !['image/png', 'image/jpeg', 'image/webp', 'application/pdf'].includes(selected.type))) {
       setFile(null)
-      event.currentTarget.value = ''
+      if (input) input.value = ''
+      else if (fileInputRef.current) fileInputRef.current.value = ''
       setError('Choose a PNG, JPEG, WebP, or PDF file no larger than 5 MB.')
       return
     }
@@ -241,8 +255,32 @@ export function SubmitSupportTicketPage() {
     setError('')
   }
 
+  function updateFile(event) {
+    setSelectedFile(event.currentTarget.files?.[0] || null, event.currentTarget)
+  }
+
+  function resetTicketForm() {
+    setValues({ subject: '', category: '', priority: 'Medium', description: '' })
+    setOtherCategoryDetail('')
+    setFile(null)
+    if (fileInputRef.current) fileInputRef.current.value = ''
+    setError('')
+  }
+
   async function submitTicket(event) {
     event.preventDefault()
+    const otherDetails = values.category === 'Other' ? otherCategoryDetail.trim() : ''
+    if (values.category === 'Other' && !otherDetails) {
+      setError('Describe the other category before submitting.')
+      return
+    }
+    const description = otherDetails
+      ? `${values.description.trim()}\n\nOther category: ${otherDetails}`
+      : values.description.trim()
+    if (description.length > 10000) {
+      setError('The description and other category details cannot exceed 10,000 characters.')
+      return
+    }
     setIsSubmitting(true)
     setError('')
     try {
@@ -251,7 +289,7 @@ export function SubmitSupportTicketPage() {
         : undefined
       const result = await supportRequest('/tickets', {
         method: 'POST',
-        body: JSON.stringify({ ...values, ...(attachment ? { attachment } : {}) }),
+        body: JSON.stringify({ ...values, description, ...(attachment ? { attachment } : {}) }),
       })
       navigate(`/student/help/requests/${encodeURIComponent(result.ticket.ticketId)}`, {
         replace: true,
@@ -265,33 +303,90 @@ export function SubmitSupportTicketPage() {
   }
 
   return (
-    <SupportPage eyebrow="WE'RE HERE TO HELP" title="Submit a Support Ticket">
-      <p className="support-page-intro">Tell us what happened. Your request will be saved securely to your LMS account.</p>
-      <form className="support-form" onSubmit={submitTicket}>
-        <label>Subject<input name="subject" value={values.subject} onChange={updateValue} required minLength={3} maxLength={160} /></label>
-        <div className="support-form__grid">
-          <label>Category
-            <select name="category" value={values.category} onChange={updateValue} required>
-              <option value="">Choose a category</option>
-              {ticketCategories.map((category) => <option key={category} value={category}>{category}</option>)}
-            </select>
+    <SupportPage eyebrow="WE'RE HERE TO HELP" title="Submit a Support Ticket" className="support-ticket-page-panel">
+      <div className="support-ticket-layout">
+        <form className="support-form support-ticket-form" onSubmit={submitTicket}>
+          <h3 className="support-ticket-form-heading">Support Ticket</h3>
+          <label className="support-ticket-field">
+            <span className="support-ticket-label">Subject <b>*</b></span>
+            <span className="support-ticket-control">
+              <Icon name="tag" />
+              <input name="subject" autoComplete="off" value={values.subject} onChange={updateValue} required minLength={3} maxLength={160} placeholder="Briefly describe your issue" />
+            </span>
           </label>
-          <label>Priority
-            <select name="priority" value={values.priority} onChange={updateValue} required>
-              {priorities.map((priority) => <option key={priority} value={priority}>{priority}</option>)}
-            </select>
+          <div className="support-form__grid">
+            <label className="support-ticket-field">
+              <span className="support-ticket-label">Category <b>*</b></span>
+              <span className="support-ticket-control">
+                <Icon name="grid" />
+                <select name="category" value={values.category} onChange={updateValue} required>
+                  <option value="">Choose a category</option>
+                  {ticketCategories.map((category) => <option key={category} value={category}>{category}</option>)}
+                </select>
+                <span className="support-ticket-chevron" aria-hidden="true" />
+              </span>
+            </label>
+            <label className="support-ticket-field">
+              <span className="support-ticket-label">Priority <b>*</b></span>
+              <span className="support-ticket-control">
+                <Icon name="flag" />
+                <select name="priority" value={values.priority} onChange={updateValue} required>
+                  {priorities.map((priority) => <option key={priority} value={priority}>{priority}</option>)}
+                </select>
+                <span className="support-ticket-chevron" aria-hidden="true" />
+              </span>
+            </label>
+          </div>
+          {values.category === 'Other' && (
+            <label className="support-ticket-field">
+              <span className="support-ticket-label">What other category? <b>*</b></span>
+              <span className="support-ticket-control">
+                <Icon name="message" />
+                <input
+                  name="otherCategoryDetail"
+                  value={otherCategoryDetail}
+                  onChange={updateOtherCategoryDetail}
+                  required
+                  maxLength={500}
+                  placeholder="Please specify"
+                />
+              </span>
+            </label>
+          )}
+          <label className="support-ticket-field">
+            <span className="support-ticket-label">Detailed description <b>*</b></span>
+            <span className="support-ticket-textarea-wrap">
+              <Icon name="document" />
+              <textarea name="description" value={values.description} onChange={updateValue} required minLength={10} maxLength={10000} rows={5} placeholder="Provide more details about the issue..." />
+            </span>
+            <span className="support-ticket-character-count">{values.description.length} / 10000</span>
           </label>
-        </div>
-        <label>Detailed description<textarea name="description" value={values.description} onChange={updateValue} required minLength={10} maxLength={10000} rows={7} /></label>
-        <label className="support-file-field">Optional screenshot or attachment
-          <input type="file" accept="image/png,image/jpeg,image/webp,application/pdf" onChange={updateFile} />
-          <span>PNG, JPEG, WebP, or PDF · maximum 5 MB{file ? ` · Selected: ${file.name}` : ''}</span>
-        </label>
-        {error && <div className="support-notice is-error" role="alert">{error}</div>}
-        <button className="student-button" type="submit" disabled={isSubmitting}>
-          <Icon name="ticket" /> {isSubmitting ? 'Submitting…' : 'Submit ticket'}
-        </button>
-      </form>
+          <label
+            className="support-ticket-upload"
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={(event) => {
+              event.preventDefault()
+              setSelectedFile(event.dataTransfer.files?.[0] || null)
+            }}
+          >
+            <input ref={fileInputRef} type="file" accept="image/png,image/jpeg,image/webp,application/pdf" onChange={updateFile} />
+            <Icon name="cloudUpload" />
+            <span className="support-ticket-upload__copy">
+              <span><strong>Click to upload</strong> or drag and drop</span>
+              <small>PNG, JPEG, WebP or PDF · Maximum 5 MB{file ? ` · Selected: ${file.name}` : ''}</small>
+            </span>
+          </label>
+          {error && <div className="support-notice is-error" role="alert">{error}</div>}
+          <div className="support-ticket-actions">
+            <button className="student-button support-ticket-submit" type="submit" disabled={isSubmitting}>
+              <Icon name="send" /> {isSubmitting ? 'Submitting…' : 'Submit Ticket'}
+            </button>
+            <button className="support-ticket-reset" type="button" onClick={resetTicketForm} disabled={isSubmitting}>
+              <Icon name="reset" /> Reset
+            </button>
+          </div>
+        </form>
+      </div>
     </SupportPage>
   )
 }
