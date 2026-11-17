@@ -63,6 +63,7 @@ function serializeSettings(user, identity) {
     pendingEmail: identity?.pendingEmail || null,
     role: user.role,
     accountType: getAccountType(user),
+    studentId: user.studentType === 'college' ? user.studentId || '' : null,
     collegeName: null,
     googleConnected: Boolean(identity?.googleSub),
     googleEmail: identity?.googleSub ? identity.googleEmail || user.email : null,
@@ -303,10 +304,20 @@ router.patch('/profile', async (req, res, next) => {
       updates.fullName = body.fullName.trim()
     }
     if (Object.hasOwn(body, 'username')) {
-      if (typeof body.username !== 'string' || !usernamePattern.test(body.username.trim())) {
-        return res.status(400).json({ message: 'Username must be 3–30 characters and use only letters, numbers, dots, underscores, or hyphens.' })
+      if (AccountModel.collection.name !== 'clg_students') {
+        if (typeof body.username !== 'string' || !usernamePattern.test(body.username.trim())) {
+          return res.status(400).json({ message: 'Username must be 3–30 characters and use only letters, numbers, dots, underscores, or hyphens.' })
+        }
+        updates.username = body.username.trim().toLowerCase()
       }
-      updates.username = body.username.trim().toLowerCase()
+    }
+    if (AccountModel.collection.name === 'clg_students') {
+      const collegeStudent = await AccountModel.findById(req.auth.id).select('studentId').lean()
+      const studentId = typeof collegeStudent?.studentId === 'string' ? collegeStudent.studentId.trim() : ''
+      if (!studentId) {
+        return res.status(409).json({ message: 'Your account does not have a Student ID to use as a username. Contact your college administrator.' })
+      }
+      updates.username = studentId.toLowerCase()
     }
     if (!Object.keys(updates).length) return res.status(400).json({ message: 'No account changes were provided.' })
 
@@ -489,7 +500,7 @@ router.post('/email-change/request', async (req, res, next) => {
         },
       )
       return res.status(503).json({
-        message: emailError?.code === 'RESEND_NOT_CONFIGURED'
+        message: emailError?.code === 'EMAIL_NOT_CONFIGURED'
           ? 'Email verification is not configured. Contact support before changing your email.'
           : 'The verification email could not be sent. Check your email address and try again.',
       })

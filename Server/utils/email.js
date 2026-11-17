@@ -1,6 +1,10 @@
 import { config } from '../config/env.js'
 import nodemailer from 'nodemailer'
 
+const gmailHost = 'smtp.gmail.com'
+const gmailPort = 587
+let transporter
+
 function escapeHtml(value) {
   return String(value || '').replace(/[&<>"']/g, (character) => ({
     '&': '&amp;',
@@ -11,97 +15,52 @@ function escapeHtml(value) {
   })[character])
 }
 
-export function assertResendConfigured() {
+export function assertEmailConfigured() {
   if (
-    typeof config.resendApiKey !== 'string' ||
-    !config.resendApiKey.trim() ||
+    config.emailProvider !== 'gmail' ||
+    typeof config.gmailUser !== 'string' ||
+    !config.gmailUser.trim() ||
+    typeof config.gmailAppPassword !== 'string' ||
+    !config.gmailAppPassword.trim() ||
     typeof config.emailFrom !== 'string' ||
     !config.emailFrom.trim()
   ) {
-    const error = new Error('Email is not configured. Set RESEND_API_KEY and EMAIL_FROM in the backend environment.')
-    error.code = 'RESEND_NOT_CONFIGURED'
-    error.statusCode = 503
-    throw error
-  }
-}
-
-export async function sendResendEmail({ to, subject, text, html }) {
-  assertResendConfigured()
-  if (typeof to !== 'string' || !to.trim()) {
-    const error = new Error('A valid email recipient is required.')
-    error.code = 'EMAIL_RECIPIENT_MISSING'
-    throw error
-  }
-
-  const response = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${config.resendApiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      from: config.emailFrom,
-      to: [to.trim().toLowerCase()],
-      subject,
-      text,
-      ...(html ? { html } : {}),
-    }),
-  })
-
-  if (!response.ok) {
-    let responseMessage
-    try {
-      const body = await response.json()
-      responseMessage = typeof body?.message === 'string'
-        ? body.message
-        : typeof body?.error === 'string'
-          ? body.error
-          : undefined
-    } catch {
-      responseMessage = undefined
-    }
-
     const error = new Error(
-      responseMessage
-        ? `Resend could not deliver the email: ${responseMessage}`
-        : `Resend could not deliver the email (HTTP ${response.status}).`,
+      'Email is not configured. Set EMAIL_PROVIDER=gmail, GMAIL_USER, GMAIL_APP_PASSWORD, and EMAIL_FROM in the backend environment.',
     )
-    error.code = 'RESEND_SEND_FAILED'
-    error.statusCode = response.status
-    throw error
-  }
-
-  try {
-    return await response.json()
-  } catch {
-    return undefined
-  }
-}
-
-async function sendGmailEmail({ to, subject, text, html }) {
-  if (
-    typeof config.emailUser !== 'string' ||
-    !config.emailUser.trim() ||
-    typeof config.emailPass !== 'string' ||
-    !config.emailPass.trim()
-  ) {
-    const error = new Error('Gmail email is not configured. Set EMAIL_USER and EMAIL_PASS in the backend environment.')
-    error.code = 'GMAIL_NOT_CONFIGURED'
+    error.code = 'EMAIL_NOT_CONFIGURED'
     error.statusCode = 503
     throw error
   }
+}
+
+function getTransporter() {
+  assertEmailConfigured()
+  if (!transporter) {
+    transporter = nodemailer.createTransport({
+      host: gmailHost,
+      port: gmailPort,
+      secure: false,
+      requireTLS: true,
+      auth: {
+        user: config.gmailUser,
+        pass: config.gmailAppPassword,
+      },
+    })
+  }
+  return transporter
+}
+
+export async function sendEmail({ to, subject, text, html }) {
+  assertEmailConfigured()
   if (typeof to !== 'string' || !to.trim()) {
     const error = new Error('A valid email recipient is required.')
     error.code = 'EMAIL_RECIPIENT_MISSING'
     throw error
   }
 
-  const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: { user: config.emailUser, pass: config.emailPass },
-  })
-  await transporter.sendMail({
-    from: config.emailUser,
+  return getTransporter().sendMail({
+    from: config.emailFrom,
     to: to.trim().toLowerCase(),
     subject,
     text,
@@ -113,10 +72,12 @@ export function logEmailDeliveryFailure({ event, accountId, error }) {
   console.error(JSON.stringify({
     event,
     ...(accountId ? { accountId: String(accountId) } : {}),
-    errorName: error instanceof Error ? error.name : 'UnknownError',
-    errorMessage: error instanceof Error ? error.message.slice(0, 1000) : 'Unknown email delivery error',
-    errorCode: typeof error?.code === 'string' ? error.code : undefined,
+    errorName: error instanceof Error ? error.constructor.name : 'UnknownError',
+    errorCode: typeof error?.code === 'string' && /^[A-Z0-9_]{1,32}$/.test(error.code)
+      ? error.code
+      : undefined,
     statusCode: Number.isInteger(error?.statusCode) ? error.statusCode : undefined,
+    smtpResponseCode: Number.isInteger(error?.responseCode) ? error.responseCode : undefined,
   }))
 }
 
@@ -140,7 +101,7 @@ function createBrandedLoginLinks() {
 export async function sendStudentTwoFactorCodeEmail({ email, fullName, code }) {
   const greetingName = escapeHtml(fullName)
   const escapedCode = escapeHtml(code)
-  await sendResendEmail({
+  await sendEmail({
     to: email,
     subject: 'Your AIHustle LMS security code',
     text: [
@@ -157,21 +118,58 @@ export async function sendStudentTwoFactorCodeEmail({ email, fullName, code }) {
 }
 
 export async function sendRegistrationEmailVerificationCodeEmail({ email, fullName, code }) {
-  const { logoUrl } = createBrandedLoginLinks()
   const greetingName = escapeHtml(fullName)
   const escapedCode = escapeHtml(code)
-  await sendResendEmail({
+  const greetingText = typeof fullName === 'string' && fullName.trim()
+    ? `Hello ${fullName},`
+    : 'Hello,'
+  const greetingHtml = greetingName ? `Hello ${greetingName},` : 'Hello,'
+  await sendEmail({
     to: email,
-    subject: 'Verify your AIHustle LMS email address',
+    subject: 'Your AIHustle Email Verification Code',
     text: [
-      `Hello${fullName ? ` ${fullName}` : ''},`,
+      greetingText,
       '',
-      `Your AIHustle LMS registration verification code is ${code}.`,
-      'It expires in 10 minutes and can only be used once.',
+      'You requested email verification to register for an AIHustle account.',
       '',
-      'If you did not request this code, you can ignore this email.',
+      `Your verification code is: ${code}`,
+      'This code expires in 10 minutes and can only be used once.',
+      '',
+      'If you did not request this code, you can ignore this email. Do not share the code with anyone.',
     ].join('\n'),
-    html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;padding:32px;color:#26332f"><div style="border:1px solid #e5dfcf;border-radius:12px;padding:28px;background:#fffdf8"><p style="margin:0 0 24px;text-align:center"><img src="${escapeHtml(logoUrl)}" alt="AIHustle" style="display:inline-block;max-width:100%;height:auto;width:260px"></p><p style="margin:0 0 8px;color:#477b70;font-size:12px;font-weight:700;letter-spacing:1px">AIHUSTLE LMS</p><h1 style="margin:0 0 18px;font-size:22px">Verify your email address</h1><p>Hello${greetingName ? ` ${greetingName}` : ''},</p><p>Enter this one-time code to verify the email address for your registration:</p><p style="margin:24px 0;padding:16px;border-radius:8px;background:#f6f0dc;text-align:center;color:#26332f;font-size:30px;font-weight:700;letter-spacing:8px">${escapedCode}</p><p>This code expires in <strong>10 minutes</strong> and can only be used once.</p><p style="margin:22px 0 0;color:#68746e;font-size:13px">If you did not request this code, you can ignore this email.</p></div></div>`,
+    html: `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Your AIHustle Email Verification Code</title>
+  </head>
+  <body style="margin:0;background-color:#f4f6f5;color:#26332f;font-family:Arial,Helvetica,sans-serif">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#f4f6f5">
+      <tr>
+        <td align="center" style="padding:32px 16px">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width:560px;background-color:#ffffff;border:1px solid #dfe5e2;border-radius:12px">
+            <tr>
+              <td style="padding:32px">
+                <p style="margin:0 0 24px;color:#477b70;font-size:13px;font-weight:700;letter-spacing:1.5px">AIHUSTLE</p>
+                <h1 style="margin:0 0 20px;color:#26332f;font-size:24px;line-height:1.3">Verify your email address</h1>
+                <p style="margin:0 0 16px;font-size:16px;line-height:1.6">${greetingHtml}</p>
+                <p style="margin:0 0 20px;font-size:16px;line-height:1.6">You requested email verification to register for an AIHustle account.</p>
+                <p style="margin:0 0 8px;color:#596761;font-size:13px;font-weight:700;letter-spacing:1px">YOUR VERIFICATION CODE</p>
+                <p style="margin:0 0 20px;padding:18px 12px;border:1px solid #e5dfcf;border-radius:8px;background-color:#f8f6ef;text-align:center">
+                  <strong style="color:#26332f;font-size:32px;letter-spacing:8px">${escapedCode}</strong>
+                </p>
+                <p style="margin:0 0 24px;font-size:15px;line-height:1.6">This code expires in <strong>10 minutes</strong> and can only be used once.</p>
+                <hr style="height:1px;border:0;background-color:#e5e9e7">
+                <p style="margin:20px 0 0;color:#596761;font-size:14px;line-height:1.6">If you did not request this code, you can ignore this email. Do not share the code with anyone.</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`,
   })
 }
 
@@ -181,7 +179,7 @@ export async function sendStudentRegistrationConfirmationEmail({ email, fullName
   }
   const { loginUrl, logoUrl } = createBrandedLoginLinks()
   const greetingName = escapeHtml(fullName)
-  await sendGmailEmail({
+  await sendEmail({
     to: email,
     subject: 'Your AIHustle LMS registration was received',
     text: [
@@ -198,7 +196,7 @@ export async function sendStudentRegistrationConfirmationEmail({ email, fullName
 export async function sendCollegeAdminActivationEmail({ email, fullName, token }) {
   const activationUrl = new URL('/activate', requireClientOrigin())
   activationUrl.searchParams.set('token', token)
-  await sendResendEmail({
+  await sendEmail({
     to: email,
     subject: 'Activate your LMS college administrator account',
     text: [
@@ -215,7 +213,7 @@ export async function sendCollegeAdminActivationEmail({ email, fullName, token }
 }
 
 export async function sendStudentEmailChangeVerificationEmail({ email, fullName, code }) {
-  await sendResendEmail({
+  await sendEmail({
     to: email,
     subject: 'Verify your new LMS email address',
     text: [
@@ -237,7 +235,7 @@ export async function sendIndependentStudentDecisionEmail({ email, fullName, app
   const greetingName = escapeHtml(fullName)
   const safeReason = typeof reason === 'string' ? reason.trim() : ''
   const supportContact = config.adminEmail?.trim()
-  await sendResendEmail({
+  await sendEmail({
     to: email,
     subject: 'Update on your AIHustle LMS account application',
     text: [
@@ -279,11 +277,11 @@ export function createIndependentStudentApprovalEmail({ email, fullName }) {
 }
 
 export async function sendIndependentStudentApprovalEmail({ email, fullName }) {
-  await sendResendEmail(createIndependentStudentApprovalEmail({ email, fullName }))
+  await sendEmail(createIndependentStudentApprovalEmail({ email, fullName }))
 }
 
 export async function sendSupportTicketComplaintEmail({ email, fullName, ticket }) {
-  await sendResendEmail({
+  await sendEmail({
     to: config.adminEmail,
     subject: `AIHustle LMS support complaint: ${ticket.ticketId}`,
     text: [

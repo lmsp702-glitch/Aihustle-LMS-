@@ -342,6 +342,93 @@
   outline-offset: 2px;
 }
 
+.admin-support.is-main-admin .admin-support__tabs {
+  display: flex;
+  gap: 8px;
+  border-bottom: 1px solid var(--admin-line);
+}
+
+.admin-support.is-main-admin .admin-support__tab {
+  min-height: 40px;
+  padding: 0 15px;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  background: transparent;
+  color: var(--admin-muted);
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.admin-support.is-main-admin .admin-support__tab.is-active {
+  border-bottom-color: var(--admin-olive);
+  color: var(--admin-olive-deep);
+}
+
+.admin-support.is-main-admin .admin-support__tab:focus-visible {
+  outline: 3px solid var(--admin-gold, #d9b34d);
+  outline-offset: 2px;
+}
+
+.admin-support.is-main-admin .admin-support__table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--admin-line);
+  border-radius: var(--admin-card-radius);
+}
+
+.admin-support.is-main-admin .admin-support__table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.admin-support.is-main-admin .admin-support__table th,
+.admin-support.is-main-admin .admin-support__table td {
+  padding: 13px 14px;
+  border-bottom: 1px solid var(--admin-line);
+  color: var(--admin-ink);
+  font-size: var(--admin-type-body);
+  vertical-align: middle;
+}
+
+.admin-support.is-main-admin .admin-support__table th {
+  background: var(--admin-sage);
+  color: var(--admin-muted);
+  font-size: var(--admin-type-secondary);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.admin-support.is-main-admin .admin-support__table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.admin-support.is-main-admin .admin-support__table tbody tr:hover {
+  background: var(--admin-sage);
+}
+
+.admin-support.is-main-admin .admin-support__table a {
+  color: var(--admin-olive-deep);
+  font-weight: 650;
+}
+
+.admin-support.is-main-admin .admin-support__complaint-actions {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.admin-support.is-main-admin .support-status.is-unresolved,
+.admin-support.is-main-admin .support-status.is-unsolved {
+  background: #fbf1db;
+  color: #84681f;
+}
+
+.admin-support.is-main-admin .support-status.is-solved {
+  background: #e5eee6;
+  color: #477156;
+}
+
 .admin-support.is-main-admin .admin-support__content-card > .student-panel {
   padding: 0;
   border: 0;

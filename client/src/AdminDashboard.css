@@ -4360,6 +4360,40 @@
   stroke-width: 1.7;
 }
 
+.admin-app.is-main-admin .admin-home-button {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: #5d665e;
+  cursor: pointer;
+}
+
+.admin-app.is-main-admin .admin-home-button:hover {
+  border-color: #dcdace;
+  background: #f1efe6;
+  color: var(--admin-olive);
+}
+
+.admin-app.is-main-admin .admin-home-button:focus-visible {
+  outline: 2px solid var(--admin-olive);
+  outline-offset: 2px;
+}
+
+.admin-app.is-main-admin .admin-home-button svg {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.7;
+}
+
 .admin-app.is-main-admin .admin-breadcrumb {
   display: flex;
   min-width: 0;
@@ -4388,7 +4422,9 @@
 }
 
 .admin-app.is-main-admin .admin-topbar__right {
-  gap: 5px;
+  flex: 1;
+  min-width: 0;
+  gap: inherit;
 }
 
 .admin-app.is-main-admin .admin-search {
@@ -4398,6 +4434,18 @@
   border-radius: 8px;
   background: var(--admin-paper);
   color: #53615c;
+}
+
+@media (min-width: 761px) {
+  .admin-app.is-main-admin .admin-search-shell {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .admin-app.is-main-admin .admin-search {
+    width: 100%;
+    min-width: 0;
+  }
 }
 
 .admin-app.is-main-admin .admin-search:focus-within {

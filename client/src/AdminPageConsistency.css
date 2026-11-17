@@ -1,0 +1,670 @@
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-content {
+  color: var(--admin-ink);
+}
+
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-content .admin-page-heading:not(.admin-page-heading--overview),
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .independent-approvals__heading,
+.admin-app[data-active-view="courses"] .ac-page-heading {
+  border: 1px solid var(--admin-line);
+  border-radius: var(--admin-card-radius);
+  background: linear-gradient(110deg, var(--admin-paper), var(--admin-sage));
+  box-shadow: var(--admin-card-shadow);
+}
+
+.admin-app[data-active-view="courses"] .admin-course-workspace {
+  min-height: 0;
+  padding: 0;
+  background: transparent;
+}
+
+.admin-app[data-active-view="courses"] .ac-page-heading {
+  margin-bottom: 16px;
+  padding: 20px 22px;
+}
+
+.admin-app[data-active-view="courses"] .ac-builder-title-row,
+.admin-app[data-active-view="courses"] .ac-category-picker__heading {
+  margin-bottom: 16px;
+  padding: 18px 20px;
+  border: 1px solid var(--admin-line);
+  border-radius: var(--admin-card-radius);
+  background: linear-gradient(110deg, var(--admin-paper), var(--admin-sage));
+  box-shadow: var(--admin-card-shadow);
+}
+
+.admin-app[data-active-view="courses"] .ac-category-picker__heading {
+  margin-top: 0;
+}
+
+.admin-app[data-active-view="courses"] .ac-page-heading h1,
+.admin-app[data-active-view="courses"] .ac-builder-title-row h1 {
+  color: var(--admin-ink);
+  font-size: var(--admin-type-page);
+  font-weight: 640;
+  letter-spacing: -0.045em;
+}
+
+.admin-app[data-active-view="courses"] .ac-page-heading p:not(.ac-eyebrow) {
+  color: var(--admin-muted);
+  font-size: var(--admin-type-body);
+}
+
+.admin-app[data-active-view="courses"] .ac-eyebrow {
+  color: var(--admin-muted);
+  font-size: var(--admin-type-secondary);
+}
+
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-panel,
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-view-panel,
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-students-management,
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-support__content-card,
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .independent-approvals__panel,
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .independent-approvals__dialog,
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .settings-section,
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .settings-account-summary,
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .settings-two-factor__summary,
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .settings-two-factor__toggle,
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .settings-theme-option,
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-progress-chart,
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-progress-course,
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-progress-submission,
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-progress-course-certificate,
+.admin-app[data-active-view="courses"] .ac-stat,
+.admin-app[data-active-view="courses"] .ac-course-card,
+.admin-app[data-active-view="courses"] .ac-filters,
+.admin-app[data-active-view="courses"] .ac-builder-surface:not(.ac-builder-surface--content),
+.admin-app[data-active-view="courses"] .ac-builder-panel,
+.admin-app[data-active-view="courses"] .ac-side-panel,
+.admin-app[data-active-view="courses"] .ac-thumbnail-panel,
+.admin-app[data-active-view="courses"] .ac-resource-panel,
+.admin-app[data-active-view="courses"] .ac-settings-panel,
+.admin-app[data-active-view="courses"] .ac-category-choice {
+  border-color: var(--admin-line);
+  border-radius: var(--admin-card-radius);
+  background-color: var(--admin-paper);
+  box-shadow: var(--admin-card-shadow);
+}
+
+.admin-app[data-active-view="courses"] .ac-filters {
+  background: var(--admin-paper);
+}
+
+.admin-app[data-active-view="courses"] .ac-course-grid,
+.admin-app[data-active-view="courses"] .ac-stats {
+  gap: 16px;
+}
+
+.admin-app[data-active-view="courses"] .ac-library-heading h2 {
+  color: var(--admin-ink);
+  font-size: var(--admin-type-section);
+}
+
+.admin-app[data-active-view="courses"] .ac-course-card h2,
+.admin-app[data-active-view="courses"] .ac-builder-intro h2,
+.admin-app[data-active-view="courses"] .ac-module-heading h2 {
+  color: var(--admin-ink);
+}
+
+.admin-app[data-active-view="courses"] .ac-course-card__description,
+.admin-app[data-active-view="courses"] .ac-course-card__meta,
+.admin-app[data-active-view="courses"] .ac-course-card__category,
+.admin-app[data-active-view="courses"] .ac-stat__label {
+  color: var(--admin-muted);
+}
+
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-table-wrap,
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-progress-table-wrap,
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-support__table-wrap,
+.admin-app[data-active-view="courses"] .ac-course-card {
+  border-color: var(--admin-line);
+  border-radius: 10px;
+  background: var(--admin-paper);
+}
+
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-progress-table,
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-support__table {
+  background: var(--admin-paper);
+  color: var(--admin-ink);
+  font-size: var(--admin-type-body);
+}
+
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-progress-table th,
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-support__table th {
+  background: #f4f2eb;
+  color: var(--admin-muted);
+  font-size: var(--admin-type-secondary);
+}
+
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-progress-table td,
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-support__table td {
+  border-color: var(--admin-line);
+  color: var(--admin-muted);
+  font-size: var(--admin-type-body);
+}
+
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-support__filters,
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-feedback__filters,
+.admin-app[data-active-view="courses"] .ac-filters {
+  gap: 10px;
+  border-radius: 10px;
+}
+
+.admin-app[data-active-view="courses"] .ac-search,
+.admin-app[data-active-view="courses"] .ac-filter select {
+  min-height: 38px;
+  border-color: var(--admin-line);
+  border-radius: 8px;
+  background: var(--admin-paper);
+  color: var(--admin-ink);
+  font-size: var(--admin-type-body);
+}
+
+.admin-app[data-active-view="courses"] .ac-search input {
+  font-size: var(--admin-type-body);
+}
+
+.admin-app[data-active-view="courses"] .ac-filter > span {
+  color: var(--admin-muted);
+  font-size: var(--admin-type-secondary);
+}
+
+.admin-app[data-active-view="courses"] .ac-button {
+  min-height: 38px;
+  border-radius: 8px;
+  font-size: var(--admin-type-secondary);
+}
+
+.admin-app[data-active-view="courses"] .ac-button--gold {
+  border-color: var(--admin-gold);
+  background: var(--admin-gold);
+  color: #303328;
+}
+
+.admin-app[data-active-view="courses"] .ac-button--outline {
+  border-color: var(--admin-line);
+  background: var(--admin-paper);
+  color: var(--admin-olive-deep);
+}
+
+.admin-app[data-active-view="courses"] .ac-button--outline:hover:not(:disabled) {
+  background: var(--admin-sage);
+}
+
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-content input:not([type="checkbox"]):not([type="radio"]):not([type="search"]),
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-content select,
+.admin-app[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-content textarea {
+  font-size: var(--admin-type-body);
+}
+
+.admin-app[data-active-view="courses"] .ac-search input {
+  border: 0;
+  background: transparent;
+}
+
+.admin-app[data-active-view="courses"] .ac-search:focus-within,
+.admin-app[data-active-view="courses"] .ac-filter select:focus-visible {
+  outline: 3px solid var(--admin-gold);
+  outline-offset: 2px;
+}
+
+.admin-app[data-theme="dark"][data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-content .admin-page-heading:not(.admin-page-heading--overview),
+.admin-app[data-theme="dark"][data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .independent-approvals__heading,
+.admin-app[data-theme="dark"][data-active-view="courses"] .ac-page-heading {
+  background: linear-gradient(110deg, var(--admin-paper), var(--admin-sage));
+}
+
+.admin-app[data-theme="dark"][data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-progress-table th,
+.admin-app[data-theme="dark"][data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-support__table th {
+  background: #252e2a;
+}
+
+.admin-app[data-theme="dark"][data-active-view="courses"] .ac-search,
+.admin-app[data-theme="dark"][data-active-view="courses"] .ac-filter select,
+.admin-app[data-theme="dark"][data-active-view="courses"] .ac-button--outline {
+  border-color: var(--admin-line);
+  background: #252d29;
+  color: var(--admin-ink);
+}
+
+.admin-app[data-theme="dark"][data-active-view="courses"] .ac-button--gold {
+  background: var(--admin-gold);
+  color: #303328;
+}
+
+.admin-app[data-theme="dark"][data-active-view="courses"] .ac-course-card__meta,
+.admin-app[data-theme="dark"][data-active-view="courses"] .ac-course-card__actions {
+  border-color: var(--admin-line);
+}
+
+@media (max-width: 760px) {
+  .admin-app[data-active-view="courses"] .ac-page-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    padding: 16px;
+  }
+
+  .admin-app[data-active-view="courses"] .ac-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .admin-app[data-active-view="courses"] .ac-course-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 520px) {
+  .admin-app[data-active-view="courses"] .ac-stats {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-app[data-active-view="courses"] .ac-page-heading__actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+}
+
+.admin-app.is-main-admin .admin-content .admin-page-heading,
+.admin-app.is-main-admin .independent-approvals__heading,
+.admin-app.is-main-admin .ac-page-heading,
+.admin-app.is-main-admin .ac-category-picker__heading {
+  box-sizing: border-box;
+  height: 188px;
+  min-height: 188px;
+  align-items: center;
+  padding: 28px 170px 28px 34px;
+  border: 1px solid #dcd5c3;
+  border-radius: 15px;
+  background:
+    radial-gradient(ellipse at 86% 20%, rgba(245, 220, 153, 0.28), transparent 34%),
+    radial-gradient(ellipse at 72% 100%, rgba(196, 230, 211, 0.4), transparent 43%),
+    #f1eee2;
+  box-shadow: none;
+  isolation: isolate;
+  overflow: hidden;
+  position: relative;
+  font-family: inherit;
+}
+
+.admin-app.is-main-admin[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-content .admin-page-heading:not(.admin-page-heading--overview),
+.admin-app.is-main-admin[data-active-view="independent-approvals"] .independent-approvals > .independent-approvals__heading {
+  height: 188px;
+  min-height: 188px;
+  margin: 0;
+  padding: 28px 170px 28px 34px;
+  border: 1px solid #dcd5c3;
+  border-radius: 15px;
+  background:
+    radial-gradient(ellipse at 86% 20%, rgba(245, 220, 153, 0.28), transparent 34%),
+    radial-gradient(ellipse at 72% 100%, rgba(196, 230, 211, 0.4), transparent 43%),
+    #f1eee2;
+  box-shadow: none;
+}
+
+.admin-app.is-main-admin[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-content .admin-page-heading:not(.admin-page-heading--overview) h1,
+.admin-app.is-main-admin[data-active-view="independent-approvals"] .independent-approvals > .independent-approvals__heading h1 {
+  margin: 0;
+  color: #202c28;
+  font-family: inherit;
+  font-size: clamp(28px, 3vw, 38px);
+  font-weight: 620;
+  letter-spacing: -0.055em;
+  line-height: 1.15;
+  text-transform: uppercase;
+}
+
+.admin-app.is-main-admin[data-active-view="students"] {
+  --admin-page-illustration: url("/admin-students-illustration.svg");
+}
+
+.admin-app.is-main-admin[data-active-view="independent-approvals"] {
+  --admin-page-illustration: url("/admin-approvals-illustration.svg");
+}
+
+.admin-app.is-main-admin[data-active-view="colleges"] {
+  --admin-page-illustration: url("/admin-colleges-illustration.svg");
+}
+
+.admin-app.is-main-admin[data-active-view="courses"] {
+  --admin-page-illustration: url("/admin-courses-illustration.svg");
+}
+
+.admin-app.is-main-admin[data-active-view="enrollments"] {
+  --admin-page-illustration: url("/admin-enrollments-illustration.svg");
+}
+
+.admin-app.is-main-admin[data-active-view="reports"] {
+  --admin-page-illustration: url("/admin-reports-illustration.svg");
+}
+
+.admin-app.is-main-admin[data-active-view="feedback"] {
+  --admin-page-illustration: url("/admin-feedback-illustration.svg");
+}
+
+.admin-app.is-main-admin[data-active-view="complaints"] {
+  --admin-page-illustration: url("/admin-complaints-illustration.svg");
+}
+
+.admin-app.is-main-admin[data-active-view="notifications"] {
+  --admin-page-illustration: url("/admin-notifications-illustration.svg");
+}
+
+.admin-app.is-main-admin[data-active-view="settings"] {
+  --admin-page-illustration: url("/admin-settings-illustration.svg");
+}
+
+.admin-app.is-main-admin:not([data-active-view="overview"]) .admin-content .admin-page-heading::before,
+.admin-app.is-main-admin .independent-approvals__heading::before,
+.admin-app.is-main-admin .ac-page-heading::before,
+.admin-app.is-main-admin .ac-category-picker__heading::before {
+  position: absolute;
+  top: 50%;
+  right: 160px;
+  width: 210px;
+  height: 132px;
+  border-radius: 50%;
+  background: radial-gradient(ellipse, rgba(217, 179, 77, 0.14), transparent 70%);
+  content: "";
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.admin-app.is-main-admin:not([data-active-view="overview"]) .admin-content .admin-page-heading::after,
+.admin-app.is-main-admin .independent-approvals__heading::after,
+.admin-app.is-main-admin .ac-page-heading::after,
+.admin-app.is-main-admin .ac-category-picker__heading::after {
+  position: absolute;
+  z-index: 0;
+  top: 50%;
+  right: 160px;
+  width: 210px;
+  height: 132px;
+  background-image: var(--admin-page-illustration);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: contain;
+  content: "";
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.admin-app.is-main-admin .admin-content .admin-page-heading > *,
+.admin-app.is-main-admin .independent-approvals__heading > *,
+.admin-app.is-main-admin .ac-page-heading > *,
+.admin-app.is-main-admin .ac-category-picker__heading > * {
+  position: relative;
+  z-index: 1;
+}
+
+.admin-app.is-main-admin .admin-content .admin-page-heading h1,
+.admin-app.is-main-admin .independent-approvals__heading h1,
+.admin-app.is-main-admin .ac-page-heading h1,
+.admin-app.is-main-admin .ac-category-picker__heading h1 {
+  color: #202c28;
+  font-size: clamp(28px, 3vw, 38px);
+  font-weight: 620;
+  letter-spacing: -0.055em;
+  line-height: 1.15;
+  font-family: inherit;
+  text-transform: uppercase;
+}
+
+.admin-app.is-main-admin .admin-page-heading .admin-eyebrow,
+.admin-app.is-main-admin .independent-approvals__heading .admin-eyebrow,
+.admin-app.is-main-admin .ac-page-heading .ac-eyebrow,
+.admin-app.is-main-admin .ac-category-picker__heading .ac-eyebrow {
+  font-family: inherit;
+  margin-bottom: 9px !important;
+  color: #53615c;
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0.14em;
+}
+
+.admin-app.is-main-admin .admin-content .admin-page-heading .admin-eyebrow,
+.admin-app.is-main-admin .independent-approvals__heading .admin-eyebrow,
+.admin-app.is-main-admin .ac-page-heading .ac-eyebrow,
+.admin-app.is-main-admin .ac-category-picker__heading .ac-eyebrow {
+  display: none !important;
+}
+
+.admin-app.is-main-admin .admin-page-heading--overview .admin-page-heading__illustration {
+  width: 210px;
+  height: 132px;
+}
+
+.admin-app[data-active-view="courses"] .ac-page-heading {
+  padding-right: 300px;
+}
+
+.admin-app.is-main-admin[data-active-view="courses"] .ac-page-heading::before,
+.admin-app.is-main-admin[data-active-view="courses"] .ac-page-heading::after {
+  right: 270px;
+}
+
+.admin-app.is-main-admin[data-active-view="courses"] .ac-page-heading__actions {
+  position: absolute;
+  z-index: 2;
+  right: 34px;
+  top: 28px;
+  bottom: 28px;
+  align-items: flex-end;
+  flex-direction: column;
+  justify-content: space-between;
+  width: auto;
+}
+
+.admin-app.is-main-admin[data-active-view="courses"] .ac-page-heading__actions .ac-add-course {
+  min-height: 38px;
+  padding: 0 16px;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.admin-app.is-main-admin[data-active-view="complaints"] .admin-support__switch-button {
+  min-height: 38px;
+  padding: 0 16px;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.admin-app.is-main-admin[data-active-view="overview"] .admin-content .admin-page-heading--overview {
+  padding-right: 34px;
+}
+
+.admin-app.is-main-admin .admin-page-heading p:not(.admin-eyebrow),
+.admin-app.is-main-admin .independent-approvals__heading p:not(.admin-eyebrow),
+.admin-app.is-main-admin .ac-page-heading p:not(.ac-eyebrow),
+.admin-app.is-main-admin .ac-category-picker__heading > p:last-child {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .admin-app.is-main-admin[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-content .admin-page-heading:not(.admin-page-heading--overview) {
+    height: 175px;
+    min-height: 175px;
+    padding: 23px 150px 23px 23px;
+  }
+
+  .admin-app.is-main-admin[data-active-view="independent-approvals"] .independent-approvals > .independent-approvals__heading {
+    height: 175px;
+    min-height: 175px;
+    padding: 23px 150px 23px 23px;
+  }
+
+  .admin-app.is-main-admin .admin-content .admin-page-heading,
+  .admin-app.is-main-admin .independent-approvals__heading,
+  .admin-app.is-main-admin .ac-page-heading,
+  .admin-app.is-main-admin .ac-category-picker__heading {
+    height: 175px;
+    min-height: 175px;
+    padding: 23px 150px 23px 23px;
+  }
+
+  .admin-app.is-main-admin .admin-page-heading--overview .admin-page-heading__illustration {
+    width: 110px;
+    height: 66px;
+  }
+
+  .admin-app.is-main-admin[data-active-view="courses"] .ac-page-heading__actions {
+    right: 23px;
+    top: 23px;
+    bottom: 23px;
+  }
+
+  .admin-app.is-main-admin[data-active-view="courses"] .ac-page-heading::before,
+  .admin-app.is-main-admin[data-active-view="courses"] .ac-page-heading::after {
+    right: 220px;
+  }
+
+  .admin-app.is-main-admin .admin-content .admin-page-heading::before,
+  .admin-app.is-main-admin .independent-approvals__heading::before,
+  .admin-app.is-main-admin .ac-page-heading::before,
+  .admin-app.is-main-admin .ac-category-picker__heading::before {
+    right: 120px;
+    width: 150px;
+    height: 116px;
+  }
+
+  .admin-app.is-main-admin .admin-content .admin-page-heading::after,
+  .admin-app.is-main-admin .independent-approvals__heading::after,
+  .admin-app.is-main-admin .ac-page-heading::after,
+  .admin-app.is-main-admin .ac-category-picker__heading::after {
+    right: 120px;
+    width: 150px;
+    height: 116px;
+  }
+}
+
+@media (max-width: 520px) {
+  .admin-app.is-main-admin[data-active-view]:not([data-active-view="overview"]):not([data-active-view="students"]) .admin-content .admin-page-heading:not(.admin-page-heading--overview) {
+    height: 160px;
+    min-height: 160px;
+    padding: 18px 120px 18px 18px;
+  }
+
+  .admin-app.is-main-admin[data-active-view="independent-approvals"] .independent-approvals > .independent-approvals__heading {
+    height: 160px;
+    min-height: 160px;
+    padding: 18px 120px 18px 18px;
+  }
+
+  .admin-app.is-main-admin .admin-content .admin-page-heading,
+  .admin-app.is-main-admin .independent-approvals__heading,
+  .admin-app.is-main-admin .ac-page-heading,
+  .admin-app.is-main-admin .ac-category-picker__heading {
+    height: 160px;
+    min-height: 160px;
+    padding: 18px 120px 18px 18px;
+  }
+
+  .admin-app.is-main-admin .admin-page-heading--overview .admin-page-heading__illustration {
+    width: 88px;
+    height: 60px;
+  }
+
+  .admin-app.is-main-admin[data-active-view="courses"] .ac-page-heading::before,
+  .admin-app.is-main-admin[data-active-view="courses"] .ac-page-heading::after {
+    right: 120px;
+  }
+
+  .admin-app.is-main-admin[data-active-view="courses"] .ac-page-heading__actions {
+    top: 12px;
+    right: 12px;
+    bottom: 12px;
+  }
+
+  .admin-app.is-main-admin[data-active-view="courses"] .ac-page-heading__actions .ac-cloudinary-status {
+    font-size: 9px;
+  }
+
+  .admin-app.is-main-admin .admin-page-heading h1,
+  .admin-app.is-main-admin .independent-approvals__heading h1,
+  .admin-app.is-main-admin .ac-page-heading h1,
+  .admin-app.is-main-admin .ac-category-picker__heading h1 {
+    font-size: clamp(22px, 6vw, 27px);
+    letter-spacing: -0.05em;
+    line-height: 1.08;
+  }
+
+  .admin-app.is-main-admin .admin-page-heading .admin-eyebrow,
+  .admin-app.is-main-admin .independent-approvals__heading .admin-eyebrow,
+  .admin-app.is-main-admin .ac-page-heading .ac-eyebrow,
+  .admin-app.is-main-admin .ac-category-picker__heading .ac-eyebrow {
+    margin-bottom: 9px !important;
+    font-size: 12px;
+    letter-spacing: 0.14em;
+  }
+
+  .admin-app.is-main-admin .admin-content .admin-page-heading::before,
+  .admin-app.is-main-admin .independent-approvals__heading::before,
+  .admin-app.is-main-admin .ac-page-heading::before,
+  .admin-app.is-main-admin .ac-category-picker__heading::before {
+    top: 50%;
+    right: 10px;
+    width: 100px;
+    height: 76px;
+    transform: translateY(-50%);
+  }
+
+  .admin-app.is-main-admin .admin-content .admin-page-heading::after,
+  .admin-app.is-main-admin .independent-approvals__heading::after,
+  .admin-app.is-main-admin .ac-page-heading::after,
+  .admin-app.is-main-admin .ac-category-picker__heading::after {
+    top: 50%;
+    right: 10px;
+    width: 100px;
+    height: 76px;
+    transform: translateY(-50%);
+  }
+}
+
+.admin-app.is-main-admin[data-theme="dark"] .admin-content .admin-page-heading,
+.admin-app.is-main-admin[data-theme="dark"] .independent-approvals__heading,
+.admin-app.is-main-admin[data-theme="dark"] .ac-page-heading,
+.admin-app.is-main-admin[data-theme="dark"] .ac-category-picker__heading {
+  border-color: var(--admin-line);
+  background:
+    radial-gradient(ellipse at 86% 20%, rgba(217, 179, 77, 0.1), transparent 34%),
+    radial-gradient(ellipse at 72% 100%, rgba(72, 113, 90, 0.2), transparent 43%),
+    var(--admin-paper);
+}
+
+.admin-app.is-main-admin[data-theme="dark"] .admin-content .admin-page-heading h1,
+.admin-app.is-main-admin[data-theme="dark"] .independent-approvals__heading h1,
+.admin-app.is-main-admin[data-theme="dark"] .ac-page-heading h1,
+.admin-app.is-main-admin[data-theme="dark"] .ac-category-picker__heading h1 {
+  color: var(--admin-ink);
+}
+
+.admin-app.is-main-admin[data-theme="dark"] .admin-page-heading .admin-eyebrow,
+.admin-app.is-main-admin[data-theme="dark"] .independent-approvals__heading .admin-eyebrow,
+.admin-app.is-main-admin[data-theme="dark"] .ac-page-heading .ac-eyebrow,
+.admin-app.is-main-admin[data-theme="dark"] .ac-category-picker__heading .ac-eyebrow {
+  color: var(--admin-muted);
+}
+
+.admin-app.is-main-admin[data-theme="dark"] .admin-content .admin-page-heading::after,
+.admin-app.is-main-admin[data-theme="dark"] .independent-approvals__heading::after,
+.admin-app.is-main-admin[data-theme="dark"] .ac-page-heading::after,
+.admin-app.is-main-admin[data-theme="dark"] .ac-category-picker__heading::after {
+  opacity: 0.88;
+}
+
+.admin-app.is-main-admin:not(.admin-app--sidebar-collapsed) .admin-completion {
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: center;
+  gap: 16px;
+}
+
+.admin-app.is-main-admin:not(.admin-app--sidebar-collapsed) .admin-completion__legend {
+  width: min(100%, 340px);
+}
+
+.admin-app.is-main-admin:not(.admin-app--sidebar-collapsed) .admin-completion__legend-item {
+  grid-template-columns: 9px minmax(0, 1fr) auto 42px;
+  gap: 8px;
+}

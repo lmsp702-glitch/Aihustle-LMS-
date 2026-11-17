@@ -6,11 +6,13 @@ import { API_BASE_URL } from './api-base-url.js'
 import { isInvalidSessionResponse } from './auth-session.js'
 import IndependentStudentApprovals from './IndependentStudentApprovals.jsx'
 import AdminProgressReports from './AdminProgressReports.jsx'
+import AdminFeedback from './AdminFeedback.jsx'
 import AdminSupport from './AdminSupport.jsx'
 import NotificationFeed from './NotificationFeed.jsx'
 import SettingsPage from './SettingsPage.jsx'
 import { readStudentFile } from './student-file.js'
 import './AdminDashboard.css'
+import './AdminPageConsistency.css'
 
 const navigation = [
   { id: 'overview', label: 'Overview', group: 'WORKSPACE', icon: '◫' },
@@ -20,9 +22,9 @@ const navigation = [
   { id: 'courses', label: 'Courses', group: 'COURSE MANAGEMENT', icon: '▤' },
   { id: 'enrollments', label: 'Enrollments', icon: '⇄' },
   { id: 'reports', label: 'Reports & Analytics', icon: '⌁' },
-  { id: 'notifications', label: 'Notifications', group: 'COMMUNICATION & SUPPORT', icon: '♧' },
-  { id: 'feedback', label: 'Feedback & Complaints', icon: '☷' },
-  { id: 'support-tickets', label: 'Support Tickets', to: '/admin/support', icon: '✉' },
+  { id: 'feedback', label: 'Feedback', group: 'COMMUNICATION & SUPPORT', icon: '☷' },
+  { id: 'complaints', label: 'Complaints', icon: '▣' },
+  { id: 'notifications', label: 'Notifications', icon: '♧' },
   { id: 'settings', label: 'Settings', group: 'SYSTEM', icon: '⚙' },
 ]
 
@@ -37,7 +39,7 @@ function AdminNavigationIcon({ name }) {
     reports: <><path d="M3 20V4m0 16h18" /><path d="m6 15 4-4 3 3 6-7m-4 0h4v4" /></>,
     notifications: <><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9m-8 12a2 2 0 0 0 4 0" /></>,
     feedback: <><path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5 8 8 0 0 1-3.5-.8L4 20l1.5-4A7.5 7.5 0 1 1 20 11.5Z" /><path d="M8 11h.01M12 11h.01M16 11h.01" /></>,
-    'support-tickets': <><path d="M4 5h16v12H8l-4 3z" /><path d="M8 9h8m-8 4h5" /></>,
+    complaints: <><path d="M7 3h7l4 4v14H7z" /><path d="M14 3v5h5m-9 4h5m-5 4h5" /></>,
     settings: <><circle cx="12" cy="12" r="3" /><path d="m19.4 15 .1.1 1.4 1.1-1.4 2.4-1.8-.6a8 8 0 0 1-1.7 1l-.3 1.9h-2.8l-.3-1.9a8 8 0 0 1-1.7-1l-1.8.6-1.4-2.4 1.4-1.1a7 7 0 0 1 0-2l-1.4-1.1 1.4-2.4 1.8.6a8 8 0 0 1 1.7-1l.3-1.9h2.8l.3 1.9a8 8 0 0 1 1.7 1l1.8-.6 1.4 2.4-1.4 1.1a7 7 0 0 1 0 2Z" transform="translate(-1 -1)" /></>,
   }
   return (
@@ -98,9 +100,9 @@ const administrativeActions = [
   },
   {
     view: 'feedback',
-    title: 'Review feedback and complaints',
-    description: 'Open the feedback and complaints section.',
-    keywords: 'feedback complaints',
+    title: 'Review feedback',
+    description: 'Open the feedback section.',
+    keywords: 'feedback',
   },
   {
     view: 'settings',
@@ -218,13 +220,12 @@ function EmptyState({ title, children }) {
   )
 }
 
-function MetricCard({ label, value, note, icon, tone }) {
+function MetricCard({ label, value, icon, tone }) {
   return (
     <article className="admin-metric">
       <div className={`admin-metric__icon admin-metric__icon--${tone}`} aria-hidden="true">{icon}</div>
       <p>{label}</p>
       <strong>{value ?? '—'}</strong>
-      <span>{note}</span>
       <svg className="admin-metric__trend" viewBox="0 0 76 42" aria-hidden="true">
         <path d="M3 31h15l9 7 17-18h12L73 3" />
         <path d="M64 3h9v9" />
@@ -434,7 +435,6 @@ function RegistrationsTable({ users, emptyMessage }) {
             <tr key={user._id}>
               <td>
                 <span className="admin-table__name">{user.fullName || user.username || 'Unnamed account'}</span>
-                <span className="admin-table__email">{user.email}</span>
               </td>
               <td>{user.studentType === 'college' ? 'College Student' : 'Independent Student'}</td>
               <td>{formatDate(user.createdAt)}</td>
@@ -461,7 +461,7 @@ function StudentManagementTable({ students, onViewDetails, onViewCodes }) {
         <thead>
           <tr>
             <th>Student Name</th>
-            <th>Role / Student Type</th>
+            <th>Type</th>
             <th>Registration Date</th>
             <th>Referral Code</th>
             <th>Status</th>
@@ -473,9 +473,8 @@ function StudentManagementTable({ students, onViewDetails, onViewCodes }) {
             <tr key={student._id}>
               <td>
                 <span className="admin-table__name">{student.fullName || 'Unnamed student'}</span>
-                <span className="admin-table__email">{student.email}</span>
               </td>
-              <td>Student · {student.studentType === 'college' ? 'College' : 'Independent'}</td>
+              <td>{student.studentType === 'college' ? 'College' : 'Independent'}</td>
               <td>{formatDate(student.createdAt)}</td>
               <td>
                 <button
@@ -488,7 +487,9 @@ function StudentManagementTable({ students, onViewDetails, onViewCodes }) {
                 student.studentType === 'independent'
                   ? student.approvalStatus === 'pending'
                     ? 'Pending Approval'
-                    : student.approvalStatus || student.status
+                    : student.approvalStatus === 'approved'
+                      ? 'Active'
+                      : student.approvalStatus || student.status
                   : student.status
               } /></td>
               <td>
@@ -514,14 +515,13 @@ function CourseRegistrationsTable({ courses }) {
     <div className="admin-table-wrap">
       <table className="admin-table">
         <thead>
-          <tr><th>Course</th><th>Status</th><th>Registration date</th></tr>
+          <tr><th>Course</th><th>Status</th></tr>
         </thead>
         <tbody>
           {courses.map((course) => (
             <tr key={course._id}>
               <td><span className="admin-table__name">{course.title || 'Untitled course'}</span></td>
               <td><StatusBadge status={course.status} /></td>
-              <td>{formatDate(course.createdAt)}</td>
             </tr>
           ))}
         </tbody>
@@ -554,11 +554,14 @@ function AdminDashboard({
   const [isLoadingEngagement, setIsLoadingEngagement] = useState(true)
   const [engagementError, setEngagementError] = useState('')
   const [engagementRetry, setEngagementRetry] = useState(0)
-  const [activeView, setActiveView] = useState(() => (
-    location.pathname.startsWith('/admin/support')
-      ? 'support-tickets'
-      : location.pathname.startsWith('/admin/settings') ? 'settings' : 'overview'
-  ))
+  const [activeView, setActiveView] = useState(() => {
+    const requestedView = new URLSearchParams(location.search).get('section')
+    if (['feedback', 'notifications'].includes(requestedView)) return requestedView
+    if (location.pathname.startsWith('/admin/support')) return 'complaints'
+    return location.pathname.startsWith('/admin/settings')
+      ? 'settings' : 'overview'
+  })
+  const [approvalStudentIdToOpen, setApprovalStudentIdToOpen] = useState('')
   const [registrationTab, setRegistrationTab] = useState('all')
   const [studentSearch, setStudentSearch] = useState('')
   const [studentFilter, setStudentFilter] = useState('all')
@@ -587,7 +590,13 @@ function AdminDashboard({
   const [referralCodesError, setReferralCodesError] = useState('')
   const referralCodesRequestRef = useRef(0)
   const [studentToEdit, setStudentToEdit] = useState(null)
-  const [studentEditForm, setStudentEditForm] = useState({ fullName: '', email: '', username: '' })
+  const [studentEditForm, setStudentEditForm] = useState({
+    fullName: '',
+    email: '',
+    username: '',
+    studentType: 'independent',
+    studentId: '',
+  })
   const [studentEditError, setStudentEditError] = useState('')
   const [isSavingStudentEdit, setIsSavingStudentEdit] = useState(false)
   const [studentToDelete, setStudentToDelete] = useState(null)
@@ -714,13 +723,18 @@ function AdminDashboard({
 
   useEffect(() => {
     if (location.pathname.startsWith('/admin/support')) {
-      setActiveView('support-tickets')
+      setActiveView('complaints')
     } else if (location.pathname.startsWith('/admin/settings')) {
       setActiveView('settings')
     } else if (location.pathname.startsWith('/admin/dashboard')) {
-      setActiveView((current) => ['support-tickets', 'settings'].includes(current) ? 'overview' : current)
+      const requestedView = new URLSearchParams(location.search).get('section')
+      if (['feedback', 'notifications'].includes(requestedView)) {
+        setActiveView(requestedView)
+      } else {
+        setActiveView((current) => current === 'settings' ? 'overview' : current)
+      }
     }
-  }, [location.pathname])
+  }, [location.pathname, location.search])
 
   useEffect(() => {
     if (activeView !== 'overview') return undefined
@@ -1499,7 +1513,11 @@ function AdminDashboard({
     setStudentEditForm({
       fullName: student.fullName || '',
       email: student.email || '',
-      username: student.username || '',
+      username: student.studentType === 'college'
+        ? String(student.studentId || '').trim().toLowerCase()
+        : student.username || '',
+      studentType: student.studentType || 'independent',
+      studentId: student.studentId || '',
     })
     setStudentEditError('')
   }
@@ -1721,10 +1739,6 @@ function AdminDashboard({
       onLogout()
       return
     }
-    if (view === 'support-tickets') {
-      navigate('/admin/support')
-      return
-    }
     if (view === 'settings') {
       navigate('/admin/settings')
       return
@@ -1756,14 +1770,14 @@ function AdminDashboard({
     enrollments: 'Enrollments',
     reports: 'Reports & Analytics',
     notifications: 'Notifications',
-    feedback: 'Feedback & Complaints',
-    'support-tickets': 'Support Tickets',
+    feedback: 'Feedback',
+    complaints: 'Complaints',
     settings: 'Settings',
   }
   const isDrawerViewport = window.matchMedia('(max-width: 1024px)').matches
 
   return (
-    <div className={`admin-app is-main-admin${sidebarCollapsed ? ' admin-app--sidebar-collapsed' : ''}`} data-theme={isDark ? 'dark' : 'light'}>
+    <div className={`admin-app is-main-admin${sidebarCollapsed ? ' admin-app--sidebar-collapsed' : ''}`} data-theme={isDark ? 'dark' : 'light'} data-active-view={activeView}>
       {sidebarOpen && (
         <button
           className="admin-backdrop"
@@ -1817,15 +1831,7 @@ function AdminDashboard({
         </div>
       </aside>
 
-      <main
-        className="admin-main"
-        onClick={(event) => {
-          if (!sidebarCollapsed && !event.target.closest('.admin-menu-toggle')) {
-            setSidebarOpen(false)
-            setSidebarCollapsed(true)
-          }
-        }}
-      >
+      <main className="admin-main">
         <header className="admin-topbar">
           <button
             type="button"
@@ -1849,7 +1855,17 @@ function AdminDashboard({
               <path d="M4 6h16M4 12h16M4 18h16" />
             </svg>
           </button>
-          <div className="admin-breadcrumb"><AdminNavigationIcon name={activeView} /> Workspace <span>/</span> <strong>{viewTitles[activeView]}</strong></div>
+          <button
+            type="button"
+            className="admin-home-button"
+            aria-label="Go to home"
+            title="Home"
+            onClick={() => selectView('overview')}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z" />
+            </svg>
+          </button>
           <div className="admin-topbar__right">
             <div
               className={`admin-search-shell${mobileSearchOpen ? ' admin-search-shell--mobile-open' : ''}`}
@@ -1985,9 +2001,9 @@ function AdminDashboard({
 
               <div className="admin-page-body">
               <section className="admin-metrics" aria-label="Platform statistics">
-                <MetricCard label="Total Students" value={isLoading ? '…' : stats?.totalStudents ?? '—'} note="Independent and college student accounts" icon="♙" tone="sage" />
-                <MetricCard label="Total Colleges" value={isLoading ? '…' : stats?.totalColleges ?? '—'} note="Colleges in the LMS" icon="▦" tone="gold" />
-                <MetricCard label="Total Courses" value={isLoading ? '…' : stats?.totalCourses ?? '—'} note="Courses in the LMS" icon="▤" tone="blue" />
+                <MetricCard label="Total Students" value={isLoading ? '…' : stats?.totalStudents ?? '—'} icon="♙" tone="sage" />
+                <MetricCard label="Total Colleges" value={isLoading ? '…' : stats?.totalColleges ?? '—'} icon="▦" tone="gold" />
+                <MetricCard label="Total Courses" value={isLoading ? '…' : stats?.totalCourses ?? '—'} icon="▤" tone="blue" />
               </section>
 
               <section className="admin-analytics-grid">
@@ -2554,12 +2570,30 @@ function AdminDashboard({
           {activeView === 'colleges' && <CollegesManagement onLogout={onLogout} />}
           {activeView === 'courses' && <AdminCourseManagement onLogout={onLogout} />}
           {activeView === 'enrollments' && <EnrollmentManagement onLogout={onLogout} />}
-          {activeView === 'independent-approvals' && <IndependentStudentApprovals onLogout={onLogout} />}
-          {activeView === 'support-tickets' && (
-            <AdminSupport user={user} onLogout={onLogout} isDark={isDark} embedded />
+          {activeView === 'independent-approvals' && (
+            <IndependentStudentApprovals
+              onLogout={onLogout}
+              studentIdToOpen={approvalStudentIdToOpen}
+              onStudentDetailsOpened={() => setApprovalStudentIdToOpen('')}
+            />
           )}
+          {activeView === 'complaints' && (
+            <AdminSupport
+              user={user}
+              onLogout={onLogout}
+              isDark={isDark}
+              embedded
+              initialTab={
+                location.pathname.startsWith('/admin/support') &&
+                new URLSearchParams(location.search).get('tab') === 'tickets'
+                  ? 'tickets'
+                  : 'complaints'
+              }
+            />
+          )}
+          {activeView === 'feedback' && <AdminFeedback />}
 
-          {['reports', 'notifications', 'feedback', 'settings'].includes(activeView) && (
+          {['reports', 'notifications', 'settings'].includes(activeView) && (
             <div className="admin-data-page">
               <section className="admin-page-heading admin-page-heading--compact">
                 <div><p className="admin-eyebrow">WORKSPACE</p><h1>{viewTitles[activeView]}</h1><p>Manage your LMS {viewTitles[activeView].toLowerCase()}.</p></div>
@@ -2571,7 +2605,14 @@ function AdminDashboard({
                     {activeView === 'reports'
                       ? <AdminProgressReports onLogout={onLogout} />
                       : activeView === 'notifications'
-                        ? <NotificationFeed role="main_admin" onLogout={onLogout} onOpenApprovals={() => selectView('independent-approvals')} />
+                        ? <NotificationFeed
+                          role="main_admin"
+                          onLogout={onLogout}
+                          onOpenApprovals={(studentId) => {
+                            setApprovalStudentIdToOpen(typeof studentId === 'string' ? studentId : '')
+                            selectView('independent-approvals')
+                          }}
+                        />
                         : <EmptyState title={`${viewTitles[activeView]} are not connected`}>This section will show live LMS data when its backend API is available.</EmptyState>}
                   </section>
                 )}
@@ -2768,18 +2809,20 @@ function AdminDashboard({
                   required
                 />
               </label>
-              <label className="admin-report-field">
-                <span>Username</span>
-                <input
-                  type="text"
-                  autoComplete="username"
-                  minLength={3}
-                  maxLength={30}
-                  value={studentForm.username}
-                  onChange={(event) => setStudentForm((form) => ({ ...form, username: event.target.value }))}
-                  required
-                />
-              </label>
+              {studentForm.studentType === 'independent' && (
+                <label className="admin-report-field">
+                  <span>Username</span>
+                  <input
+                    type="text"
+                    autoComplete="username"
+                    minLength={3}
+                    maxLength={30}
+                    value={studentForm.username}
+                    onChange={(event) => setStudentForm((form) => ({ ...form, username: event.target.value }))}
+                    required
+                  />
+                </label>
+              )}
               {studentForm.studentType === 'college' && (
                 <>
                   <label className="admin-report-field">
@@ -2791,6 +2834,10 @@ function AdminDashboard({
                       onChange={(event) => setStudentForm((form) => ({ ...form, studentId: event.target.value }))}
                       required
                     />
+                  </label>
+                  <label className="admin-report-field">
+                    <span>Username (Student ID)</span>
+                    <input type="text" value={studentForm.studentId.trim().toLowerCase()} readOnly />
                   </label>
                   <label className="admin-report-field">
                     <span>College</span>
@@ -3275,18 +3322,25 @@ function AdminDashboard({
                   required
                 />
               </label>
-              <label className="admin-report-field">
-                <span>Username</span>
-                <input
-                  type="text"
-                  autoComplete="username"
-                  minLength={3}
-                  maxLength={30}
-                  value={studentEditForm.username}
-                  onChange={(event) => setStudentEditForm((form) => ({ ...form, username: event.target.value }))}
-                  required
-                />
-              </label>
+              {studentEditForm.studentType === 'college' ? (
+                <label className="admin-report-field">
+                  <span>Username (Student ID)</span>
+                  <input type="text" value={studentEditForm.studentId.trim().toLowerCase()} readOnly />
+                </label>
+              ) : (
+                <label className="admin-report-field">
+                  <span>Username</span>
+                  <input
+                    type="text"
+                    autoComplete="username"
+                    minLength={3}
+                    maxLength={30}
+                    value={studentEditForm.username}
+                    onChange={(event) => setStudentEditForm((form) => ({ ...form, username: event.target.value }))}
+                    required
+                  />
+                </label>
+              )}
               {studentEditError && <p className="admin-inline-error" role="alert">{studentEditError}</p>}
               <div className="admin-report-dialog__actions">
                 <button

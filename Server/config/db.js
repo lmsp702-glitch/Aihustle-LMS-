@@ -13,6 +13,8 @@ import Certificate from '../models/Certificate.js'
 import CertificateTemplate from '../models/CertificateTemplate.js'
 import SupportTicket from '../models/SupportTicket.js'
 import Notification from '../models/Notification.js'
+import Feedback from '../models/Feedback.js'
+import Complaint from '../models/Complaint.js'
 import EmailOtpChallenge from '../models/EmailOtpChallenge.js'
 import RegistrationEmailVerification from '../models/RegistrationEmailVerification.js'
 import ReferralCode from '../models/ReferralCode.js'
@@ -36,6 +38,8 @@ const requiredModels = [
   CertificateTemplate,
   SupportTicket,
   Notification,
+  Feedback,
+  Complaint,
   EmailOtpChallenge,
   RegistrationEmailVerification,
   ReferralCode,

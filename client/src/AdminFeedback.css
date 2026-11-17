@@ -1,0 +1,100 @@
+.admin-feedback {
+  display: grid;
+  gap: 18px;
+}
+
+.admin-feedback__card {
+  padding: 22px;
+}
+
+.admin-feedback__search {
+  display: flex;
+  width: min(100%, 520px);
+  min-height: 44px;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 16px;
+  padding: 0 13px;
+  border: 1px solid var(--admin-line, #dedace);
+  border-radius: 10px;
+  background: var(--admin-paper, #fffdf7);
+  color: var(--admin-muted, #53615c);
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.admin-feedback__search:focus-within {
+  border-color: var(--admin-olive, #34796e);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--admin-olive, #34796e) 14%, transparent);
+}
+
+.admin-feedback__search-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-width: 1.8;
+}
+
+.admin-app.is-main-admin .admin-content .admin-feedback__search input[type="search"] {
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--admin-ink, #26332f);
+  font: inherit;
+  font-size: var(--admin-type-body, 14px);
+}
+
+.admin-app.is-main-admin .admin-content .admin-feedback__search input[type="search"]:focus-visible {
+  border: 0;
+  outline: 0;
+}
+
+.admin-app.is-main-admin .admin-content .admin-feedback__search input[type="search"]::placeholder {
+  color: var(--admin-muted, #53615c);
+  opacity: 0.8;
+}
+
+.admin-app.is-main-admin[data-theme="dark"] .admin-content .admin-feedback__search input[type="search"] {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--admin-ink);
+}
+
+.admin-feedback__table {
+  min-width: 930px;
+}
+
+.admin-feedback__message-cell,
+.admin-feedback__full-message {
+  max-width: 420px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.admin-feedback__view-button,
+.admin-feedback__close-button {
+  border: 1px solid var(--admin-border, #dce2e9);
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  padding: 8px 11px;
+}
+
+.admin-feedback__detail {
+  padding: 24px;
+}
+
+.admin-feedback__full-message {
+  margin: 0;
+  max-width: none;
+}

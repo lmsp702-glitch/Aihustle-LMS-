@@ -64,6 +64,15 @@ const refreshTokenLifetimeMs = 7 * 24 * 60 * 60 * 1000
 
 const allowedRoles = new Set(['main_admin', 'college_admin', 'student'])
 const protectedRegistrationField = /(password|token|secret|credential|auth|otp|hash)/i
+const removedRegistrationFields = new Set([
+  'customQualification',
+  'custom_qualification',
+  'otherQualification',
+  'qualificationOther',
+  'customLivingArrangement',
+  'custom_living_arrangement',
+  'otherLivingArrangement',
+])
 const accountRegistrationFields = new Set([
   '_id',
   '__v',
@@ -91,6 +100,7 @@ function createRegistrationDetails(input, accountFields) {
       if (
         !/^[a-zA-Z][a-zA-Z0-9_-]*$/.test(field) ||
         accountRegistrationFields.has(field) ||
+        removedRegistrationFields.has(field) ||
         protectedRegistrationField.test(field) ||
         typeof value !== 'string'
       ) continue

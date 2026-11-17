@@ -4,6 +4,7 @@ import { API_BASE_URL } from './api-base-url.js'
 import {
   EmailSupportPage,
   HelpCenterHome,
+  SubmitComplaintPage,
   SubmitSupportTicketPage,
   SupportFaqPage,
   SupportRequestsPage,
@@ -5274,6 +5275,7 @@ function StudentDashboard({
               } />
               <Route path="/student/help" element={<HelpCenterHome />} />
               <Route path="/student/help/email" element={<EmailSupportPage user={user} />} />
+              <Route path="/student/help/complaint" element={<SubmitComplaintPage />} />
               <Route path="/student/help/submit-ticket" element={<SubmitSupportTicketPage />} />
               <Route path="/student/help/faqs" element={<SupportFaqPage />} />
               <Route path="/student/help/requests" element={<SupportRequestsPage />} />

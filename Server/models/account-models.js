@@ -29,6 +29,10 @@ function createAccountModel(modelName, collectionName, role, additionalFields = 
 }
 
 const independentStudentFields = {
+  status: {
+    ...accountFields.status,
+    enum: [...accountFields.status.enum, 'rejected'],
+  },
   studentType: { type: String, enum: ['independent'], default: 'independent', required: true },
   twoFactorEnabled: { type: Boolean, default: false },
   twoFactorEnabledAt: { type: Date },

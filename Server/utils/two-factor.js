@@ -5,7 +5,7 @@ import { config } from '../config/env.js'
 import EmailOtpChallenge from '../models/EmailOtpChallenge.js'
 import { accountModelsByCollection } from '../models/account-models.js'
 import {
-  assertResendConfigured,
+  assertEmailConfigured,
   logEmailDeliveryFailure,
   sendStudentTwoFactorCodeEmail,
 } from './email.js'
@@ -145,15 +145,18 @@ async function deliverChallenge(challenge, user) {
       { _id: challenge._id, verifiedAt: null },
       { $set: { attempts: maxOtpAttempts } },
     )
-    if (error?.code === 'RESEND_NOT_CONFIGURED') {
-      throw new TwoFactorError(503, 'Email verification is not configured. Set RESEND_API_KEY and EMAIL_FROM in Server/.env.')
+    if (error?.code === 'EMAIL_NOT_CONFIGURED') {
+      throw new TwoFactorError(
+        503,
+        'Email verification is not configured. Set EMAIL_PROVIDER=gmail, GMAIL_USER, GMAIL_APP_PASSWORD, and EMAIL_FROM in Server/.env.',
+      )
     }
     throw new TwoFactorError(503, 'The security code could not be sent. Please try again later.')
   }
 }
 
 export async function issueStudentOtpChallenge({ user, accountCollection, purpose }) {
-  assertResendConfigured()
+  assertEmailConfigured()
   if (!studentCollections.has(accountCollection) || !user?._id || !user.email) {
     throw new TwoFactorError(403, 'Email verification is available only for student accounts.')
   }
@@ -208,7 +211,7 @@ export async function issueStudentOtpChallenge({ user, accountCollection, purpos
 }
 
 export async function resendStudentOtp({ challengeToken, purpose, authenticatedUser }) {
-  assertResendConfigured()
+  assertEmailConfigured()
   const payload = readChallengeToken(challengeToken, purpose, authenticatedUser)
   const challenge = await EmailOtpChallenge.findOne({
     _id: payload.jti,

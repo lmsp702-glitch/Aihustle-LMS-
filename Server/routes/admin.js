@@ -55,12 +55,19 @@ const protectedRegistrationField = /(password|token|secret|credential|auth|otp|h
 const registrationFieldAliases = Object.freeze({
   referralCode: ['referral_code', 'usedReferralCode'],
   educationQualification: ['education_qualification', 'qualification'],
-  customQualification: ['custom_qualification', 'otherQualification', 'qualificationOther'],
   userExpectations: ['user_expectations', 'expectations'],
   location: ['studentLocation'],
   livingWithWhom: ['living_with_whom', 'livingArrangement'],
-  customLivingArrangement: ['custom_living_arrangement', 'otherLivingArrangement'],
 })
+const removedRegistrationFields = new Set([
+  'customQualification',
+  'custom_qualification',
+  'otherQualification',
+  'qualificationOther',
+  'customLivingArrangement',
+  'custom_living_arrangement',
+  'otherLivingArrangement',
+])
 const reportPageSize = 200
 const approvalStatuses = new Set(['pending', 'approved', 'rejected', 'all'])
 
@@ -94,6 +101,7 @@ function publicRegistrationDetails(details, accountFields, legacyDetails = {}) {
     : []
   const isSafeEntry = ([field, value]) => (
     /^[a-zA-Z][a-zA-Z0-9_-]*$/.test(field) &&
+    !removedRegistrationFields.has(field) &&
     !protectedRegistrationField.test(field) &&
     typeof value === 'string'
   )
@@ -473,8 +481,7 @@ async function accountIdentifierExists(field, value) {
 }
 
 function makeImportUsername(studentId) {
-  const digest = createHash('sha256').update(studentId.toLowerCase()).digest('hex').slice(0, 20)
-  return `college-${digest}`
+  return String(studentId ?? '').trim().toLowerCase()
 }
 
 function getReportCourseLessons(course) {
@@ -1929,7 +1936,6 @@ router.post('/students/import', ...requireAdmin, async (req, res, next) => {
     const failures = []
     const seenEmails = new Set()
     const seenStudentIds = new Set()
-    const seenUsernames = new Set()
 
     for (const row of rows) {
       if (row.error) {
@@ -1938,30 +1944,28 @@ router.post('/students/import', ...requireAdmin, async (req, res, next) => {
       }
 
       const { fullName, studentId, email, department, batch } = row
-      const normalizedStudentId = studentId.toLowerCase()
+      const normalizedStudentId = studentId.trim().toLowerCase()
       const username = makeImportUsername(studentId)
       const errors = []
       if (!fullName || fullName.length > 120) errors.push('Full Name is required and must be 120 characters or fewer.')
-      if (!studentId || studentId.length > 100) errors.push('Student ID is required and must be 100 characters or fewer.')
+      if (!studentId.trim() || studentId.trim().length > 100) errors.push('Student ID is required and must be 100 characters or fewer.')
       if (!emailPattern.test(email) || email.length > 254) errors.push('Enter a valid email address.')
       if (!department || department.length > 120) errors.push('Department is required and must be 120 characters or fewer.')
       if (!batch || batch.length > 80) errors.push('Batch is required and must be 80 characters or fewer.')
       if (seenEmails.has(email)) errors.push('Email is duplicated in this CSV.')
       if (seenStudentIds.has(normalizedStudentId)) errors.push('Student ID is duplicated in this CSV.')
-      if (seenUsernames.has(username)) errors.push('Generated username is duplicated in this CSV.')
       if (email) seenEmails.add(email)
       if (studentId) seenStudentIds.add(normalizedStudentId)
-      seenUsernames.add(username)
 
       if (!errors.length) {
         const [existingEmail, existingStudentId, existingUsername] = await Promise.all([
           accountIdentifierExists('email', email),
-          CollegeStudent.findOne({ studentId }).collation({ locale: 'en', strength: 2 }).select('_id').lean(),
+          CollegeStudent.findOne({ studentId: studentId.trim() }).collation({ locale: 'en', strength: 2 }).select('_id').lean(),
           accountIdentifierExists('username', username),
         ])
         if (existingEmail) errors.push('Email already belongs to an LMS account.')
         if (existingStudentId) errors.push('Student ID already exists.')
-        if (existingUsername) errors.push('Generated username conflicts with an LMS account.')
+        if (existingUsername) errors.push('Username (Student ID) conflicts with an LMS account.')
       }
 
       if (errors.length) {
@@ -1990,7 +1994,7 @@ router.post('/students/import', ...requireAdmin, async (req, res, next) => {
               [{
                 _id: accountId,
                 fullName,
-                studentId,
+                studentId: studentId.trim(),
                 email,
                 username,
                 department,
@@ -2604,6 +2608,16 @@ router.patch('/independent-students/:studentId/approval', ...requireAdmin, async
         }
 
         const approved = decision === 'approve'
+        await Notification.updateMany(
+          {
+            recipientRole: 'main_admin',
+            type: 'independent_student_registered',
+            'metadata.studentId': String(studentId),
+            actionCompletedAt: { $exists: false },
+          },
+          { $set: { actionCompletedAt: new Date() } },
+          { session },
+        )
         await Notification.create(
           [{
             recipientRole: 'student',
@@ -2921,7 +2935,7 @@ router.patch('/students/:studentId', ...requireAdmin, async (req, res, next) => 
     if (typeof email !== 'string' || email.trim().length > 254 || !emailPattern.test(email.trim())) {
       return res.status(400).json({ message: 'Enter a valid email address.' })
     }
-    if (typeof username !== 'string' || !usernamePattern.test(username.trim())) {
+    if (studentType === 'independent' && (typeof username !== 'string' || !usernamePattern.test(username.trim()))) {
       return res.status(400).json({
         message: 'Use a username with 3–30 letters, numbers, dots, underscores, or hyphens.',
       })
@@ -2931,12 +2945,17 @@ router.patch('/students/:studentId', ...requireAdmin, async (req, res, next) => 
     const accountCollection = AccountModel.collection.name
     const accountId = new mongoose.Types.ObjectId(studentId)
     const student = await AccountModel.findOne({ _id: accountId, role: 'student', studentType })
-      .select('_id')
+      .select('_id studentId')
       .lean()
     if (!student) return res.status(404).json({ message: 'The student was not found.' })
 
     const normalizedEmail = email.trim().toLowerCase()
-    const normalizedUsername = username.trim().toLowerCase()
+    const normalizedUsername = studentType === 'college'
+      ? String(student.studentId || '').trim().toLowerCase()
+      : username.trim().toLowerCase()
+    if (!normalizedUsername) {
+      return res.status(409).json({ message: 'This college student does not have a Student ID to use as a username.' })
+    }
     const identifierExistsElsewhere = async (field, value) => {
       let identityQuery = AccountIdentity.findOne({ [field]: value, accountId: { $ne: accountId } })
       if (field === 'username') identityQuery = identityQuery.collation({ locale: 'en', strength: 2 })
@@ -3516,7 +3535,7 @@ router.post('/students', ...requireAdmin, async (req, res, next) => {
     if (typeof email !== 'string' || email.trim().length > 254 || !emailPattern.test(email.trim())) {
       return res.status(400).json({ message: 'Enter a valid email address.' })
     }
-    if (typeof username !== 'string' || !usernamePattern.test(username.trim())) {
+    if (studentType === 'independent' && (typeof username !== 'string' || !usernamePattern.test(username.trim()))) {
       return res.status(400).json({
         message: 'Use a username with 3–30 letters, numbers, dots, underscores, or hyphens.',
       })
@@ -3537,7 +3556,6 @@ router.post('/students', ...requireAdmin, async (req, res, next) => {
     }
 
     const normalizedEmail = email.trim().toLowerCase()
-    const normalizedUsername = username.trim().toLowerCase()
     const normalizedStudentId = typeof studentId === 'string' ? studentId.trim() : ''
     let selectedCollegeId
     if (studentType === 'college') {
@@ -3553,6 +3571,9 @@ router.post('/students', ...requireAdmin, async (req, res, next) => {
     } else if (collegeId !== undefined && collegeId !== '') {
       return res.status(400).json({ message: 'Independent students cannot be assigned a college.' })
     }
+    const normalizedUsername = studentType === 'college'
+      ? normalizedStudentId.toLowerCase()
+      : username.trim().toLowerCase()
 
     const [existingEmail, existingUsername, existingStudentId] = await Promise.all([
       accountIdentifierExists('email', normalizedEmail),
@@ -4579,12 +4600,12 @@ router.post('/students/import/preview', ...requireAdmin, async (req, res, next) 
     for (const row of rows) {
       const { fullName = '', studentId = '', email = '', department = '', batch = '' } = row
       const normalizedEmail = email.toLowerCase()
-      const normalizedStudentId = studentId.toLowerCase()
+      const normalizedStudentId = studentId.trim().toLowerCase()
       const username = studentId ? makeImportUsername(studentId) : ''
       const errors = []
       if (row.error) errors.push(row.error)
       if (!fullName || fullName.length > 120) errors.push('Full Name is required and must be 120 characters or fewer.')
-      if (!studentId || studentId.length > 100) errors.push('Student ID is required and must be 100 characters or fewer.')
+      if (!studentId.trim() || studentId.trim().length > 100) errors.push('Student ID is required and must be 100 characters or fewer.')
       if (!emailPattern.test(email) || email.length > 254) errors.push('Enter a valid email address.')
       if (!department || department.length > 120) errors.push('Department is required and must be 120 characters or fewer.')
       if (!batch || batch.length > 80) errors.push('Batch is required and must be 80 characters or fewer.')
@@ -4595,12 +4616,12 @@ router.post('/students/import/preview', ...requireAdmin, async (req, res, next) 
       if (!errors.length) {
         const [existingEmail, existingStudentId, existingUsername] = await Promise.all([
           accountIdentifierExists('email', normalizedEmail),
-          CollegeStudent.findOne({ studentId }).collation({ locale: 'en', strength: 2 }).select('_id').lean(),
+          CollegeStudent.findOne({ studentId: studentId.trim() }).collation({ locale: 'en', strength: 2 }).select('_id').lean(),
           accountIdentifierExists('username', username),
         ])
         if (existingEmail) errors.push('Email already belongs to an LMS account.')
         if (existingStudentId) errors.push('Student ID already exists.')
-        if (existingUsername) errors.push('Generated username conflicts with an LMS account.')
+        if (existingUsername) errors.push('Username (Student ID) conflicts with an LMS account.')
       }
       if (!errors.length && remainingSlots !== null) {
         if (validRowsWithinLimit >= remainingSlots) {

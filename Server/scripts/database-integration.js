@@ -9,20 +9,26 @@ process.env.ADMIN_EMAIL = 'initial-admin@lms-test.invalid'
 process.env.ADMIN_PASSWORD = randomBytes(24).toString('base64url')
 process.env.JWT_SECRET = randomBytes(48).toString('hex')
 process.env.CLIENT_ORIGIN = 'https://lms-test.invalid'
-process.env.EMAIL_USER = ''
-process.env.EMAIL_PASS = ''
+process.env.EMAIL_PROVIDER = 'gmail'
+process.env.GMAIL_USER = ''
+process.env.GMAIL_APP_PASSWORD = ''
+process.env.EMAIL_FROM = ''
 
 const integrationDatabaseName = 'LMS_TEST'
 const expectedCollections = [
   'accountidentities',
   'admin',
-  'clg_students',
+  'assignment_submissions',
   'certificates',
+  'clg_students',
   'colleges',
+  'complaints',
   'courses',
   'emailotpchallenges',
   'enrollment',
+  'feedback',
   'notifications',
+  'quiz_attempts',
   'referralCodeDailyLimits',
   'referralCodes',
   'registrationemailverifications',
@@ -51,7 +57,6 @@ if (existingCollections.length) {
 }
 
 let server
-let nativeFetch
 let testDatabaseOwned = true
 try {
   const [
@@ -60,24 +65,32 @@ try {
     { default: adminRouter },
     { default: authRouter },
     { default: learningRouter },
+    { default: feedbackRouter },
+    { default: complaintsRouter },
     { AccountIdentity },
     { Admin, CollegeAdmin, CollegeStudent, Student },
     { default: College },
     { default: Course },
     { default: Enrollment },
     { default: RegistrationEmailVerification },
+    { default: Feedback },
+    { default: Complaint },
   ] = await Promise.all([
     import('../config/db.js'),
     import('./seed-admin.js'),
     import('../routes/admin.js'),
     import('../routes/auth.js'),
     import('../routes/learning.js'),
+    import('../routes/feedback.js'),
+    import('../routes/complaints.js'),
     import('../models/AccountIdentity.js').then((module) => ({ AccountIdentity: module.default })),
     import('../models/account-models.js'),
     import('../models/College.js'),
     import('../models/Course.js'),
     import('../models/Enrollment.js'),
     import('../models/RegistrationEmailVerification.js'),
+    import('../models/Feedback.js'),
+    import('../models/Complaint.js'),
   ])
   await connectToDatabase()
   assert.equal(mongoose.connection.db.databaseName, integrationDatabaseName)
@@ -88,6 +101,8 @@ try {
   app.use('/api/admin', adminRouter)
   app.use('/api/auth', authRouter)
   app.use('/api', learningRouter)
+  app.use('/api/feedback', feedbackRouter)
+  app.use('/api/complaints', complaintsRouter)
   app.use((error, req, res, next) => {
     console.error(JSON.stringify({
       event: 'database.integration_test_request_failed',
@@ -151,18 +166,6 @@ try {
   assert.equal(await (await import('bcryptjs')).default.compare(adminPassword, admin.passwordHash), true)
   assert.equal((await AccountIdentity.findOne({ accountId: admin._id }).lean()).accountCollection, 'admin')
   console.log('PASS Main Admin seed, bcrypt hash, login, and admin/accountidentities persistence')
-
-  nativeFetch = globalThis.fetch
-  globalThis.fetch = async (input, options) => {
-    if (String(input) === 'https://api.resend.com/emails') {
-      return {
-        ok: false,
-        status: 503,
-        text: async () => JSON.stringify({ message: 'Integration test email suppressed.' }),
-      }
-    }
-    return nativeFetch(input, options)
-  }
 
   const collegeResponse = await request('/admin/colleges', {
     token: adminToken,
@@ -412,9 +415,88 @@ try {
   const student = await Student.findOne({ email: studentEmail }).lean()
   assert.equal(student.studentType, 'independent')
   assert.equal(student.collegeId, undefined)
+  const pendingStudentLogin = await request('/auth/login', {
+    body: { identifier: student.username, password: studentPassword, role: 'student' },
+  })
+  assert.equal(pendingStudentLogin.response.status, 403)
+  assert.match(pendingStudentLogin.result.message, /awaiting approval/i)
+  const studentApproval = await request(`/admin/independent-students/${student._id}/approval`, {
+    method: 'PATCH',
+    token: adminToken,
+    body: { decision: 'approve' },
+  })
+  assert.equal(studentApproval.response.status, 200, studentApproval.result.message)
+  assert.equal((await Student.findById(student._id).lean()).approvalStatus, 'approved')
   const studentToken = await login(student.username, studentPassword, 'student')
   assert.equal((await AccountIdentity.findOne({ accountId: student._id }).lean()).accountCollection, 'students')
-  console.log('PASS Independent student registration, mapping, collection, and login')
+  console.log('PASS Independent student registration, pending-login enforcement, Main Admin approval, mapping, and login')
+
+  const feedbackSubmission = await request('/feedback', {
+    token: studentToken,
+    body: { message: 'LMS_TEST feedback with a persisted reply history.' },
+  })
+  assert.equal(feedbackSubmission.response.status, 201, feedbackSubmission.result.message)
+  const feedbackId = feedbackSubmission.result.feedback._id
+  assert.equal(Feedback.collection.name, 'feedback')
+  assert.equal((await Feedback.findById(feedbackId).lean()).message, 'LMS_TEST feedback with a persisted reply history.')
+  const adminFeedback = await request('/feedback/admin', { method: 'GET', token: adminToken })
+  assert.equal(adminFeedback.response.status, 200, adminFeedback.result.message)
+  assert.equal(adminFeedback.result.feedback[0].requester.email, studentEmail)
+  const feedbackReply = await request(`/feedback/admin/${feedbackId}/replies`, {
+    token: adminToken,
+    body: { message: 'LMS_TEST Main Admin feedback reply.' },
+  })
+  assert.equal(feedbackReply.response.status, 200, feedbackReply.result.message)
+  assert.equal((await Feedback.findById(feedbackId).lean()).replies[0].message, 'LMS_TEST Main Admin feedback reply.')
+  const studentFeedback = await request('/feedback/mine', { method: 'GET', token: studentToken })
+  assert.equal(studentFeedback.response.status, 200, studentFeedback.result.message)
+  assert.equal(studentFeedback.result.feedback[0].replies[0].message, 'LMS_TEST Main Admin feedback reply.')
+
+  const complaintSubmission = await request('/complaints', {
+    token: studentToken,
+    body: {
+      subject: 'LMS_TEST complaint',
+      category: 'Other',
+      description: 'LMS_TEST complaint details long enough to submit.',
+    },
+  })
+  assert.equal(complaintSubmission.response.status, 201, complaintSubmission.result.message)
+  const complaintId = complaintSubmission.result.complaint._id
+  assert.match(complaintSubmission.result.complaint.complaintId, /^CMP-/)
+  assert.equal(complaintSubmission.result.complaint.studentName, 'LMS_TEST Independent Student')
+  assert.equal(complaintSubmission.result.complaint.studentId, String(student.studentId || student._id))
+  assert.equal(complaintSubmission.result.complaint.studentEmail, studentEmail)
+  assert.equal(Complaint.collection.name, 'complaints')
+  const complaintReply = await request(`/complaints/admin/${complaintId}/replies`, {
+    token: adminToken,
+    body: { message: 'LMS_TEST Main Admin complaint reply.' },
+  })
+  assert.equal(complaintReply.response.status, 200, complaintReply.result.message)
+  const complaintSolved = await request(`/complaints/admin/${complaintId}/status`, {
+    method: 'PATCH',
+    token: adminToken,
+    body: { status: 'Solved' },
+  })
+  assert.equal(complaintSolved.response.status, 200, complaintSolved.result.message)
+  const complaintReopened = await request(`/complaints/admin/${complaintId}/status`, {
+    method: 'PATCH',
+    token: adminToken,
+    body: { status: 'Unsolved' },
+  })
+  assert.equal(complaintReopened.response.status, 200, complaintReopened.result.message)
+  const persistedComplaint = await Complaint.findById(complaintId).lean()
+  assert.equal(persistedComplaint.status, 'Unsolved')
+  assert.equal(persistedComplaint.statusHistory.length, 2)
+  assert.equal(persistedComplaint.replies[0].message, 'LMS_TEST Main Admin complaint reply.')
+  const studentComplaints = await request('/complaints/mine', { method: 'GET', token: studentToken })
+  assert.equal(studentComplaints.response.status, 200, studentComplaints.result.message)
+  assert.equal(studentComplaints.result.complaints[0].replies[0].message, 'LMS_TEST Main Admin complaint reply.')
+  assert.equal(studentComplaints.result.complaints[0].status, 'Unsolved')
+  assert.equal(await Feedback.countDocuments({}), 1)
+  assert.equal(await Complaint.countDocuments({}), 1)
+  assert.equal((await request('/feedback/admin', { method: 'GET', token: subAdminToken })).response.status, 403)
+  assert.equal((await request('/complaints/admin', { method: 'GET', token: subAdminToken })).response.status, 403)
+  console.log('PASS Feedback and Complaints submissions, Main Admin replies, status history, student visibility, and role permissions persist')
 
   const csvText = 'Full Name,Student ID,Email,Department,Batch\nLMS_TEST College Student,TEST-001,college-student@lms-test.invalid,Testing,2026\n'
   const importResult = await request('/admin/students/import', {
@@ -502,6 +584,14 @@ try {
     if (collectionName === 'clg_students') {
       assert.ok(indexes.some((index) => index.key.collegeId === 1 && index.key.studentId === 1 && index.unique), 'clg_students missing college-scoped student ID index')
     }
+    if (collectionName === 'complaints') {
+      assert.ok(indexes.some((index) => index.key.complaintId === 1 && index.unique), 'complaints missing unique complaint ID index')
+      assert.ok(indexes.some((index) => index.key.userId === 1), 'complaints missing student lookup index')
+    }
+    if (collectionName === 'feedback') {
+      assert.ok(indexes.some((index) => index.key.userId === 1), 'feedback missing student lookup index')
+      assert.ok(indexes.some((index) => index.key.createdAt === -1), 'feedback missing newest-first index')
+    }
     if (collectionName === 'accountidentities') {
       assert.ok(indexes.some((index) => index.key.email === 1 && index.unique), 'accountidentities missing unique email index')
       assert.ok(indexes.some((index) => index.key.accountCollection === 1 && index.key.accountId === 1 && index.unique), 'accountidentities missing unique account target index')
@@ -535,13 +625,14 @@ try {
       students: await Student.countDocuments({}),
       clg_students: await CollegeStudent.countDocuments({}),
     },
+    feedbackRecords: await Feedback.countDocuments({}),
+    complaintRecords: await Complaint.countDocuments({}),
     enrollments: enrollments.length,
   }))
 } finally {
   if (server) {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
   }
-  if (typeof nativeFetch === 'function') globalThis.fetch = nativeFetch
   if (testDatabaseOwned && mongoose.connection.readyState === 1 && mongoose.connection.db.databaseName === integrationDatabaseName) {
     await mongoose.connection.db.dropDatabase()
     const remaining = await mongoose.connection.db.listCollections({}, { nameOnly: true }).toArray()

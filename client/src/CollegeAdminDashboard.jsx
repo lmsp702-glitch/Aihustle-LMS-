@@ -154,9 +154,9 @@ function CollegeAdminDashboard({ user, onLogout, isDark, onToggleTheme }) {
                 <h3>Add a student</h3>
                 <label><span>Full name</span><input name="fullName" maxLength="120" required /></label>
                 <label><span>Email</span><input name="email" type="email" maxLength="254" required /></label>
-                <label><span>Username</span><input name="username" minLength="3" maxLength="30" pattern="[A-Za-z0-9._-]{3,30}" required /></label>
                 <label><span>Password</span><input name="password" type="password" minLength="8" maxLength="72" required /></label>
                 <label><span>Student ID</span><input name="studentId" maxLength="100" required /></label>
+                <p>The username is automatically set to the Student ID.</p>
                 <label><span>Department</span><input name="department" maxLength="120" /></label>
                 <label><span>Batch</span><input name="batch" maxLength="80" /></label>
                 <button type="submit" disabled={isSaving}>{isSaving ? 'Creating…' : 'Add student'}</button>

@@ -29,6 +29,8 @@ const notificationSchema = new mongoose.Schema(
     metadata: { type: mongoose.Schema.Types.Mixed, default: {} },
     readAt: { type: Date, default: null },
     deletedAt: { type: Date, default: null },
+    readBy: [{ type: mongoose.Schema.Types.ObjectId }],
+    actionCompletedAt: { type: Date },
   },
   { autoCreate: false, autoIndex: false, timestamps: true, collection: 'notifications' },
 )

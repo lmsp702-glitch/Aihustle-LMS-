@@ -11,11 +11,113 @@ function formatNotificationDate(value) {
     : new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
 }
 
+function getDateGroup(value) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return 'Earlier'
+
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const notificationDay = new Date(date.getFullYear(), date.getMonth(), date.getDate())
+  if (notificationDay.getTime() === today.getTime()) return 'Today'
+
+  const yesterday = new Date(today)
+  yesterday.setDate(yesterday.getDate() - 1)
+  return notificationDay.getTime() === yesterday.getTime() ? 'Yesterday' : 'Earlier'
+}
+
+function groupByDate(notifications) {
+  const groups = new Map()
+  notifications.forEach((notification) => {
+    const label = getDateGroup(notification.createdAt)
+    if (!groups.has(label)) groups.set(label, [])
+    groups.get(label).push(notification)
+  })
+  return ['Today', 'Yesterday', 'Earlier']
+    .filter((label) => groups.has(label))
+    .map((label) => ({ label, notifications: groups.get(label) }))
+}
+
+function getNotificationStyle(notification) {
+  const details = {
+    independent_student_registered: {
+      typeLabel: 'Student application',
+      typeTone: 'application',
+      priorityLabel: 'Action needed',
+      priorityTone: 'high',
+    },
+    independent_student_approved: {
+      typeLabel: 'Account approved',
+      typeTone: 'success',
+      priorityLabel: 'Informational',
+      priorityTone: 'low',
+    },
+    independent_student_rejected: {
+      typeLabel: 'Application update',
+      typeTone: 'attention',
+      priorityLabel: 'Review',
+      priorityTone: 'medium',
+    },
+  }[notification.type] || {
+    typeLabel: 'Notification',
+    typeTone: 'neutral',
+    priorityLabel: 'Normal',
+    priorityTone: 'normal',
+  }
+  if (notification.type === 'independent_student_registered' && notification.actionCompleted) {
+    return { ...details, priorityLabel: '', priorityTone: '' }
+  }
+  const suppliedPriority = notification.priority || notification.metadata?.priority
+  if (!suppliedPriority) return details
+
+  const priority = String(suppliedPriority).toLowerCase()
+  if (priority.includes('urgent') || priority.includes('high')) {
+    return { ...details, priorityLabel: 'High priority', priorityTone: 'high' }
+  }
+  if (priority.includes('medium')) {
+    return { ...details, priorityLabel: 'Medium priority', priorityTone: 'medium' }
+  }
+  if (priority.includes('low')) {
+    return { ...details, priorityLabel: 'Low priority', priorityTone: 'low' }
+  }
+  return details
+}
+
+function NotificationIcon({ type }) {
+  const paths = {
+    independent_student_registered: (
+      <>
+        <circle cx="9" cy="8" r="3" />
+        <path d="M3.5 20a5.5 5.5 0 0 1 11 0M18 8v6m-3-3h6" />
+      </>
+    ),
+    independent_student_approved: (
+      <>
+        <circle cx="12" cy="12" r="9" />
+        <path d="m8 12 2.5 2.5L16.5 9" />
+      </>
+    ),
+    independent_student_rejected: (
+      <>
+        <circle cx="12" cy="12" r="9" />
+        <path d="m9 9 6 6m0-6-6 6" />
+      </>
+    ),
+  }
+
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      {paths[type] || <><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" /><path d="M10 21h4" /></>}
+    </svg>
+  )
+}
+
 export default function NotificationFeed({ role, onLogout, onOpenApprovals }) {
   const [notifications, setNotifications] = useState([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [refreshToken, setRefreshToken] = useState(0)
+  const [readError, setReadError] = useState('')
+  const [markingReadId, setMarkingReadId] = useState('')
 
   useEffect(() => {
     const controller = new AbortController()
@@ -64,10 +166,116 @@ export default function NotificationFeed({ role, onLogout, onOpenApprovals }) {
     }
   }, [onLogout, role, refreshToken])
 
-  if (loading) return <p className="notification-feed__message" role="status">Loading notifications…</p>
-  if (error) return <p className="notification-feed__message is-error" role="alert">{error}</p>
+  async function markAsRead(notificationId) {
+    setMarkingReadId(notificationId)
+    setReadError('')
+    try {
+      const savedAuth = sessionStorage.getItem('lms.auth')
+      const auth = savedAuth ? JSON.parse(savedAuth) : null
+      if (auth?.user?.role !== role || typeof auth.token !== 'string') {
+        onLogout()
+        return
+      }
+      const response = await fetch(`${API_BASE_URL}/notifications/${encodeURIComponent(notificationId)}/read`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${auth.token}` },
+      })
+      let result
+      try {
+        result = await response.json()
+      } catch {
+        throw new Error('The server returned an invalid response.')
+      }
+      if (response.status === 401 || response.status === 403) {
+        onLogout()
+        return
+      }
+      if (!response.ok) throw new Error(result.message || 'Unable to update notification status.')
+      setNotifications((current) => current.map((notification) => (
+        notification.id === notificationId ? { ...notification, isRead: true } : notification
+      )))
+    } catch (markError) {
+      setReadError(markError instanceof Error ? markError.message : 'Unable to update notification status.')
+    } finally {
+      setMarkingReadId('')
+    }
+  }
+
+  const isMainAdmin = role === 'main_admin'
+  if (loading) {
+    return <p className={`notification-feed__message${isMainAdmin ? ' notification-feed__message--admin' : ''}`} role="status">Loading notifications…</p>
+  }
+  if (error) {
+    return <p className={`notification-feed__message is-error${isMainAdmin ? ' notification-feed__message--admin' : ''}`} role="alert">{error}</p>
+  }
   if (!notifications.length) {
     return <p className="notification-feed__message">{role === 'student' ? 'No notifications yet.' : 'You’re all caught up. There are no notifications yet.'}</p>
+  }
+
+  if (isMainAdmin) {
+    return (
+      <div className="notification-feed notification-feed--admin">
+        {readError && <p className="notification-feed__read-error" role="alert">{readError}</p>}
+        {groupByDate(notifications).map((group) => (
+          <section className="notification-feed__group" key={group.label}>
+            <div className="notification-feed__group-heading">
+              <h2>{group.label}</h2>
+              <span>{group.notifications.length}</span>
+            </div>
+            <div className="notification-feed__group-list">
+              {group.notifications.map((notification) => {
+                const style = getNotificationStyle(notification)
+                return (
+                  <article
+                    className={`notification-feed__item notification-feed__item--${style.typeTone}${notification.isRead ? '' : ' is-unread'}`}
+                    key={notification.id}
+                  >
+                    <span className={`notification-feed__icon notification-feed__icon--${style.typeTone}`}>
+                      <NotificationIcon type={notification.type} />
+                    </span>
+                    <div className="notification-feed__copy">
+                      <div className="notification-feed__title-row">
+                        <h3>{notification.title}</h3>
+                        {!notification.isRead && <span className="notification-feed__unread">Unread</span>}
+                      </div>
+                      <div className="notification-feed__badges">
+                        <span className={`notification-feed__badge notification-feed__badge--${style.typeTone}`}>{style.typeLabel}</span>
+                        {style.priorityLabel && (
+                          <span className={`notification-feed__badge notification-feed__badge--priority-${style.priorityTone}`}>{style.priorityLabel}</span>
+                        )}
+                      </div>
+                      <p>{notification.message}</p>
+                      <time dateTime={notification.createdAt}>{formatNotificationDate(notification.createdAt)}</time>
+                    </div>
+                    <div className="notification-feed__actions">
+                      {!notification.isRead && (
+                        <button
+                          type="button"
+                          className="notification-feed__mark-read"
+                          disabled={Boolean(markingReadId)}
+                          onClick={() => markAsRead(notification.id)}
+                        >
+                          {markingReadId === notification.id ? 'Marking…' : 'Mark as read'}
+                        </button>
+                      )}
+                      {notification.type === 'independent_student_registered' && (
+                        <button
+                          type="button"
+                          className="notification-feed__action"
+                          onClick={() => onOpenApprovals?.(notification.metadata?.studentId)}
+                        >
+                          Review application
+                        </button>
+                      )}
+                    </div>
+                  </article>
+                )
+              })}
+            </div>
+          </section>
+        ))}
+      </div>
+    )
   }
 
   const visibleNotifications = role === 'student' ? notifications.slice(0, 2) : notifications

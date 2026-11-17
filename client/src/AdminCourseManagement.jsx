@@ -1706,7 +1706,7 @@ export default function AdminCourseManagement({ onLogout }) {
     return (
       <div className="ac-library">
         <div className="ac-page-heading">
-          <div><p className="ac-eyebrow">PLATFORM CONTENT</p><h1>Course management</h1><p>Build, organize, and publish courses for the LMS.</p></div>
+          <div><p className="ac-eyebrow">PLATFORM CONTENT</p><h1>Courses</h1><p>Build, organize, and publish courses for the LMS.</p></div>
           <div className="ac-page-heading__actions">
             <div className={`ac-cloudinary-status ac-cloudinary-status--${cloudinaryHealth}`} role="status">
               <span aria-hidden="true" />Cloudinary {cloudinaryHealth === 'checking' ? 'checking' : cloudinaryHealth}

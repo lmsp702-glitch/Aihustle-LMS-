@@ -32,7 +32,7 @@ existing account unchanged. Public registration is available only to independent
 student registrations remain pending
 until approved by a Main Admin; the existing college onboarding flow is unchanged.
 Independent-student registration requires a server-verified email address before
-the account is created. The registration code is a six-digit Resend OTP; codes
+the account is created. The registration code is a six-digit Gmail OTP; codes
 expire after 10 minutes, are stored as keyed hashes, and can be requested once
 per minute. Verification is bound to the exact normalized email and is consumed
 in the registration transaction.
@@ -41,7 +41,7 @@ commits, the backend sends an AIHustle-branded confirmation to the student's
 registered email. The message links to the frontend at `CLIENT_ORIGIN` and uses
 its `/logo.png` asset. Approval-email delivery errors are logged without undoing
 approval; only a successful pending-to-approved transition initiates that email.
-Rejection email delivery uses the same Resend service and is also attempted
+Rejection email delivery uses the same Gmail SMTP service and is also attempted
 only after the decision is saved.
 
 ## Account collections and roles
@@ -57,6 +57,9 @@ The application uses the database selected by `MONGO_URI` (currently `LMS`).
 | `colleges` | College details |
 | `courses` | Courses, modules, and lessons |
 | `enrollment` | Course enrollments |
+| `supporttickets` | Student support requests, replies, status and priority history |
+| `complaints` | Student complaints, Main Admin replies and Solved/Unsolved history |
+| `feedback` | User feedback and Main Admin reply history |
 | `accountidentities` | Normalized login identity-to-collection/document mappings |
 | `referralCodes` | External User referral codes and redemption history |
 | `referralCodeDailyLimits` | Atomic per-External-User UTC daily generation counters |
@@ -68,6 +71,35 @@ authentication. A college has a unique code. Courses support modules, lessons,
 assignments, and quizzes; correct quiz answers are not returned to students.
 The `accountidentities` collection enforces global case-insensitive username
 uniqueness across student and administrator account collections.
+
+## Student feedback, complaints, and support tickets
+
+Feedback and complaints are stored separately from each other and from support
+tickets. Feedback records contain the submitting account reference, message,
+reply history, and timestamps. Complaint records contain a backend-generated
+`complaintId`, student reference, subject, category, description, status,
+student name/ID/email snapshot, reply history, status history, and timestamps.
+Support tickets continue to use the existing `supporttickets` collection and
+API.
+
+Students can create and read only their own feedback and complaints. Only the
+Main Admin can list these records, reply to them, or change complaint status.
+College Sub-Admins do not receive Feedback or Complaints access. Complaint
+statuses are `Unsolved` and `Solved`; status changes are retained in each
+record's history. Student views include the saved Main Admin replies.
+
+| Method | Endpoint | Access |
+|---|---|---|
+| `POST` | `/api/feedback` | Authenticated student |
+| `GET` | `/api/feedback/mine` | Authenticated student; own records |
+| `GET` | `/api/feedback/admin` | Main Admin |
+| `POST` | `/api/feedback/admin/:feedbackId/replies` | Main Admin |
+| `POST` | `/api/complaints` | Authenticated student |
+| `GET` | `/api/complaints/mine` | Authenticated student; own records |
+| `GET` | `/api/complaints/admin` | Main Admin |
+| `GET` | `/api/complaints/admin/:complaintId` | Main Admin |
+| `POST` | `/api/complaints/admin/:complaintId/replies` | Main Admin |
+| `PATCH` | `/api/complaints/admin/:complaintId/status` | Main Admin |
 
 ## External User referrals
 
@@ -132,57 +164,56 @@ link. The sub-admin sets a password; only its bcrypt hash is stored. Tokens
 expire after 24 hours and are invalidated on use. A pending invite can be
 resent from the Colleges page.
 
-Configure both email providers and the public frontend origin in `Server/.env`
-(or as environment variables on Render):
+Configure Gmail SMTP and the public frontend origin in `Server/.env` (or as
+environment variables on Render):
 
 ```env
 CLIENT_ORIGIN=https://your-frontend.example
-RESEND_API_KEY=your-resend-api-key
-EMAIL_FROM="AIHustle LMS <onboarding@resend.dev>"
-EMAIL_USER=lmsp702@gmail.com
-EMAIL_PASS=your-gmail-app-password
+EMAIL_PROVIDER=gmail
+GMAIL_USER=your-gmail-address@gmail.com
+GMAIL_APP_PASSWORD=your-google-app-password
+EMAIL_FROM="AIHustle LMS <your-gmail-address@gmail.com>"
 ADMIN_EMAIL=main-admin@example.com
 ```
 
-In Render, set `RESEND_API_KEY` and `EMAIL_FROM`; also set `CLIENT_ORIGIN` to
-the deployed frontend URL because the branded registration and decision emails
-build links and logo URLs from it. `onboarding@resend.dev` is a temporary
-Resend sender for testing. A custom production sender must use a domain verified
-in Resend. Do not put the API key in source control or print it in logs.
+`GMAIL_USER` is the Gmail mailbox used to authenticate, and `EMAIL_FROM` must
+use that mailbox as the sender. Gmail sends through `smtp.gmail.com:587` with
+STARTTLS required. `GMAIL_APP_PASSWORD` is a Google App Password, not the
+regular Gmail password. Enable 2-Step Verification before creating it; enter
+the app password without spaces. Keep it private, and never expose it to React
+or commit it to source control.
 
-Run `npm run test:email` locally to send a safe test message to Resend's
-`delivered@resend.dev` test recipient. The command refuses to run when
-`NODE_ENV=production` and reports the API response without exposing credentials.
+Run `npm run test:email -- <first-controlled-email> <second-controlled-email>`
+from `Server` to send registration-style test OTP messages to two different
+addresses you control. The command refuses to run when `NODE_ENV=production`,
+requires two distinct valid addresses, and never logs either OTP or SMTP
+credentials. An SMTP acceptance confirms Gmail accepted the messages; check
+both inboxes and spam folders to confirm delivery.
 
-`EMAIL_USER` must be the Gmail mailbox that owns the `EMAIL_PASS` Google App Password; enable
-2-Step Verification before creating the App Password. Never use your regular
-Gmail password. Configure the App Password without spaces.
-
-Resend sends registration email verification codes, independent-student
+The shared Gmail email service sends registration verification and resend OTPs,
+student two-factor codes, email-change verification, independent-student
 approval/rejection notifications, college administrator activation,
-support-ticket complaint alerts to `ADMIN_EMAIL`, email-change verification,
-and two-factor/security messages. Gmail currently sends student registration
-receipt confirmations. Each provider has independent credentials, and decision
-email failures are logged without undoing the saved approval/rejection. Keep all
-credentials private and never commit `.env`.
+support-ticket alerts to `ADMIN_EMAIL`, and registration confirmations.
+Decision and registration email failures are logged without undoing the saved
+database changes. SMTP error logs include error codes only, not provider error
+messages, OTPs, passwords, or credentials.
 
 ## Student email changes
 
 Student email changes require an 8-digit verification code sent to the new
 address. The current email remains active until the code is verified; codes
-expire after 15 minutes. This uses the Resend settings above. Account identity
+expire after 15 minutes. This uses the Gmail settings above. Account identity
 and student email records are updated together after verification.
 
 ## Student email two-factor authentication
 
-Set `RESEND_API_KEY` and `EMAIL_FROM` in `Server/.env`; see `.env.example` for
-the variable names. Keep the Resend API key private. Email OTPs are random
-six-digit values, stored only as keyed hashes, expire after five minutes, and
-are limited to five verification attempts. Resending is limited to once per
-minute.
+Set the Gmail variables above in `Server/.env`; see `.env.example` for the
+variable names. Email OTPs are random six-digit values, stored only as keyed
+hashes, expire after five minutes, and are limited to five verification
+attempts. Resending is limited to once per minute.
 
 Students enable or disable two-factor authentication from Settings after
-verifying a code sent to their registered email using Resend. When enabled,
+verifying a code sent to their registered email using Gmail SMTP. When enabled,
 password and Google sign-in return a short-lived login challenge instead of an access token.
 The normal JWT is issued only after successful OTP verification. The
 `emailotpchallenges` collection uses a TTL index to remove expired challenge

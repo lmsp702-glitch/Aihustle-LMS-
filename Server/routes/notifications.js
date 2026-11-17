@@ -172,7 +172,12 @@ router.get('/me', authenticate, requireRoles('main_admin', 'student'), async (re
     const filter = getNotificationScope(req)
     const [notifications, unreadCount] = await Promise.all([
       Notification.find(filter).sort({ createdAt: -1 }).limit(50).lean(),
-      Notification.countDocuments({ ...filter, readAt: null }),
+      Notification.countDocuments({
+        ...filter,
+        ...(req.auth.role === 'main_admin'
+          ? { readBy: { $ne: req.auth.id } }
+          : { readAt: null }),
+      }),
     ])
     return res.json({
       notifications: notifications.map((notification) => ({
@@ -184,7 +189,13 @@ router.get('/me', authenticate, requireRoles('main_admin', 'student'), async (re
         metadata: notification.metadata,
         createdAt: notification.createdAt,
         readAt: notification.readAt || null,
-        isRead: Boolean(notification.readAt),
+        ...(req.auth.role === 'main_admin'
+          ? {
+            isRead: (notification.readBy || [])
+              .some((adminId) => String(adminId) === String(req.auth.id)),
+            actionCompleted: Boolean(notification.actionCompletedAt),
+          }
+          : { isRead: Boolean(notification.readAt) }),
       })),
       unreadCount,
     })
@@ -205,21 +216,24 @@ router.patch('/read-all', authenticate, requireRoles('student'), async (req, res
   }
 })
 
-router.patch('/:notificationId/read', authenticate, requireRoles('student'), async (req, res, next) => {
+router.patch('/:notificationId/read', authenticate, requireRoles('main_admin', 'student'), async (req, res, next) => {
   try {
     const { notificationId } = req.params
     if (!mongoose.isValidObjectId(notificationId)) {
       return res.status(400).json({ message: 'Select a valid notification.' })
     }
-    const notification = await Notification.findOneAndUpdate(
-      { _id: notificationId, ...getNotificationScope(req) },
-      { $set: { readAt: new Date() } },
-      { new: true },
-    ).lean()
+    const filter = req.auth.role === 'main_admin'
+      ? { _id: notificationId, recipientRole: 'main_admin', deletedAt: null }
+      : { _id: notificationId, ...getNotificationScope(req) }
+    const update = req.auth.role === 'main_admin'
+      ? { $addToSet: { readBy: req.auth.id } }
+      : { $set: { readAt: new Date() } }
+    const notification = await Notification.findOneAndUpdate(filter, update, { new: true })
     if (!notification) return res.status(404).json({ message: 'The notification was not found.' })
+    if (req.auth.role === 'main_admin') return res.json({ isRead: true })
     return res.json({
       id: String(notification._id),
-      readAt: notification.readAt,
+      readAt: notification.readAt || null,
       isRead: true,
     })
   } catch (error) {

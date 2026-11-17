@@ -1,5 +1,5 @@
 import bcrypt from 'bcryptjs'
-import { createHash, randomBytes } from 'node:crypto'
+import { randomBytes } from 'node:crypto'
 import mongoose from 'mongoose'
 import multer from 'multer'
 import path from 'node:path'
@@ -42,7 +42,6 @@ const router = Router()
 const requireStudent = [authenticate, requireRoles('student')]
 const requireCollegeAdmin = [authenticate, requireRoles('college_admin')]
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-const usernamePattern = /^[a-zA-Z0-9._-]{3,30}$/
 const maxAssignmentSubmissionBytes = 10 * 1024 * 1024
 const maxCertificateTemplateBytes = 4 * 1024 * 1024
 const quizAttemptLimit = 3
@@ -133,8 +132,7 @@ async function accountIdentifierExists(field, value) {
 }
 
 function makeImportUsername(studentId) {
-  const digest = createHash('sha256').update(studentId.toLowerCase()).digest('hex').slice(0, 20)
-  return `college-${digest}`
+  return String(studentId ?? '').trim().toLowerCase()
 }
 
 function isDuplicateStudentId(studentId, model, session) {
@@ -694,15 +692,12 @@ router.post('/college/students', ...requireCollegeAdmin, async (req, res, next) 
       return res.status(403).json({ message: 'Your Sub-Admin account is not assigned to a valid college.' })
     }
 
-    const { fullName, email, username, password, studentId, department, batch } = req.body ?? {}
+    const { fullName, email, password, studentId, department, batch } = req.body ?? {}
     if (typeof fullName !== 'string' || !fullName.trim() || fullName.trim().length > 120) {
       return res.status(400).json({ message: 'Enter a student name between 1 and 120 characters.' })
     }
     if (typeof email !== 'string' || email.trim().length > 254 || !emailPattern.test(email.trim())) {
       return res.status(400).json({ message: 'Enter a valid email address.' })
-    }
-    if (typeof username !== 'string' || !usernamePattern.test(username.trim())) {
-      return res.status(400).json({ message: 'Use a username with 3–30 letters, numbers, dots, underscores, or hyphens.' })
     }
     if (typeof password !== 'string' || password.length < 8 || Buffer.byteLength(password, 'utf8') > 72) {
       return res.status(400).json({ message: 'Use a password of at least 8 characters.' })
@@ -718,8 +713,8 @@ router.post('/college/students', ...requireCollegeAdmin, async (req, res, next) 
     }
 
     const normalizedEmail = email.trim().toLowerCase()
-    const normalizedUsername = username.trim().toLowerCase()
     const normalizedStudentId = studentId.trim()
+    const normalizedUsername = normalizedStudentId.toLowerCase()
     const [existingEmail, existingUsername, existingStudentId] = await Promise.all([
       accountIdentifierExists('email', normalizedEmail),
       accountIdentifierExists('username', normalizedUsername),
@@ -820,7 +815,6 @@ router.post('/college/students/import', ...requireCollegeAdmin, async (req, res,
     const failures = []
     const seenEmails = new Set()
     const seenStudentIds = new Set()
-    const seenUsernames = new Set()
     for (const row of rows) {
       if (row.error) {
         failures.push({ row: row.rowNumber, reason: row.error })
@@ -829,27 +823,26 @@ router.post('/college/students/import', ...requireCollegeAdmin, async (req, res,
 
       const { fullName, studentId, email, department, batch } = row
       const username = makeImportUsername(studentId)
+      const normalizedStudentId = String(studentId ?? '').trim().toLowerCase()
       const errors = []
       if (!fullName || fullName.length > 120) errors.push('Full Name is required and must be 120 characters or fewer.')
-      if (!studentId || studentId.length > 100) errors.push('Student ID is required and must be 100 characters or fewer.')
+      if (!studentId?.trim() || studentId.trim().length > 100) errors.push('Student ID is required and must be 100 characters or fewer.')
       if (!emailPattern.test(email) || email.length > 254) errors.push('Enter a valid email address.')
       if (!department || department.length > 120) errors.push('Department is required and must be 120 characters or fewer.')
       if (!batch || batch.length > 80) errors.push('Batch is required and must be 80 characters or fewer.')
       if (seenEmails.has(email)) errors.push('Email is duplicated in this CSV.')
-      if (seenStudentIds.has(studentId.toLowerCase())) errors.push('Student ID is duplicated in this CSV.')
-      if (seenUsernames.has(username)) errors.push('Generated username is duplicated in this CSV.')
+      if (seenStudentIds.has(normalizedStudentId)) errors.push('Student ID is duplicated in this CSV.')
       seenEmails.add(email)
-      seenStudentIds.add(studentId.toLowerCase())
-      seenUsernames.add(username)
+      seenStudentIds.add(normalizedStudentId)
       if (!errors.length) {
         const [existingEmail, existingStudentId, existingUsername] = await Promise.all([
           accountIdentifierExists('email', email),
-          isDuplicateStudentId(studentId, CollegeStudent),
+          isDuplicateStudentId(studentId.trim(), CollegeStudent),
           accountIdentifierExists('username', username),
         ])
         if (existingEmail) errors.push('Email already belongs to an LMS account.')
         if (existingStudentId) errors.push('Student ID already exists.')
-        if (existingUsername) errors.push('Generated username conflicts with an LMS account.')
+        if (existingUsername) errors.push('Username (Student ID) conflicts with an LMS account.')
       }
       if (errors.length) {
         failures.push({ row: row.rowNumber, email, studentId, reason: errors.join(' ') })
@@ -873,7 +866,7 @@ router.post('/college/students/import', ...requireCollegeAdmin, async (req, res,
             fullName,
             email,
             username,
-            studentId,
+            studentId: studentId.trim(),
             department,
             batch,
             passwordHash,
@@ -885,7 +878,7 @@ router.post('/college/students/import', ...requireCollegeAdmin, async (req, res,
             permissions: [],
           }], { session })
         })
-        imported.push({ row: row.rowNumber, email, studentId })
+        imported.push({ row: row.rowNumber, email, studentId: studentId.trim() })
       } catch (error) {
         if (error?.statusCode === 409 || error?.code === 11000) {
           failures.push({ row: row.rowNumber, email, studentId, reason: error.message || 'Email, username, or Student ID already exists.' })

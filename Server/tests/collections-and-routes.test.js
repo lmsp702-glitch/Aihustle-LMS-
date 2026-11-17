@@ -14,18 +14,27 @@ import { generateQuizQuestions } from '../utils/quiz-question-generator.js'
 
 process.env.JWT_SECRET = 'test-only-route-secret'
 process.env.GEMINI_API_KEY = 'test-only-gemini-key'
-process.env.RESEND_API_KEY = 'test-only-resend-key'
+process.env.EMAIL_PROVIDER = 'gmail'
+process.env.GMAIL_USER = 'test-mailbox@gmail.com'
+process.env.GMAIL_APP_PASSWORD = 'test-only-gmail-app-password'
 process.env.EMAIL_FROM = 'Morrow Learning <security@example.invalid>'
 process.env.CLOUDINARY_CLOUD_NAME = 'test-cloud'
 process.env.CLOUDINARY_API_KEY = 'test-cloudinary-key'
 process.env.CLOUDINARY_API_SECRET = 'test-only-cloudinary-secret'
 process.env.COURSE_VIDEO_MAX_BYTES = '128'
 process.env.COURSE_RESOURCE_MAX_BYTES = '128'
-process.env.EMAIL_USER = 'test-mailbox@example.invalid'
-process.env.EMAIL_PASS = 'test-only-gmail-app-password'
 process.env.GOOGLE_CLIENT_ID = 'test-google-client.apps.googleusercontent.com'
 process.env.GOOGLE_CLIENT_SECRET = 'test-google-client-secret'
 process.env.CLIENT_ORIGIN = 'http://localhost:5173'
+
+let gmailSendHandler = async () => ({ messageId: 'test-gmail-message' })
+let gmailTransportOptions
+nodemailer.createTransport = (options) => {
+  gmailTransportOptions = options
+  return {
+    sendMail: (message) => gmailSendHandler(message, options),
+  }
+}
 
 const [
   { default: adminRouter },
@@ -35,6 +44,8 @@ const [
   { default: notificationsRouter },
   { default: certificatesRouter },
   { default: supportRouter },
+  { default: feedbackRouter },
+  { default: complaintsRouter },
   { AccountIdentity },
   { accountModelsByRole, CollegeAdmin, Admin, CollegeStudent, Student, matchesStoredAccountRole },
   { default: College },
@@ -52,6 +63,9 @@ const [
   { default: VideoAttentionResponse },
   { default: CertificateTemplate },
   { default: RefreshSession },
+  { default: Feedback },
+  { default: Complaint },
+  { sendEmail, sendRegistrationEmailVerificationCodeEmail },
 ] = await Promise.all([
   import('../routes/admin.js'),
   import('../routes/learning.js'),
@@ -60,6 +74,8 @@ const [
   import('../routes/notifications.js'),
   import('../routes/certificates.js'),
   import('../routes/support.js'),
+  import('../routes/feedback.js'),
+  import('../routes/complaints.js'),
   import('../models/AccountIdentity.js').then((module) => ({ AccountIdentity: module.default })),
   import('../models/account-models.js'),
   import('../models/College.js'),
@@ -77,6 +93,9 @@ const [
   import('../models/VideoAttentionResponse.js'),
   import('../models/CertificateTemplate.js'),
   import('../models/RefreshSession.js'),
+  import('../models/Feedback.js'),
+  import('../models/Complaint.js'),
+  import('../utils/email.js'),
 ])
 
 const app = express()
@@ -88,18 +107,14 @@ app.use('/api/settings', settingsRouter)
 app.use('/api/notifications', notificationsRouter)
 app.use('/api/certificates', certificatesRouter)
 app.use('/api/support', supportRouter)
+app.use('/api/feedback', feedbackRouter)
+app.use('/api/complaints', complaintsRouter)
 app.use('/api', learningRouter)
 const server = app.listen(0)
 await new Promise((resolve) => server.once('listening', resolve))
 const baseUrl = `http://127.0.0.1:${server.address().port}/api`
 const { default: cloudinary } = await import('../config/cloudinary.js')
 const nativeFetch = globalThis.fetch
-globalThis.fetch = async (url, options) => {
-  if (String(url) === 'https://api.resend.com/emails') {
-    return { ok: true, status: 200, json: async () => ({ id: 'test-email-id' }) }
-  }
-  return nativeFetch(url, options)
-}
 const restoreNotificationUpsert = stub(Notification, 'findOneAndUpdate', (_filter, update) => (
   queryResult({ _id: '68a000000000000000000099', ...update.$setOnInsert })
 ))
@@ -112,11 +127,108 @@ test('stored account roles match canonical collections', () => {
   assert.equal(matchesStoredAccountRole('students', 'user'), false)
   assert.equal(matchesStoredAccountRole('clg_students', 'student'), true)
 })
+test('rejected status is valid only for independent student accounts', async () => {
+  const student = new Student({
+    username: 'student-rejected',
+    email: 'student-rejected@example.invalid',
+    status: 'rejected',
+    approvalStatus: 'rejected',
+  })
+  await assert.doesNotReject(student.validate())
+  assert.ok(!CollegeStudent.schema.path('status').enumValues.includes('rejected'))
+  const admin = new Admin({
+    username: 'admin-rejected',
+    email: 'admin-rejected@example.invalid',
+    status: 'rejected',
+  })
+  await assert.rejects(admin.validate(), (error) => {
+    assert.equal(error.errors.status.kind, 'enum')
+    return true
+  })
+})
+
+test('email service uses configured Gmail SMTP with required STARTTLS', async () => {
+  let sentMessage
+  const restore = stubGmailTransport(async (message) => {
+    sentMessage = message
+    return { messageId: 'test-gmail-message' }
+  })
+  try {
+    await sendEmail({
+      to: ' Recipient@Example.invalid ',
+      subject: 'SMTP configuration test',
+      text: 'Test message.',
+    })
+    assert.deepEqual(gmailTransportOptions, {
+      host: 'smtp.gmail.com',
+      port: 587,
+      secure: false,
+      requireTLS: true,
+      auth: {
+        user: 'test-mailbox@gmail.com',
+        pass: 'test-only-gmail-app-password',
+      },
+    })
+    assert.equal(sentMessage.from, 'Morrow Learning <security@example.invalid>')
+    assert.equal(sentMessage.to, 'recipient@example.invalid')
+  } finally {
+    restore()
+  }
+})
+
+test('registration verification email has branded HTML and plain-text content without external assets', async () => {
+  let sentMessage
+  const restore = stubGmailTransport(async (message) => {
+    sentMessage = message
+    return { messageId: 'test-gmail-message' }
+  })
+  try {
+    await sendRegistrationEmailVerificationCodeEmail({
+      email: 'student@example.invalid',
+      fullName: 'Ari <Student>',
+      code: '123456',
+    })
+    assert.equal(sentMessage.subject, 'Your AIHustle Email Verification Code')
+    assert.match(sentMessage.text, /You requested email verification to register for an AIHustle account\./)
+    assert.match(sentMessage.text, /123456/)
+    assert.match(sentMessage.text, /expires in 10 minutes/)
+    assert.match(sentMessage.text, /If you did not request this code/)
+    assert.match(sentMessage.html, /AIHUSTLE/)
+    assert.match(sentMessage.html, /Verify your email address/)
+    assert.match(sentMessage.html, /font-size:32px/)
+    assert.match(sentMessage.html, /123456/)
+    assert.match(sentMessage.html, /expires in <strong>10 minutes<\/strong>/)
+    assert.match(sentMessage.html, /If you did not request this code/)
+    assert.match(sentMessage.html, /Ari &lt;Student&gt;/)
+    assert.doesNotMatch(sentMessage.html, /<(?:img|a)\b/i)
+  } finally {
+    restore()
+  }
+})
+
 test('notification feed is authenticated and scoped to the current account role and ID', async () => {
   const adminId = '68a000000000000000000010'
   const studentId = '68a000000000000000000020'
   const filters = []
   const countFilters = []
+  const notifications = [
+    {
+      _id: new mongoose.Types.ObjectId('68a000000000000000000030'),
+      type: 'independent_student_registered',
+      title: 'New student application',
+      message: 'A student applied.',
+      readBy: [new mongoose.Types.ObjectId(adminId)],
+      actionCompletedAt: new Date('2026-01-03T03:04:05.000Z'),
+      createdAt: new Date('2026-01-02T03:04:05.000Z'),
+    },
+    {
+      _id: new mongoose.Types.ObjectId('68a000000000000000000031'),
+      type: 'independent_student_registered',
+      title: 'Another application',
+      message: 'Another student applied.',
+      createdAt: new Date('2026-01-01T03:04:05.000Z'),
+    },
+  ]
   const restores = [
     stub(Admin, 'findById', async (id) => ({
       _id: id, role: 'main_admin', status: 'active', isActive: true,
@@ -136,7 +248,7 @@ test('notification feed is authenticated and scoped to the current account role 
       return {
         sort() { return this },
         limit() { return this },
-        lean: async () => [],
+        lean: async () => filter.recipientRole === 'main_admin' ? notifications : [],
       }
     }),
     stub(Notification, 'countDocuments', async (filter) => {
@@ -150,20 +262,26 @@ test('notification feed is authenticated and scoped to the current account role 
       subject: adminId,
     })
     assert.equal(adminResponse.status, 200)
-    assert.equal((await adminResponse.json()).unreadCount, 1)
+    const adminResult = await adminResponse.json()
+    assert.equal(adminResult.unreadCount, 1)
+    const { notifications: adminNotifications } = adminResult
+    assert.deepEqual(adminNotifications.map(({ isRead }) => isRead), [true, false])
+    assert.deepEqual(adminNotifications.map(({ actionCompleted }) => actionCompleted), [true, false])
 
     const studentResponse = await request('/notifications/me', {
       role: 'student',
       subject: studentId,
     })
     assert.equal(studentResponse.status, 200)
-    assert.equal((await studentResponse.json()).unreadCount, 2)
+    const studentResult = await studentResponse.json()
+    assert.equal(studentResult.unreadCount, 2)
+    assert.deepEqual(studentResult.notifications, [])
     assert.deepEqual(filters, [
       { recipientRole: 'main_admin', deletedAt: null },
       { recipientRole: 'student', recipientId: studentId, deletedAt: null },
     ])
     assert.deepEqual(countFilters, [
-      { recipientRole: 'main_admin', deletedAt: null, readAt: null },
+      { recipientRole: 'main_admin', deletedAt: null, readBy: { $ne: adminId } },
       { recipientRole: 'student', recipientId: studentId, deletedAt: null, readAt: null },
     ])
   } finally {
@@ -327,6 +445,75 @@ test('student notification actions only update notifications owned by the authen
   }
 })
 
+test('Main Admins and students can persist notification read state', async () => {
+  const adminId = '68a000000000000000000010'
+  const studentId = '68a000000000000000000020'
+  const notificationId = '68a000000000000000000030'
+  let updateFilter
+  let updateDocument
+  let updateCalls = 0
+  const restores = [
+    stub(Admin, 'findById', async (id) => ({
+      _id: id, role: 'main_admin', status: 'active', isActive: true,
+    })),
+    stub(Student, 'findById', async (id) => ({
+      _id: id, role: 'student', studentType: 'independent', status: 'active',
+      approvalStatus: 'approved', isActive: true,
+    })),
+    stub(Notification, 'findOneAndUpdate', async (filter, update) => {
+      updateCalls += 1
+      updateFilter = filter
+      updateDocument = update
+      return { _id: notificationId }
+    }),
+  ]
+  try {
+    const adminResponse = await request(`/notifications/${notificationId}/read`, {
+      role: 'main_admin',
+      subject: adminId,
+      method: 'PATCH',
+    })
+    assert.equal(adminResponse.status, 200)
+    assert.deepEqual(await adminResponse.json(), { isRead: true })
+    assert.deepEqual(updateFilter, {
+      _id: notificationId,
+      recipientRole: 'main_admin',
+      deletedAt: null,
+    })
+    assert.deepEqual(updateDocument, { $addToSet: { readBy: adminId } })
+
+    const studentResponse = await request(`/notifications/${notificationId}/read`, {
+      role: 'student',
+      subject: studentId,
+      method: 'PATCH',
+    })
+    assert.equal(studentResponse.status, 200)
+    assert.deepEqual(await studentResponse.json(), {
+      id: notificationId,
+      readAt: null,
+      isRead: true,
+    })
+    assert.deepEqual(updateFilter, {
+      _id: notificationId,
+      recipientRole: 'student',
+      recipientId: studentId,
+      deletedAt: null,
+    })
+    assert.ok(updateDocument.$set.readAt instanceof Date)
+    assert.equal(updateCalls, 2)
+
+    const invalidIdResponse = await request('/notifications/not-an-id/read', {
+      role: 'main_admin',
+      subject: adminId,
+      method: 'PATCH',
+    })
+    assert.equal(invalidIdResponse.status, 400)
+    assert.equal(updateCalls, 2)
+  } finally {
+    restores.reverse().forEach((restore) => restore())
+  }
+})
+
 test('main admins can update ticket priority and preserve its change history', async () => {
   const adminId = '68a000000000000000000010'
   const ticket = {
@@ -363,6 +550,221 @@ test('main admins can update ticket priority and preserve its change history', a
     assert.equal(result.ticket.priorityHistory[0].from, 'Low')
     assert.equal(result.ticket.priorityHistory[0].to, 'High')
     assert.equal(result.ticket.priorityHistory[0].changedBy, adminId)
+  } finally {
+    restores.reverse().forEach((restore) => restore())
+  }
+})
+
+test('main admins can reply to tickets and update status with persistent history', async () => {
+  const adminId = '68a000000000000000000010'
+  let saveCount = 0
+  const ticket = {
+    ticketId: 'LMS-TEST-CONVERSATION',
+    status: 'Open',
+    replies: [],
+    statusHistory: [],
+    save: async function saveTicket() {
+      saveCount += 1
+      return this
+    },
+  }
+  const restores = [
+    stub(Admin, 'findById', async (id) => ({
+      _id: id,
+      role: 'main_admin',
+      status: 'active',
+      isActive: true,
+      permissions: ['*'],
+    })),
+    stub(SupportTicket, 'findOne', () => queryResult(ticket)),
+  ]
+  try {
+    const replyResponse = await request(`/support/admin/tickets/${ticket.ticketId}/replies`, {
+      role: 'main_admin',
+      subject: adminId,
+      body: { message: 'We are looking into this.' },
+    })
+    const replyResult = await replyResponse.json()
+
+    assert.equal(replyResponse.status, 200, JSON.stringify(replyResult))
+    assert.equal(replyResult.ticket.replies[0].message, 'We are looking into this.')
+    assert.equal(replyResult.ticket.replies[0].authorId, adminId)
+    assert.equal(replyResult.ticket.status, 'Waiting for User')
+    assert.equal(replyResult.ticket.statusHistory.length, 1)
+
+    const statusResponse = await request(`/support/admin/tickets/${ticket.ticketId}/status`, {
+      role: 'main_admin',
+      subject: adminId,
+      method: 'PATCH',
+      body: { status: 'Resolved' },
+    })
+    const statusResult = await statusResponse.json()
+
+    assert.equal(statusResponse.status, 200, JSON.stringify(statusResult))
+    assert.equal(statusResult.ticket.status, 'Resolved')
+    assert.equal(statusResult.ticket.statusHistory.length, 2)
+    assert.equal(statusResult.ticket.statusHistory[1].from, 'Waiting for User')
+    assert.equal(statusResult.ticket.statusHistory[1].to, 'Resolved')
+    assert.equal(saveCount, 2)
+  } finally {
+    restores.reverse().forEach((restore) => restore())
+  }
+})
+
+test('Feedback and Complaints use separate student submission APIs with Main Admin-only management', async () => {
+  const studentId = '68a000000000000000000020'
+  const collegeStudentId = '68a000000000000000000021'
+  const collegeId = new mongoose.Types.ObjectId('68a000000000000000000022')
+  const collegeAdminId = '68a000000000000000000030'
+  let createdFeedback
+  const createdComplaints = []
+  const restores = [
+    stub(Student, 'findById', (id) => {
+      const student = {
+        _id: id,
+        role: 'student',
+        studentType: 'independent',
+        status: 'active',
+        approvalStatus: 'approved',
+        isActive: true,
+        fullName: 'Test Student',
+        studentId: 'STU-001',
+        email: 'student@example.invalid',
+        select() { return this },
+        lean: async function leanStudent() { return this },
+      }
+      return student
+    }),
+    stub(CollegeAdmin, 'findById', async (id) => ({
+      _id: id,
+      role: 'college_admin',
+      status: 'active',
+      isActive: true,
+      permissions: ['support:college'],
+    })),
+    stub(CollegeStudent, 'findById', (id) => ({
+      _id: id,
+      role: 'student',
+      studentType: 'college',
+      status: 'active',
+      isActive: true,
+      fullName: 'College Student',
+      studentId: 'COL-001',
+      email: 'college-student@example.invalid',
+      collegeId,
+      select() { return this },
+      lean: async function leanCollegeStudent() { return this },
+    })),
+    stub(Feedback, 'create', async (values) => {
+      createdFeedback = values
+      return { _id: new mongoose.Types.ObjectId('68a000000000000000000040'), ...values, createdAt: new Date() }
+    }),
+    stub(Complaint, 'create', async (values) => {
+      createdComplaints.push(values)
+      return { _id: new mongoose.Types.ObjectId('68a000000000000000000050'), ...values, createdAt: new Date() }
+    }),
+  ]
+  try {
+    const profileResponse = await request('/complaints/profile', {
+      role: 'student',
+      subject: studentId,
+    })
+    const profileResult = await profileResponse.json()
+    assert.equal(profileResponse.status, 200)
+    assert.equal(profileResult.student.studentType, 'independent')
+    assert.equal(profileResult.student.fullName, 'Test Student')
+    assert.equal(profileResult.student.email, 'student@example.invalid')
+
+    const feedbackResponse = await request('/feedback', {
+      role: 'student',
+      subject: studentId,
+      body: { message: 'A separate user-submitted feedback record.' },
+    })
+    const feedbackResult = await feedbackResponse.json()
+    assert.equal(feedbackResponse.status, 201)
+    assert.equal(createdFeedback.userCollection, 'students')
+    assert.equal(String(createdFeedback.userId), studentId)
+    assert.equal(feedbackResult.feedback.message, 'A separate user-submitted feedback record.')
+
+    const complaintResponse = await request('/complaints', {
+      role: 'student',
+      subject: studentId,
+      body: {
+        subject: 'A separate complaint',
+        category: 'Other',
+        description: 'This complaint is stored independently from feedback and support tickets.',
+        studentName: 'Forged Name',
+        studentEmail: 'forged@example.invalid',
+        studentId: 'FORGED-001',
+        collegeId: '68a000000000000000000099',
+      },
+    })
+    const complaintResult = await complaintResponse.json()
+    assert.equal(complaintResponse.status, 201)
+    assert.equal(createdComplaints[0].userCollection, 'students')
+    assert.equal(String(createdComplaints[0].userId), studentId)
+    assert.equal(createdComplaints[0].studentName, 'Test Student')
+    assert.equal(createdComplaints[0].studentId, 'STU-001')
+    assert.equal(createdComplaints[0].studentEmail, 'student@example.invalid')
+    assert.equal(createdComplaints[0].collegeId, undefined)
+    assert.equal(createdComplaints[0].status, 'Unsolved')
+    assert.match(createdComplaints[0].complaintId, /^CMP-/)
+    assert.equal(complaintResult.complaint.category, 'Other')
+
+    const collegeProfileResponse = await request('/complaints/profile', {
+      role: 'student',
+      subject: collegeStudentId,
+      accountCollection: 'clg_students',
+    })
+    const collegeProfileResult = await collegeProfileResponse.json()
+    assert.equal(collegeProfileResponse.status, 200)
+    assert.equal(collegeProfileResult.student.studentType, 'college')
+    assert.equal(collegeProfileResult.student.studentId, 'COL-001')
+    assert.equal(collegeProfileResult.student.collegeId, String(collegeId))
+
+    const collegeComplaintResponse = await request('/complaints', {
+      role: 'student',
+      subject: collegeStudentId,
+      accountCollection: 'clg_students',
+      body: {
+        subject: 'A college student complaint',
+        category: 'Other',
+        description: 'This complaint saves profile information from the college account.',
+        studentName: 'Forged College Student',
+        studentEmail: 'forged-college@example.invalid',
+        studentId: 'FORGED-COL-001',
+        collegeId: '68a000000000000000000099',
+      },
+    })
+    assert.equal(collegeComplaintResponse.status, 201)
+    assert.equal(createdComplaints[1].userCollection, 'clg_students')
+    assert.equal(String(createdComplaints[1].userId), collegeStudentId)
+    assert.equal(createdComplaints[1].studentName, 'College Student')
+    assert.equal(createdComplaints[1].studentId, 'COL-001')
+    assert.equal(createdComplaints[1].studentEmail, 'college-student@example.invalid')
+    assert.equal(String(createdComplaints[1].collegeId), String(collegeId))
+
+    const invalidCategory = await request('/complaints', {
+      role: 'student',
+      subject: studentId,
+      body: {
+        subject: 'Invalid category',
+        category: 'Course Feedback',
+        description: 'This category is intentionally not accepted for complaints.',
+      },
+    })
+    assert.equal(invalidCategory.status, 400)
+
+    const studentAdminFeedback = await request('/feedback/admin', {
+      role: 'student',
+      subject: studentId,
+    })
+    assert.equal(studentAdminFeedback.status, 403)
+    const collegeAdminComplaints = await request('/complaints/admin', {
+      role: 'college_admin',
+      subject: collegeAdminId,
+    })
+    assert.equal(collegeAdminComplaints.status, 403)
   } finally {
     restores.reverse().forEach((restore) => restore())
   }
@@ -557,37 +959,19 @@ function installOtpTestDoubles() {
   }
 }
 
-function stubResendProvider(sentCodes) {
-  const originalFetch = globalThis.fetch
-  globalThis.fetch = async (url, options) => {
-    if (String(url).startsWith(baseUrl)) return originalFetch(url, options)
-    assert.equal(url, 'https://api.resend.com/emails')
-    const payload = JSON.parse(options.body)
-    const match = payload.text.match(/code is (\d{6})/)
+function stubGmailOtpProvider(sentCodes) {
+  return stubGmailTransport(async (message) => {
+    const match = message.text.match(/code is:?\s*(\d{6})/)
     assert.ok(match, 'email body contains a six-digit OTP')
     sentCodes.push(match[1])
-    return { ok: true, status: 200 }
-  }
-  return () => { globalThis.fetch = originalFetch }
-}
-
-function stubResendApi(handler) {
-  const originalFetch = globalThis.fetch
-  globalThis.fetch = async (url, options) => {
-    if (String(url) === 'https://api.resend.com/emails') {
-      return handler(JSON.parse(options.body), options)
-    }
-    return originalFetch(url, options)
-  }
-  return () => { globalThis.fetch = originalFetch }
+    return { accepted: [message.to], messageId: 'test-gmail-message' }
+  })
 }
 
 function stubGmailTransport(handler) {
-  const original = nodemailer.createTransport
-  nodemailer.createTransport = (options) => ({
-    sendMail: async (message) => handler(message, options),
-  })
-  return () => { nodemailer.createTransport = original }
+  const previous = gmailSendHandler
+  gmailSendHandler = handler
+  return () => { gmailSendHandler = previous }
 }
 
 test('models target the requested collections', () => {
@@ -989,6 +1373,99 @@ test('student profile update changes the existing account and identity and authe
   }
 })
 
+test('college student profile update ignores custom usernames and uses the Student ID', async () => {
+  const studentId = new mongoose.Types.ObjectId()
+  const student = {
+    _id: studentId,
+    fullName: 'College Student',
+    username: 'old-college-name',
+    studentId: 'CS-201',
+    email: 'college-student@example.invalid',
+    role: 'student',
+    studentType: 'college',
+    status: 'active',
+    isActive: true,
+    save: async function save() { return this },
+  }
+  const identity = {
+    accountCollection: 'clg_students',
+    accountId: studentId,
+    email: student.email,
+    username: student.username,
+    save: async function save() { return this },
+  }
+  const restores = [
+    stub(CollegeStudent, 'findById', () => queryResult(student)),
+    stub(AccountIdentity, 'find', () => queryResult([])),
+    stub(AccountIdentity, 'findOne', (query) => query.username
+      ? queryResult(null)
+      : queryResult(identity)),
+    stub(mongoose, 'startSession', async () => ({
+      withTransaction: async (callback) => callback(),
+      endSession: async () => {},
+    })),
+  ]
+  const restoreDb = stubDatabase({
+    collection: () => ({ find: () => ({ toArray: async () => [] }) }),
+  })
+  try {
+    const response = await request('/settings/profile', {
+      role: 'student',
+      subject: String(studentId),
+      accountCollection: 'clg_students',
+      method: 'PATCH',
+      body: { fullName: 'Updated College Student', username: 'custom-name' },
+    })
+    assert.equal(response.status, 200)
+    const result = await response.json()
+    assert.equal(student.username, 'cs-201')
+    assert.equal(identity.username, 'cs-201')
+    assert.equal(result.account.username, 'cs-201')
+    assert.equal(result.account.studentId, 'CS-201')
+  } finally {
+    restoreDb()
+    for (const restore of restores.reverse()) restore()
+  }
+})
+
+test('college student settings include Student ID for the derived username display', async () => {
+  const studentId = new mongoose.Types.ObjectId()
+  const student = {
+    _id: studentId,
+    fullName: 'College Student',
+    username: 'cs-202',
+    studentId: 'CS-202',
+    email: 'college-student@example.invalid',
+    role: 'student',
+    studentType: 'college',
+    status: 'active',
+    isActive: true,
+  }
+  const identity = {
+    accountCollection: 'clg_students',
+    accountId: studentId,
+    email: student.email,
+    username: student.username,
+  }
+  const restores = [
+    stub(CollegeStudent, 'findById', () => queryResult(student)),
+    stub(AccountIdentity, 'findOne', () => queryResult(identity)),
+  ]
+  try {
+    const response = await request('/settings/', {
+      role: 'student',
+      subject: String(studentId),
+      accountCollection: 'clg_students',
+    })
+    assert.equal(response.status, 200)
+    const result = await response.json()
+    assert.equal(result.account.accountType, 'College Student')
+    assert.equal(result.account.studentId, 'CS-202')
+  } finally {
+    restores.reverse().forEach((restore) => restore())
+  }
+})
+
 test('student email verification updates the existing account and preserves its Google login identity', async () => {
   const studentId = new mongoose.Types.ObjectId()
   const identityId = new mongoose.Types.ObjectId()
@@ -1085,11 +1562,11 @@ test('student email request leaves the current email unchanged when verification
       identity.pendingEmailVerificationCodeHash = undefined
       return { matchedCount: 1 }
     }),
-    stubResendApi(async () => ({
-      ok: false,
-      status: 422,
-      json: async () => ({ message: 'Test Resend recipient rejected' }),
-    })),
+    stubGmailTransport(async () => {
+      const error = new Error('Test Gmail recipient rejected')
+      error.code = 'EENVELOPE'
+      throw error
+    }),
   ]
   const restoreDb = stubDatabase({
     collection: () => ({ find: () => ({ toArray: async () => [] }) }),
@@ -1575,7 +2052,7 @@ test('student limit update validates limits and rejects a Sub-Admin from another
   }
 })
 
-test('independent registration writes to students and maps the identity', async () => {
+test('independent registration persists when its confirmation email fails', async () => {
   let savedStudent
   let savedIdentity
   let savedNotification
@@ -1623,7 +2100,12 @@ test('independent registration writes to students and maps the identity', async 
       withTransaction: async (callback) => callback(),
       endSession: async () => {},
     })),
-    stubGmailTransport(async () => {}),
+    stubGmailTransport(async () => {
+      const error = new Error('SMTP failure contained sensitive test data')
+      error.code = 'EAUTH'
+      throw error
+    }),
+    stub(console, 'error', () => {}),
   ]
   try {
     const response = await request('/auth/register', {
@@ -1643,10 +2125,12 @@ test('independent registration writes to students and maps the identity', async 
           referralCode: ' abcd1234 ',
           educationQualification: 'Other',
           customQualification: 'Specialized diploma',
+          custom_qualification: 'Legacy qualification',
           userExpectations: 'Learn practical skills.',
           location: 'Toronto',
           livingWithWhom: 'Other',
           customLivingArrangement: 'Roommates',
+          otherLivingArrangement: 'Legacy arrangement',
           password: 'must-not-be-saved',
           passwordHash: 'must-not-be-saved',
           approvalStatus: 'approved',
@@ -1663,11 +2147,9 @@ test('independent registration writes to students and maps the identity', async 
       username: 'independent-student',
       referralCode: ' abcd1234 ',
       educationQualification: 'Other',
-      customQualification: 'Specialized diploma',
       userExpectations: 'Learn practical skills.',
       location: 'Toronto',
       livingWithWhom: 'Other',
-      customLivingArrangement: 'Roommates',
     })
     assert.equal(savedIdentity.accountCollection, 'students')
     assert.equal(String(savedIdentity.accountId), String(savedStudent._id))
@@ -1698,6 +2180,47 @@ test('independent registration rejects requests without a server-issued verified
   assert.match((await response.json()).message, /verify your email/i)
 })
 
+test('independent registration rejects a duplicate email before creating an account', async () => {
+  const email = 'already-registered@example.invalid'
+  const verificationId = '68a000000000000000000099'
+  const emailVerificationToken = jwt.sign(
+    { scope: 'registration_email_verified', email },
+    process.env.JWT_SECRET,
+    { subject: verificationId, expiresIn: '30m' },
+  )
+  let accountCreated = false
+  const restoreDb = stubDatabase({
+    collection: () => ({ find: () => ({ toArray: async () => [] }) }),
+  })
+  const restores = [
+    stub(AccountIdentity, 'find', () => queryResult([{ email }])),
+    stub(AccountIdentity, 'create', async () => {
+      accountCreated = true
+      return []
+    }),
+  ]
+  try {
+    const response = await request('/auth/register', {
+      body: {
+        fullName: 'Duplicate Student',
+        email,
+        username: 'duplicate-student',
+        password: 'a-strong-password',
+        confirmPassword: 'a-strong-password',
+        emailVerificationToken,
+        role: 'student',
+        accountType: 'independent',
+      },
+    })
+    assert.equal(response.status, 409)
+    assert.match((await response.json()).message, /email already exists/i)
+    assert.equal(accountCreated, false)
+  } finally {
+    restores.reverse().forEach((restore) => restore())
+    restoreDb()
+  }
+})
+
 test('registration email OTP is hashed, expires, is resend-safe, and can be used only once', async () => {
   const store = installRegistrationEmailVerificationTestDoubles()
   const restoreDb = stubDatabase({
@@ -1705,7 +2228,7 @@ test('registration email OTP is hashed, expires, is resend-safe, and can be used
   })
   const restoreIdentityFind = stub(AccountIdentity, 'find', () => queryResult([]))
   const sentCodes = []
-  const restoreResend = stubResendProvider(sentCodes)
+  const restoreGmail = stubGmailOtpProvider(sentCodes)
   const headers = { 'x-forwarded-for': '198.51.100.31' }
   try {
     const email = 'otp-registration@example.invalid'
@@ -1760,7 +2283,46 @@ test('registration email OTP is hashed, expires, is resend-safe, and can be used
     assert.match((await reusedResponse.json()).message, /already been used/i)
 
   } finally {
-    restoreResend()
+    restoreGmail()
+    restoreIdentityFind()
+    store.restore()
+    restoreDb()
+  }
+})
+
+test('registration email verification supports Gmail and Outlook addresses', async () => {
+  const store = installRegistrationEmailVerificationTestDoubles()
+  const restoreDb = stubDatabase({
+    collection: () => ({ find: () => ({ toArray: async () => [] }) }),
+  })
+  const restoreIdentityFind = stub(AccountIdentity, 'find', () => queryResult([]))
+  const sentMessages = []
+  const restoreGmail = stubGmailTransport(async (message) => {
+    const match = message.text.match(/code is:?\s*(\d{6})/)
+    assert.ok(match, 'email body contains a six-digit OTP')
+    sentMessages.push({ to: message.to, code: match[1] })
+    return { accepted: [message.to], messageId: 'test-gmail-message' }
+  })
+  try {
+    for (const [index, email] of ['gmail-signup@gmail.com', 'outlook-signup@outlook.com'].entries()) {
+      const headers = { 'x-forwarded-for': `198.51.100.${40 + index}` }
+      const sendResponse = await request('/auth/registration/email/send', {
+        body: { email },
+        headers,
+      })
+      assert.equal(sendResponse.status, 200)
+      assert.equal(sentMessages[index].to, email)
+
+      const verifyResponse = await request('/auth/registration/email/verify', {
+        body: { email, code: sentMessages[index].code },
+        headers,
+      })
+      assert.equal(verifyResponse.status, 200)
+      const result = await verifyResponse.json()
+      assert.equal(jwt.verify(result.emailVerificationToken, process.env.JWT_SECRET).email, email)
+    }
+  } finally {
+    restoreGmail()
     restoreIdentityFind()
     store.restore()
     restoreDb()
@@ -1774,7 +2336,7 @@ test('registration email verification rejects expired codes and locks after five
   })
   const restoreIdentityFind = stub(AccountIdentity, 'find', () => queryResult([]))
   const sentCodes = []
-  const restoreResend = stubResendProvider(sentCodes)
+  const restoreGmail = stubGmailOtpProvider(sentCodes)
   try {
     const expiredEmail = 'expired-registration@example.invalid'
     const expiredHeaders = { 'x-forwarded-for': '198.51.100.32' }
@@ -1818,7 +2380,7 @@ test('registration email verification rejects expired codes and locks after five
     const attemptChallenge = [...store.documents.values()].find((item) => item.email === attemptEmail)
     assert.equal(attemptChallenge.invalidatedAt instanceof Date, true)
   } finally {
-    restoreResend()
+    restoreGmail()
     restoreIdentityFind()
     store.restore()
     restoreDb()
@@ -1832,7 +2394,7 @@ test('registration email verification limits repeated code requests and binds th
   })
   const restoreIdentityFind = stub(AccountIdentity, 'find', () => queryResult([]))
   const sentCodes = []
-  const restoreResend = stubResendProvider(sentCodes)
+  const restoreGmail = stubGmailOtpProvider(sentCodes)
   try {
     const email = 'limited-registration@example.invalid'
     const headers = { 'x-forwarded-for': '198.51.100.34' }
@@ -1877,7 +2439,7 @@ test('registration email verification limits repeated code requests and binds th
     assert.equal(mismatchedRegistration.status, 400)
     assert.match((await mismatchedRegistration.json()).message, /verify this email/i)
   } finally {
-    restoreResend()
+    restoreGmail()
     restoreIdentityFind()
     store.restore()
     restoreDb()
@@ -1891,7 +2453,7 @@ test('registration email code requests are rate-limited per IP', async () => {
   })
   const restoreIdentityFind = stub(AccountIdentity, 'find', () => queryResult([]))
   const sentCodes = []
-  const restoreResend = stubResendProvider(sentCodes)
+  const restoreGmail = stubGmailOtpProvider(sentCodes)
   const headers = { 'x-forwarded-for': '198.51.100.36' }
   try {
     for (let index = 0; index < 5; index += 1) {
@@ -1910,7 +2472,7 @@ test('registration email code requests are rate-limited per IP', async () => {
     assert.equal(sentCodes.length, 5)
     assert.equal(store.documents.size, 5)
   } finally {
-    restoreResend()
+    restoreGmail()
     restoreIdentityFind()
     store.restore()
     restoreDb()
@@ -1968,7 +2530,7 @@ test('password login with student two-factor enabled requires OTP before issuing
   const username = 'otp-student'
   const sentCodes = []
   const otpStore = installOtpTestDoubles()
-  const restoreEmail = stubResendProvider(sentCodes)
+  const restoreEmail = stubGmailOtpProvider(sentCodes)
   const user = {
     _id: accountId,
     fullName: 'OTP Student',
@@ -2042,7 +2604,7 @@ test('student OTP resends honor cooldown and reset the limited attempt counter',
   const username = 'otp-limits'
   const sentCodes = []
   const otpStore = installOtpTestDoubles()
-  const restoreEmail = stubResendProvider(sentCodes)
+  const restoreEmail = stubGmailOtpProvider(sentCodes)
   const user = {
     _id: accountId,
     email,
@@ -2150,7 +2712,7 @@ test('Google login requires OTP for enabled students and retains normal login wh
 
   const sentCodes = []
   const otpStore = installOtpTestDoubles()
-  const restoreEmail = stubResendProvider(sentCodes)
+  const restoreEmail = stubGmailOtpProvider(sentCodes)
   const accountId = new mongoose.Types.ObjectId()
   const identity = {
     _id: new mongoose.Types.ObjectId(),
@@ -2216,7 +2778,7 @@ test('student settings enable and disable two-factor only after email OTP verifi
   const studentId = new mongoose.Types.ObjectId()
   const sentCodes = []
   const otpStore = installOtpTestDoubles()
-  const restoreEmail = stubResendProvider(sentCodes)
+  const restoreEmail = stubGmailOtpProvider(sentCodes)
   const user = {
     _id: studentId,
     fullName: 'Settings Student',
@@ -3757,9 +4319,11 @@ test('college student import saves to clg_students and maps the identity', async
     assert.equal((await response.json()).summary.imported, 1)
     assert.equal(savedStudent.role, 'student')
     assert.equal(savedStudent.studentType, 'college')
+    assert.equal(savedStudent.username, 's-100')
     assert.equal(String(savedStudent.collegeId), collegeId)
     assert.equal(CollegeStudent.collection.name, 'clg_students')
     assert.equal(savedIdentity.accountCollection, 'clg_students')
+    assert.equal(savedIdentity.username, 's-100')
     assert.equal(String(savedIdentity.accountId), String(savedStudent._id))
   } finally {
     for (const restore of restores.reverse()) restore()
@@ -3847,11 +4411,11 @@ test('college sub-admin invite records the account in sub_admins and identity ma
       withTransaction: async (callback) => callback(),
       endSession: async () => {},
     })),
-    stubResendApi(async () => ({
-      ok: false,
-      status: 422,
-      json: async () => ({ message: 'Test Resend recipient rejected' }),
-    })),
+    stubGmailTransport(async () => {
+      const error = new Error('Test Gmail recipient rejected')
+      error.code = 'EENVELOPE'
+      throw error
+    }),
   ]
   try {
     const response = await request(`/admin/colleges/${collegeId}/sub-admins`, {
@@ -3955,6 +4519,7 @@ test('college sub-admin dashboard returns assigned limit and college-wide studen
 test('college sub-admin can add a student only within the assigned college limit', async () => {
   const collegeId = '68a000000000000000000070'
   const adminId = '68a000000000000000000071'
+  let savedStudent
   const restores = [
     stub(CollegeAdmin, 'findById', () => queryResult({
       _id: new mongoose.Types.ObjectId(adminId),
@@ -3975,7 +4540,10 @@ test('college sub-admin can add a student only within the assigned college limit
     stub(Admin, 'exists', async () => false),
     stub(Student, 'findOne', () => queryResult(null)),
     stub(CollegeStudent, 'findOne', () => queryResult(null)),
-    stub(CollegeStudent, 'create', async (documents) => documents),
+    stub(CollegeStudent, 'create', async (documents) => {
+      savedStudent = documents[0]
+      return documents
+    }),
     stub(mongoose, 'startSession', () => ({
       withTransaction: async (callback) => callback(),
       endSession: async () => {},
@@ -3989,7 +4557,7 @@ test('college sub-admin can add a student only within the assigned college limit
       body: {
         fullName: 'College Student',
         email: 'college.student@example.invalid',
-        username: 'college-student',
+        username: 'client-supplied-name',
         password: 'secure-password',
         studentId: 'CS-100',
       },
@@ -3998,6 +4566,61 @@ test('college sub-admin can add a student only within the assigned college limit
     const result = await response.json()
     assert.equal(result.student.studentId, 'CS-100')
     assert.equal(result.student.email, 'college.student@example.invalid')
+    assert.equal(savedStudent.username, 'cs-100')
+  } finally {
+    restores.reverse().forEach((restore) => restore())
+  }
+})
+
+test('college sub-admin bulk import uses each Student ID as the username', async () => {
+  const collegeId = '68a000000000000000000074'
+  const adminId = '68a000000000000000000075'
+  let savedStudent
+  let savedIdentity
+  const restores = [
+    stub(CollegeAdmin, 'findById', () => queryResult({
+      _id: new mongoose.Types.ObjectId(adminId),
+      role: 'college_admin',
+      status: 'active',
+      isActive: true,
+      collegeId: new mongoose.Types.ObjectId(collegeId),
+      studentLimit: 500,
+    })),
+    stub(CollegeAdmin, 'find', () => queryResult([{ studentLimit: 500 }])),
+    stub(CollegeStudent, 'countDocuments', () => queryResult(0)),
+    stub(AccountIdentity, 'exists', async () => false),
+    stub(CollegeStudent, 'findOne', () => queryResult(null)),
+    stub(Student, 'findOne', () => queryResult(null)),
+    stub(CollegeAdmin, 'exists', async () => false),
+    stub(CollegeStudent, 'exists', async () => false),
+    stub(Student, 'exists', async () => false),
+    stub(Admin, 'exists', async () => false),
+    stub(CollegeStudent, 'create', async (documents) => {
+      savedStudent = documents[0]
+      return documents
+    }),
+    stub(AccountIdentity, 'create', async (documents) => {
+      savedIdentity = documents[0]
+      return documents
+    }),
+    stub(mongoose, 'startSession', () => ({
+      withTransaction: async (callback) => callback(),
+      endSession: async () => {},
+    })),
+  ]
+  try {
+    const response = await request('/college/students/import', {
+      role: 'college_admin',
+      subject: adminId,
+      method: 'POST',
+      body: {
+        csvText: 'Full Name,Student ID,Email,Department,Batch\nImported Student,CS-203,cs203@example.invalid,Science,2026',
+      },
+    })
+    assert.equal(response.status, 200)
+    assert.equal((await response.json()).summary.imported, 1)
+    assert.equal(savedStudent.username, 'cs-203')
+    assert.equal(savedIdentity.username, 'cs-203')
   } finally {
     restores.reverse().forEach((restore) => restore())
   }
@@ -5490,6 +6113,7 @@ for (const studentType of ['independent', 'college']) {
     const courseId = new mongoose.Types.ObjectId()
     const enrollmentId = new mongoose.Types.ObjectId()
     const lessonIds = [new mongoose.Types.ObjectId(), new mongoose.Types.ObjectId()]
+    const quizId = new mongoose.Types.ObjectId()
     const studentName = `${studentType} learner`
     const enrollment = {
       _id: enrollmentId,
@@ -5501,11 +6125,14 @@ for (const studentType of ['independent', 'college']) {
         _id: courseId,
         title: 'Verified completion course',
         modules: [{
-          contentItems: lessonIds.map((_id, index) => ({
-            _id,
-            type: 'video-lesson',
-            title: `Lesson ${index + 1}`,
-          })),
+          contentItems: [
+            ...lessonIds.map((_id, index) => ({
+              _id,
+              type: 'video-lesson',
+              title: `Lesson ${index + 1}`,
+            })),
+            { _id: quizId, type: 'quiz', title: 'Required quiz', questions: [{}] },
+          ],
         }],
       },
     }
@@ -5540,19 +6167,19 @@ for (const studentType of ['independent', 'college']) {
         }
         return { matchedCount: 1 }
       }),
+      stub(QuizAttempt, 'find', () => queryResult([{ quizId }])),
+      stub(CertificateTemplate, 'findById', () => queryResult(null)),
       stub(Certificate, 'findOne', (filter) => {
         assert.deepEqual(filter, {
-          userId: studentId,
+          userId: String(studentId),
           courseId,
-          $or: [{ studentId: { $exists: false } }, { studentId: null }],
         })
         return queryResult(null)
       }),
       stub(Certificate, 'findOneAndUpdate', (filter, update, options) => {
         certificateUpserts += 1
         assert.deepEqual(filter, {
-          studentType,
-          studentId,
+          userId: String(studentId),
           courseId,
         })
         assert.equal(options.upsert, true)
@@ -5591,7 +6218,7 @@ for (const studentType of ['independent', 'college']) {
       assert.equal(String(savedCertificate.userId), String(studentId))
       assert.equal(String(savedCertificate.courseId), String(courseId))
       assert.equal(String(savedCertificate.enrollmentId), String(enrollmentId))
-      assert.match(savedCertificate.certificateId, /^AIH-[A-F0-9]{32}$/)
+      assert.match(savedCertificate.certificateId, /^AIH-\d{4}-[A-F0-9]{12}$/)
       const issuedCertificateId = savedCertificate.certificateId
       assert.equal(savedCertificate.viewUrl, `/certificates/${savedCertificate.certificateId}/view`)
       assert.equal(savedCertificate.downloadUrl, `/certificates/${savedCertificate.certificateId}/download`)
@@ -5654,9 +6281,8 @@ test('completing a course with an existing legacy certificate does not issue a d
     stub(Enrollment, 'updateOne', async () => ({ matchedCount: 1 })),
     stub(Certificate, 'findOne', (filter) => {
       assert.deepEqual(filter, {
-        userId: studentId,
+        userId: String(studentId),
         courseId,
-        $or: [{ studentId: { $exists: false } }, { studentId: null }],
       })
       return queryResult(legacyCertificate)
     }),
@@ -6078,6 +6704,62 @@ test('main admin can update student account details and create a missing login i
   }
 })
 
+test('main admin keeps a college student username synchronized with Student ID when editing', async () => {
+  const adminId = '68a000000000000000000010'
+  const studentId = new mongoose.Types.ObjectId('68a000000000000000000021')
+  const student = { _id: studentId, studentId: 'CS-202' }
+  const identity = {
+    accountCollection: 'clg_students',
+    accountId: studentId,
+    email: 'college.learner@example.invalid',
+    username: 'old-name',
+    save: async function save() { return this },
+  }
+  let updatedStudent
+  const restores = [
+    stub(Admin, 'findById', async () => ({
+      _id: adminId,
+      role: 'main_admin',
+      status: 'active',
+      isActive: true,
+    })),
+    stub(CollegeStudent, 'findOne', (query) => query._id && !query._id.$ne
+      ? queryResult(student)
+      : queryResult(null)),
+    stub(Student, 'findOne', () => queryResult(null)),
+    stub(CollegeAdmin, 'findOne', () => queryResult(null)),
+    stub(Admin, 'findOne', () => queryResult(null)),
+    stub(AccountIdentity, 'findOne', (query) => query.accountCollection
+      ? queryResult(identity)
+      : queryResult(null)),
+    stub(CollegeStudent, 'updateOne', async (filter, update) => {
+      updatedStudent = { filter, update }
+      return { matchedCount: 1 }
+    }),
+    stub(mongoose, 'startSession', async () => ({
+      withTransaction: async (operation) => operation(),
+      endSession: async () => {},
+    })),
+  ]
+  try {
+    const response = await request(`/admin/students/${studentId}?studentType=college`, {
+      role: 'main_admin',
+      subject: adminId,
+      method: 'PATCH',
+      body: {
+        fullName: 'College Learner',
+        email: 'college.learner@example.invalid',
+        username: 'client-supplied-name',
+      },
+    })
+    assert.equal(response.status, 200, JSON.stringify(await response.json()))
+    assert.equal(updatedStudent.update.$set.username, 'cs-202')
+    assert.equal(identity.username, 'cs-202')
+  } finally {
+    restores.reverse().forEach((restore) => restore())
+  }
+})
+
 test('pending independent student login is blocked with the approval message', async () => {
   const accountId = new mongoose.Types.ObjectId()
   const email = 'pending-student@example.invalid'
@@ -6145,6 +6827,7 @@ test('approved independent student can log in normally', async () => {
       _id: accountId, email, username, role: 'student', studentType: 'independent',
       status: 'active', approvalStatus: 'approved', isActive: true, passwordHash,
     })),
+    stub(RefreshSession, 'create', async () => ({})),
   ]
   try {
     const response = await request('/auth/login', {
@@ -6220,6 +6903,9 @@ test('Main Admin can approve a pending independent student and notify the studen
   let loggedEmailFailure
   let updateFilter
   let updateDocument
+  let completionFilter
+  let completionUpdate
+  let completionOptions
   const session = {
     withTransaction: async (operation) => operation(),
     endSession: async () => {},
@@ -6243,13 +6929,19 @@ test('Main Admin can approve a pending independent student and notify the studen
       })
     }),
     stub(Student, 'exists', () => queryResult({ _id: studentId })),
+    stub(Notification, 'updateMany', async (filter, update, options) => {
+      completionFilter = filter
+      completionUpdate = update
+      completionOptions = options
+      return { modifiedCount: 1 }
+    }),
     stub(Notification, 'create', async (records) => { notifications.push(...records) }),
     stub(mongoose, 'startSession', async () => session),
-    stubResendApi(async (message) => {
+    stubGmailTransport(async (message) => {
       assert.equal(saved, true)
-      assert.deepEqual(message.to, ['approved@example.invalid'])
+      assert.equal(message.to, 'approved@example.invalid')
       assert.equal(message.subject, 'Your AIHustle Registration Has Been Approved!')
-      return { ok: true, status: 200, json: async () => ({ id: 'test-approval-email' }) }
+      return { messageId: 'test-approval-email' }
     }),
     stub(console, 'error', (message) => { loggedEmailFailure = message }),
   ]
@@ -6265,6 +6957,14 @@ test('Main Admin can approve a pending independent student and notify the studen
     assert.equal(updateDocument.$set.approvalStatus, 'approved')
     assert.equal(updateDocument.$set.status, 'active')
     assert.equal(updateDocument.$set.approvedBy, adminId)
+    assert.deepEqual(completionFilter, {
+      recipientRole: 'main_admin',
+      type: 'independent_student_registered',
+      'metadata.studentId': studentId,
+      actionCompletedAt: { $exists: false },
+    })
+    assert.ok(completionUpdate.$set.actionCompletedAt instanceof Date)
+    assert.equal(completionOptions.session, session)
     assert.equal(notifications[0].recipientRole, 'student')
     assert.equal(String(notifications[0].recipientId), studentId)
     assert.equal(saved, true)
@@ -6307,14 +7007,15 @@ test('independent student approval stays successful when its confirmation email 
         status: 'active',
       })
     }),
+    stub(Notification, 'updateMany', async () => ({ modifiedCount: 1 })),
     stub(Notification, 'create', async () => {}),
     stub(mongoose, 'startSession', async () => session),
     stub(console, 'error', (message) => { loggedEmailFailure = message }),
-    stubResendApi(async () => ({
-      ok: false,
-      status: 422,
-      json: async () => ({ message: 'Test Resend recipient rejected' }),
-    })),
+    stubGmailTransport(async () => {
+      const error = new Error('SMTP failure contained sensitive test data')
+      error.code = 'EAUTH'
+      throw error
+    }),
   ]
   try {
     const response = await request(`/admin/independent-students/${studentId}/approval`, {
@@ -6327,8 +7028,8 @@ test('independent student approval stays successful when its confirmation email 
     assert.equal((await response.json()).student.approvalStatus, 'approved')
     assert.equal(saved, true)
     assert.match(loggedEmailFailure, /notification\.independent_student_approve_email\.failed/)
-    assert.match(loggedEmailFailure, /RESEND_SEND_FAILED/)
-    assert.match(loggedEmailFailure, /Test Resend recipient rejected/)
+    assert.match(loggedEmailFailure, /EAUTH/)
+    assert.doesNotMatch(loggedEmailFailure, /SMTP failure contained sensitive test data/)
   } finally {
     restores.reverse().forEach((restore) => restore())
   }
@@ -6340,6 +7041,8 @@ test('Main Admin can reject a pending independent student and save the optional 
   const notifications = []
   let saved = false
   let updateDocument
+  let completionFilter
+  let completionUpdate
   const session = {
     withTransaction: async (operation) => operation(),
     endSession: async () => {},
@@ -6360,14 +7063,19 @@ test('Main Admin can reject a pending independent student and save the optional 
         rejectionReason: 'Please provide a valid student ID.',
       })
     }),
+    stub(Notification, 'updateMany', async (filter, update) => {
+      completionFilter = filter
+      completionUpdate = update
+      return { modifiedCount: 1 }
+    }),
     stub(Notification, 'create', async (records) => { notifications.push(...records) }),
     stub(mongoose, 'startSession', async () => session),
-    stubResendApi(async (message) => {
+    stubGmailTransport(async (message) => {
       assert.equal(saved, true)
-      assert.deepEqual(message.to, ['rejected@example.invalid'])
+      assert.equal(message.to, 'rejected@example.invalid')
       assert.equal(message.subject, 'Update on your AIHustle LMS account application')
       assert.match(message.text, /Please provide a valid student ID/)
-      return { ok: true, status: 200, json: async () => ({ id: 'test-rejection-email' }) }
+      return { messageId: 'test-rejection-email' }
     }),
   ]
   try {
@@ -6383,6 +7091,8 @@ test('Main Admin can reject a pending independent student and save the optional 
     assert.equal(updateDocument.$set.isActive, false)
     assert.equal(updateDocument.$set.rejectedBy, adminId)
     assert.equal(updateDocument.$set.rejectionReason, 'Please provide a valid student ID.')
+    assert.equal(completionFilter['metadata.studentId'], studentId)
+    assert.ok(completionUpdate.$set.actionCompletedAt instanceof Date)
     assert.match(notifications[0].message, /Please provide a valid student ID/)
     assert.equal(saved, true)
   } finally {
@@ -6390,7 +7100,7 @@ test('Main Admin can reject a pending independent student and save the optional 
   }
 })
 
-test('independent student rejection remains saved when its Resend notification fails', async () => {
+test('independent student rejection remains saved when its SMTP notification fails', async () => {
   const adminId = '68a000000000000000000010'
   const studentId = '68a000000000000000000026'
   let saved = false
@@ -6414,14 +7124,15 @@ test('independent student rejection remains saved when its Resend notification f
         rejectionReason: 'Incomplete application.',
       })
     }),
+    stub(Notification, 'updateMany', async () => ({ modifiedCount: 1 })),
     stub(Notification, 'create', async () => {}),
     stub(mongoose, 'startSession', async () => session),
     stub(console, 'error', (message) => { loggedEmailFailure = message }),
-    stubResendApi(async () => ({
-      ok: false,
-      status: 503,
-      json: async () => ({ message: 'Test Resend failure' }),
-    })),
+    stubGmailTransport(async () => {
+      const error = new Error('SMTP failure')
+      error.code = 'ECONNECTION'
+      throw error
+    }),
   ]
   try {
     const response = await request(`/admin/independent-students/${studentId}/approval`, {
@@ -6436,7 +7147,7 @@ test('independent student rejection remains saved when its Resend notification f
     assert.equal(result.student.approvalStatus, 'rejected')
     assert.equal(saved, true)
     assert.match(loggedEmailFailure, /notification\.independent_student_reject_email\.failed/)
-    assert.match(loggedEmailFailure, /RESEND_SEND_FAILED/)
+    assert.match(loggedEmailFailure, /ECONNECTION/)
   } finally {
     restores.reverse().forEach((restore) => restore())
   }
@@ -6528,13 +7239,12 @@ test('Main Admin approval details returns saved registration fields without auth
     assert.match(selectedFields, /registrationDetails/)
     assert.match(selectedFields, /approvedAt/)
     assert.doesNotMatch(selectedFields, /password|token|secret/i)
+    assert.doesNotMatch(selectedFields, /customQualification|customLivingArrangement|custom_qualification|custom_living_arrangement/i)
     assert.deepEqual(result.student.registrationDetails, {
       educationQualification: 'Other',
-      customQualification: 'Specialized diploma',
       userExpectations: 'Learn practical skills.',
       location: 'Toronto',
       livingWithWhom: 'Other',
-      customLivingArrangement: 'Roommates',
       referralCode: 'LMS-APPLICATION-REFERRAL',
       fullName: 'Saved Student',
       email: 'saved@example.invalid',
@@ -6723,6 +7433,7 @@ test('college student login remains active without independent approval fields',
       _id: accountId, email, username, role: 'student', studentType: 'college',
       status: 'active', isActive: true, passwordHash,
     })),
+    stub(RefreshSession, 'create', async () => ({})),
   ]
   try {
     const response = await request('/auth/login', {
@@ -7396,7 +8107,9 @@ test('main admin creates college students in clg_students with their college ide
     assert.equal(result.student.studentType, 'college')
     assert.equal(result.student.collegeId, collegeId)
     assert.equal(String(savedStudent.collegeId), collegeId)
+    assert.equal(savedStudent.username, 'c-100')
     assert.equal(savedIdentity.accountCollection, 'clg_students')
+    assert.equal(savedIdentity.username, 'c-100')
     assert.equal(String(savedIdentity.accountId), String(savedStudent._id))
     assert.equal(CollegeStudent.collection.name, 'clg_students')
   } finally {
