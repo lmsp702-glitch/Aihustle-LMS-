@@ -33,6 +33,8 @@ const assignmentSubmissionSchema = new mongoose.Schema(
     fileData: { type: Buffer, required: true, select: false },
     submittedAt: { type: Date, required: true, default: Date.now },
     marksObtained: { type: Number, min: 0 },
+    status: { type: String, enum: ['submitted', 'graded', 'returned', 'pending', 'approved', 'rejected'], default: 'submitted' },
+    grade: { type: Number },
     evaluationStatus: {
       type: String,
       enum: ['pending', 'evaluated', 're_evaluation_required'],

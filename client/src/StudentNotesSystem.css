@@ -1,0 +1,982 @@
+/* ==========================================================================
+   aiHustle LMS - Student Notes System Styles
+   Warm cream surfaces, golden yellow & muted teal accents, compact cards
+   ========================================================================== */
+
+.student-notes-system {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* Header */
+.student-notes-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px 20px;
+  background: var(--student-paper, #ffffff);
+  border: 1px solid var(--student-line, #e8e6dc);
+  border-radius: 12px;
+}
+
+.student-notes-header__main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+}
+
+.student-notes-header__title {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 700;
+  color: var(--student-text, #26332f);
+  letter-spacing: -0.02em;
+}
+
+.student-notes-header__subtitle {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--student-muted, #66706b);
+}
+
+.student-notes-header__stats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.student-notes-stat-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  background: #f4f6f1;
+  border: 1px solid #dce4dc;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #2e4a3e;
+}
+
+.student-notes-stat-pill strong {
+  font-weight: 700;
+  color: #174235;
+}
+
+.student-notes-stat-pill--gold {
+  background: #fdf8eb;
+  border-color: #ebdcb9;
+  color: #7a5405;
+}
+
+.student-notes-stat-pill--gold strong {
+  color: #9c6c06;
+}
+
+.student-notes-header__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Buttons */
+.student-notes-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease-in-out;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.student-notes-btn--primary {
+  background: #d4a017;
+  color: #ffffff;
+  border-color: #c09012;
+}
+
+.student-notes-btn--primary:hover:not(:disabled) {
+  background: #be8e12;
+  border-color: #aa7f0f;
+}
+
+.student-notes-btn--secondary {
+  background: #e2f0ec;
+  color: #19564b;
+  border-color: #8cbdb3;
+}
+
+.student-notes-btn--secondary:hover:not(:disabled) {
+  background: #d4e8e3;
+  color: #114239;
+  border-color: #6daaa0;
+}
+
+.student-notes-btn--ghost {
+  background: transparent;
+  color: var(--student-muted, #66706b);
+  border-color: var(--student-line, #e8e6dc);
+}
+
+.student-notes-btn--ghost:hover:not(:disabled) {
+  background: #f0f2eb;
+  color: var(--student-text, #26332f);
+}
+
+.student-notes-btn--danger {
+  background: #fce8e6;
+  color: #a82315;
+  border-color: #f5b7b1;
+}
+
+.student-notes-btn--danger:hover:not(:disabled) {
+  background: #f9d6d2;
+  color: #88180c;
+}
+
+.student-notes-btn--tiny {
+  height: 26px;
+  padding: 0 8px;
+  font-size: 11px;
+  border-radius: 5px;
+}
+
+.student-notes-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Quick Bar for Video Player */
+.student-notes-quick-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  background: #f4f8f5;
+  border: 1px dashed #b8d5ca;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.student-notes-quick-bar__info {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #215143;
+}
+
+.student-notes-quick-bar__lesson-label {
+  color: #58796f;
+  font-size: 11px;
+}
+
+.student-notes-quick-bar__time {
+  padding: 2px 6px;
+  background: #e2f0ec;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #1b5e52;
+}
+
+.student-notes-quick-bar__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  background: #1b5e52;
+  color: #ffffff;
+  border: 0;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.student-notes-quick-bar__btn:hover {
+  background: #154b41;
+}
+
+/* Note Editor Panel */
+.student-notes-editor-panel {
+  background: var(--student-paper, #ffffff);
+  border: 1.5px solid #d4a017;
+  border-radius: 12px;
+  padding: 16px 20px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.05);
+  animation: slideDownNotes 0.2s ease-out;
+}
+
+@keyframes slideDownNotes {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.student-notes-editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--student-line, #e8e6dc);
+}
+
+.student-notes-editor-header h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--student-text, #26332f);
+}
+
+.student-notes-editor-header__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.student-notes-status {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 12px;
+}
+
+.student-notes-status.is-saving {
+  background: #fef8eb;
+  color: #a37207;
+}
+
+.student-notes-status.is-saved {
+  background: #e5f6ed;
+  color: #12683e;
+}
+
+.student-notes-status.is-unsaved {
+  background: #f4f6f1;
+  color: #606d67;
+}
+
+.student-notes-status.is-error {
+  background: #fdeeee;
+  color: #a82315;
+  border: 0;
+  cursor: pointer;
+}
+
+.student-notes-editor-close {
+  background: transparent;
+  border: 0;
+  color: var(--student-muted, #66706b);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.student-notes-editor-close:hover {
+  background: #f0f2eb;
+}
+
+.student-notes-editor-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.student-notes-editor-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.student-notes-editor-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.student-notes-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--student-muted, #55625c);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.student-notes-input,
+.student-notes-select {
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--student-line, #dce4dc);
+  border-radius: 7px;
+  background: var(--student-paper, #ffffff);
+  color: var(--student-text, #26332f);
+  font-size: 13px;
+  box-sizing: border-box;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.student-notes-input:focus,
+.student-notes-select:focus {
+  border-color: #1b5e52;
+  box-shadow: 0 0 0 2px rgba(27, 94, 82, 0.15);
+}
+
+.student-notes-timestamp-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.student-notes-timestamp-control input {
+  flex: 1;
+}
+
+/* Rich Text Toolbar */
+.student-notes-editor-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  background: #f8faf6;
+  border: 1px solid var(--student-line, #dce4dc);
+  border-radius: 7px;
+}
+
+.student-notes-tool-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  min-width: 28px;
+  padding: 0 6px;
+  background: #ffffff;
+  border: 1px solid #d4ddd4;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #2b3934;
+  cursor: pointer;
+  transition: all 0.1s ease;
+}
+
+.student-notes-tool-btn:hover {
+  background: #eef4ee;
+  border-color: #1b5e52;
+  color: #1b5e52;
+}
+
+.student-notes-tool-divider {
+  width: 1px;
+  height: 18px;
+  background: #dce4dc;
+  margin: 0 3px;
+}
+
+/* Rich Content Editable Area */
+.student-notes-editable {
+  min-height: 120px;
+  max-height: 380px;
+  overflow-y: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--student-line, #dce4dc);
+  border-radius: 7px;
+  background: var(--student-paper, #ffffff);
+  color: var(--student-text, #26332f);
+  font-size: 13px;
+  line-height: 1.55;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.student-notes-editable:focus {
+  border-color: #1b5e52;
+  box-shadow: 0 0 0 2px rgba(27, 94, 82, 0.15);
+}
+
+.student-notes-editable:empty:before {
+  content: attr(data-placeholder);
+  color: #8c9792;
+  font-style: italic;
+  pointer-events: none;
+}
+
+.student-notes-editable h3 {
+  font-size: 15px;
+  margin: 8px 0 4px;
+  color: #1b5e52;
+}
+
+.student-notes-editable ul,
+.student-notes-editable ol {
+  margin: 4px 0 4px 20px;
+  padding: 0;
+}
+
+.student-notes-editable a {
+  color: #1b5e52;
+  text-decoration: underline;
+}
+
+/* Footer / Pin & Actions */
+.student-notes-editor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--student-line, #e8e6dc);
+}
+
+.student-notes-checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--student-text, #26332f);
+  cursor: pointer;
+}
+
+.student-notes-editor-footer__buttons {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Controls: Search, Filters, Sort */
+.student-notes-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 16px;
+  background: var(--student-paper, #ffffff);
+  border: 1px solid var(--student-line, #e8e6dc);
+  border-radius: 10px;
+}
+
+.student-notes-search-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
+.student-notes-search-icon {
+  position: absolute;
+  left: 12px;
+  font-size: 13px;
+  pointer-events: none;
+  opacity: 0.6;
+}
+
+.student-notes-search-input {
+  width: 100%;
+  height: 36px;
+  padding: 0 32px 0 34px;
+  border: 1px solid var(--student-line, #dce4dc);
+  border-radius: 7px;
+  background: #fbfdf9;
+  font-size: 12px;
+  color: var(--student-text, #26332f);
+  outline: none;
+  box-sizing: border-box;
+}
+
+.student-notes-search-input:focus {
+  border-color: #1b5e52;
+  background: #ffffff;
+}
+
+.student-notes-search-clear {
+  position: absolute;
+  right: 10px;
+  background: transparent;
+  border: 0;
+  color: var(--student-muted, #66706b);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.student-notes-filters-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.student-notes-filter-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--student-muted, #55625c);
+  font-weight: 500;
+}
+
+.student-notes-filter-group--sort {
+  margin-left: auto;
+}
+
+.student-notes-select--sm {
+  height: 30px;
+  font-size: 11px;
+  padding: 0 8px;
+}
+
+.student-notes-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--student-line, #dce4dc);
+  border-radius: 15px;
+  background: #f6f8f4;
+  color: var(--student-text, #26332f);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.student-notes-chip:hover {
+  background: #edf3ec;
+  border-color: #8cbdb3;
+}
+
+.student-notes-chip.is-active {
+  background: #fdf6e2;
+  border-color: #dfa920;
+  color: #7a5405;
+}
+
+/* Notes Grid & Cards */
+.student-notes-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 14px;
+}
+
+.student-note-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  padding: 14px 16px;
+  background: var(--student-paper, #ffffff);
+  border: 1px solid var(--student-line, #e2e8df);
+  border-radius: 10px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.02);
+  transition: all 0.15s ease-in-out;
+}
+
+.student-note-card:hover {
+  border-color: #a6c9be;
+  box-shadow: 0 4px 12px rgba(27, 94, 82, 0.06);
+}
+
+.student-note-card.is-pinned {
+  border-color: #e5be59;
+  background: #fffefb;
+}
+
+.student-note-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.student-note-card__title-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.student-note-card__pinned-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #9c6c06;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.student-note-card__title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--student-text, #26332f);
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.student-note-card__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.student-note-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  font-size: 12px;
+  color: var(--student-muted, #66706b);
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.student-note-action-btn:hover {
+  background: #f0f4ee;
+  border-color: #cdd9cc;
+  color: #1b5e52;
+}
+
+.student-note-action-btn--delete:hover {
+  background: #fdeeee;
+  border-color: #f7baba;
+  color: #a82315;
+}
+
+.student-note-action-btn.is-pinned {
+  color: #b3820a;
+}
+
+/* Delete confirmation inline */
+.student-note-delete-confirm {
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  background: #fdf0ee;
+  border: 1px solid #f9cac5;
+  border-radius: 6px;
+  font-size: 11px;
+  color: #8c1e13;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.student-note-delete-confirm__actions {
+  display: inline-flex;
+  gap: 6px;
+}
+
+/* Card Metadata */
+.student-note-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 11px;
+}
+
+.student-note-card__lesson {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  background: #f2f6f1;
+  border: 1px solid #dbe4da;
+  border-radius: 4px;
+  color: #2e4d3f;
+  font-weight: 500;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.student-note-card__timestamp-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  background: #e2f0ec;
+  border: 1px solid #8cbdb3;
+  border-radius: 4px;
+  color: #19564b;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.student-note-card__timestamp-btn:hover {
+  background: #d4e8e3;
+  border-color: #6daaa0;
+  color: #114239;
+  transform: translateY(-1px);
+}
+
+.student-note-card__date {
+  color: #7b8580;
+  margin-left: auto;
+}
+
+/* Content Preview in Card */
+.student-note-card__content {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--student-text, #34423c);
+  max-height: 140px;
+  overflow: hidden;
+  position: relative;
+  word-break: break-word;
+}
+
+.student-note-card__content p {
+  margin: 0 0 4px;
+}
+
+.student-note-card__content h3 {
+  font-size: 13px;
+  margin: 4px 0 2px;
+  color: #1b5e52;
+}
+
+.student-note-card__content ul,
+.student-note-card__content ol {
+  margin: 2px 0 4px 18px;
+  padding: 0;
+}
+
+.student-note-card__content a {
+  color: #1b5e52;
+  text-decoration: underline;
+}
+
+.student-note-card__empty-text {
+  font-size: 12px;
+  color: #8c9792;
+  font-style: italic;
+  margin: 0;
+}
+
+/* Empty State */
+.student-notes-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 40px 20px;
+  background: var(--student-paper, #ffffff);
+  border: 1px dashed var(--student-line, #dce4dc);
+  border-radius: 12px;
+}
+
+.student-notes-empty__icon {
+  font-size: 36px;
+  margin-bottom: 12px;
+}
+
+.student-notes-empty h3 {
+  margin: 0 0 6px;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--student-text, #26332f);
+}
+
+.student-notes-empty p {
+  margin: 0 0 16px;
+  font-size: 13px;
+  color: var(--student-muted, #66706b);
+  max-width: 440px;
+}
+
+/* Alert notifications */
+.student-notes-alert {
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.student-notes-alert--success {
+  background: #e7f6ef;
+  border: 1px solid #a3dcbf;
+  color: #115933;
+}
+
+.student-notes-alert--error {
+  background: #fdeeee;
+  border: 1px solid #f5b7b1;
+  color: #a82315;
+}
+
+.student-notes-loading {
+  text-align: center;
+  padding: 30px;
+  color: var(--student-muted, #66706b);
+  font-size: 13px;
+  font-style: italic;
+}
+
+/* Tab Badge */
+.student-course-learning__tab-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: #1b5e52;
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 700;
+  margin-left: 5px;
+}
+
+/* Dark Mode Overrides */
+:root[data-theme='dark'] .student-notes-header,
+:root[data-theme='dark'] .student-notes-controls,
+:root[data-theme='dark'] .student-notes-empty,
+:root[data-theme='dark'] .student-note-card,
+:root[data-theme='dark'] .student-notes-editor-panel {
+  background: #1e2622 !important;
+  border-color: #2e3a35 !important;
+  color: #e5ece8 !important;
+}
+
+:root[data-theme='dark'] .student-notes-header__title,
+:root[data-theme='dark'] .student-note-card__title,
+:root[data-theme='dark'] .student-notes-editor-header h3,
+:root[data-theme='dark'] .student-notes-empty h3 {
+  color: #edf3f0 !important;
+}
+
+:root[data-theme='dark'] .student-notes-header__subtitle,
+:root[data-theme='dark'] .student-notes-empty p,
+:root[data-theme='dark'] .student-note-card__date {
+  color: #9cb0a6 !important;
+}
+
+:root[data-theme='dark'] .student-notes-input,
+:root[data-theme='dark'] .student-notes-select,
+:root[data-theme='dark'] .student-notes-editable {
+  background: #18201d !important;
+  border-color: #34443e !important;
+  color: #e5ece8 !important;
+}
+
+:root[data-theme='dark'] .student-notes-editor-toolbar {
+  background: #24302b !important;
+  border-color: #34443e !important;
+}
+
+:root[data-theme='dark'] .student-notes-tool-btn {
+  background: #1e2622 !important;
+  border-color: #3b4d46 !important;
+  color: #d1ded8 !important;
+}
+
+:root[data-theme='dark'] .student-notes-tool-btn:hover {
+  background: #2b3933 !important;
+  border-color: #6daaa0 !important;
+  color: #8cbdb3 !important;
+}
+
+:root[data-theme='dark'] .student-note-card.is-pinned {
+  border-color: #a8832a !important;
+  background: #232a24 !important;
+}
+
+:root[data-theme='dark'] .student-note-card__lesson {
+  background: #25332c !important;
+  border-color: #34443e !important;
+  color: #a4cebe !important;
+}
+
+:root[data-theme='dark'] .student-note-card__timestamp-btn {
+  background: #1e352d !important;
+  border-color: #3a6858 !important;
+  color: #8cbdb3 !important;
+}
+
+:root[data-theme='dark'] .student-note-card__content {
+  color: #cfded7 !important;
+}
+
+:root[data-theme='dark'] .student-notes-quick-bar {
+  background: #1f2924 !important;
+  border-color: #334e44 !important;
+}
+
+:root[data-theme='dark'] .student-notes-quick-bar__info {
+  color: #a6cebe !important;
+}
+
+:root[data-theme='dark'] .student-notes-chip {
+  background: #24302b !important;
+  border-color: #34443e !important;
+  color: #d1ded8 !important;
+}
+
+:root[data-theme='dark'] .student-notes-chip.is-active {
+  background: #39321c !important;
+  border-color: #9c6c06 !important;
+  color: #eac159 !important;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .student-notes-editor-grid {
+    grid-template-columns: 1fr;
+  }
+  .student-notes-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .student-notes-header__actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+  .student-notes-filters-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .student-notes-filter-group--sort {
+    margin-left: 0;
+  }
+  .student-notes-grid {
+    grid-template-columns: 1fr;
+  }
+}
+

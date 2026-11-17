@@ -68,6 +68,8 @@ export async function sendEmail({ to, subject, text, html }) {
   })
 }
 
+export const sendResendEmail = sendEmail
+
 export function logEmailDeliveryFailure({ event, accountId, error }) {
   console.error(JSON.stringify({
     event,
@@ -297,3 +299,11 @@ export async function sendSupportTicketComplaintEmail({ email, fullName, ticket 
     ].join('\n'),
   })
 }
+
+export function emailNotificationsConfigured() {
+  return Boolean(
+    config.resendApiKey ||
+    (config.smtpHost && config.smtpUser && config.smtpPassword)
+  )
+}
+

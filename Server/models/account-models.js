@@ -7,11 +7,12 @@ const accountFields = {
   passwordHash: { type: String, select: false },
   status: {
     type: String,
-    enum: ['active', 'pending', 'inactive', 'suspended', 'invitation_pending'],
+    enum: ['active', 'pending', 'inactive', 'suspended', 'invitation_pending', 'rejected', 'deleted'],
     default: 'active',
     lowercase: true,
   },
   isActive: { type: Boolean, default: true },
+  deletedAt: { type: Date, default: null },
   permissions: { type: [String], default: [] },
 }
 
@@ -24,6 +25,14 @@ function createAccountModel(modelName, collectionName, role, additionalFields = 
     },
     { autoCreate: false, autoIndex: false, timestamps: true, collection: collectionName },
   )
+
+  schema.pre('save', function syncActiveState() {
+    if (this.status) {
+      this.isActive = this.status === 'active'
+    } else {
+      this.status = this.isActive === false ? 'inactive' : 'active'
+    }
+  })
 
   return mongoose.models[modelName] || mongoose.model(modelName, schema, collectionName)
 }
@@ -49,6 +58,26 @@ const independentStudentFields = {
   rejectedAt: { type: Date },
   rejectedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin' },
   rejectionReason: { type: String, trim: true, maxlength: 1000 },
+  referredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Student', default: null },
+  referredByCode: { type: String, trim: true, uppercase: true, default: null },
+  referralRedeemedAt: { type: Date, default: null },
+  hearAboutUs: {
+    type: String,
+    enum: [
+      'College / University Referral',
+      'Friend / Student Referral',
+      'Social Media',
+      'Online Advertisement',
+      'Google / Search Engine',
+      'YouTube',
+      'College Event / Workshop',
+      'Other Website / Blog',
+      'Other',
+    ],
+    trim: true,
+  },
+  hearAboutUsOther: { type: String, trim: true, maxlength: 200, default: '' },
+  dailyLearningGoalMinutes: { type: Number, default: 60, min: 15, max: 480 },
 }
 
 const collegeStudentFields = {
@@ -59,6 +88,52 @@ const collegeStudentFields = {
   batch: { type: String, trim: true, maxlength: 80 },
   twoFactorEnabled: { type: Boolean, default: false },
   twoFactorEnabledAt: { type: Date },
+  phone: { type: String, trim: true, maxlength: 40, default: '' },
+  dateOfBirth: { type: Date },
+  gender: { type: String, trim: true, maxlength: 20, default: '' },
+  bloodGroup: { type: String, trim: true, maxlength: 10, default: '' },
+  address: { type: String, trim: true, maxlength: 300, default: '' },
+  guardianName: { type: String, trim: true, maxlength: 120, default: '' },
+  guardianPhone: { type: String, trim: true, maxlength: 40, default: '' },
+  semester: { type: String, trim: true, maxlength: 50, default: '' },
+  cgpa: { type: Number, default: 0, min: 0, max: 10 },
+  academicStanding: {
+    type: String,
+    enum: ['good', 'probation', 'at_risk', 'excellent'],
+    default: 'good',
+  },
+  skills: { type: [String], default: [] },
+  resumeUrl: { type: String, trim: true, maxlength: 500, default: '' },
+  placementStatus: {
+    type: String,
+    enum: ['not_eligible', 'seeking', 'interviewing', 'placed', 'opted_out'],
+    default: 'seeking',
+  },
+  placedCompany: { type: String, trim: true, maxlength: 150, default: '' },
+  placementPackage: { type: Number, default: 0 },
+  achievements: {
+    type: [
+      {
+        title: { type: String, trim: true, maxlength: 150 },
+        description: { type: String, trim: true, maxlength: 500 },
+        date: { type: Date, default: Date.now },
+        category: { type: String, trim: true, maxlength: 50, default: 'Academic' },
+      },
+    ],
+    default: [],
+  },
+  documents: {
+    type: [
+      {
+        name: { type: String, trim: true, maxlength: 150 },
+        fileUrl: { type: String, trim: true, maxlength: 500 },
+        docType: { type: String, trim: true, maxlength: 50, default: 'General' },
+        uploadedAt: { type: Date, default: Date.now },
+      },
+    ],
+    default: [],
+  },
+  dailyLearningGoalMinutes: { type: Number, default: 60, min: 15, max: 480 },
 }
 
 const collegeAdminFields = {

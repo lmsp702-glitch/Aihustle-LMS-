@@ -1,11 +1,31 @@
 import bcrypt from 'bcryptjs'
-import { createHmac, randomInt, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, randomInt, timingSafeEqual } from 'node:crypto'
 import { Router } from 'express'
 import mongoose from 'mongoose'
 import AccountIdentity from '../models/AccountIdentity.js'
 import SupportTicket from '../models/SupportTicket.js'
-import { accountModelsByCollection, roleForAccountCollection } from '../models/account-models.js'
+import {
+  accountModelsByCollection,
+  roleForAccountCollection,
+  Student,
+  CollegeStudent,
+} from '../models/account-models.js'
 import College from '../models/College.js'
+import Enrollment from '../models/Enrollment.js'
+import Progress from '../models/Progress.js'
+import LearningActivity from '../models/LearningActivity.js'
+import QuizAttempt from '../models/QuizAttempt.js'
+import QuizAttemptState from '../models/QuizAttemptState.js'
+import AssignmentSubmission from '../models/AssignmentSubmission.js'
+import VideoAttentionResponse from '../models/VideoAttentionResponse.js'
+import Notification from '../models/Notification.js'
+import NotificationPreference, { DEFAULT_NOTIFICATION_PREFERENCES } from '../models/NotificationPreference.js'
+import RefreshSession from '../models/RefreshSession.js'
+import ReferralCode from '../models/ReferralCode.js'
+import Certificate from '../models/Certificate.js'
+import StudentNote from '../models/StudentNote.js'
+import { sanitizePreferences } from '../utils/notification-service.js'
+import { clearRefreshCookie } from './auth.js'
 import { authenticate } from '../middleware/auth.js'
 import { config } from '../config/env.js'
 import { findTakenEmails, findTakenUsernames } from '../utils/account-identity-availability.js'
@@ -709,5 +729,313 @@ router.get('/data-export', async (req, res, next) => {
     return next(error)
   }
 })
+
+const allowedPreferenceKeys = [
+  'courseAnnouncements',
+  'newCourseUpdates',
+  'assignmentDeadlines',
+  'quizReminders',
+  'referralNotifications',
+  'emailNotifications',
+]
+
+router.get('/notifications', async (req, res, next) => {
+  try {
+    if (req.auth.role !== 'student') {
+      return res.status(403).json({ message: 'Notification preferences are only available for student accounts.' })
+    }
+
+    const doc = await NotificationPreference.findOne({
+      userId: req.auth.id,
+      accountCollection: req.auth.accountCollection,
+    }).lean()
+
+    return res.json({
+      preferences: sanitizePreferences(doc),
+    })
+  } catch (error) {
+    return next(error)
+  }
+})
+
+async function handleUpdateNotificationPreferences(req, res, next) {
+  try {
+    if (req.auth.role !== 'student') {
+      return res.status(403).json({ message: 'Notification preferences are only available for student accounts.' })
+    }
+
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+      return res.status(400).json({ message: 'Invalid notification preferences payload.' })
+    }
+
+    const updates = {}
+    for (const key of allowedPreferenceKeys) {
+      if (key in req.body) {
+        if (typeof req.body[key] !== 'boolean') {
+          return res.status(400).json({ message: `Preference ${key} must be a boolean.` })
+        }
+        updates[key] = req.body[key]
+      }
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ message: 'No valid notification preferences were provided.' })
+    }
+
+    const studentType = req.auth.user?.studentType || (req.auth.accountCollection === 'clg_students' ? 'college' : 'independent')
+
+    const updated = await NotificationPreference.findOneAndUpdate(
+      { userId: req.auth.id, accountCollection: req.auth.accountCollection },
+      {
+        $set: {
+          userId: req.auth.id,
+          accountCollection: req.auth.accountCollection,
+          studentType,
+          ...updates,
+        },
+      },
+      { new: true, upsert: true, setDefaultsOnInsert: true },
+    ).lean()
+
+    return res.json({
+      message: 'Notification preferences updated.',
+      preferences: sanitizePreferences(updated),
+    })
+  } catch (error) {
+    return next(error)
+  }
+}
+
+router.patch('/notifications', handleUpdateNotificationPreferences)
+router.put('/notifications', handleUpdateNotificationPreferences)
+
+async function handleDeleteAccount(req, res, next) {
+  try {
+    // 1. Guard against College-managed accounts
+    if (
+      req.auth.accountCollection === 'clg_students' ||
+      req.auth.user?.studentType === 'college'
+    ) {
+      return res.status(403).json({
+        message: 'College-managed accounts cannot be deleted directly. Please contact your college administrator to request account deactivation or removal.',
+      })
+    }
+
+    // 2. Only independent students can self-delete via this endpoint
+    if (req.auth.role !== 'student' || req.auth.accountCollection !== 'students') {
+      return res.status(403).json({
+        message: 'Account deletion is only available for independent student accounts.',
+      })
+    }
+
+    const { confirmation, password, currentPassword } = req.body ?? {}
+
+    // 3. Validate confirmation text
+    if (typeof confirmation !== 'string' || confirmation.trim().toUpperCase() !== 'DELETE') {
+      return res.status(400).json({
+        message: 'Please type DELETE to confirm account deletion.',
+      })
+    }
+
+    // 4. Retrieve student with passwordHash
+    const AccountModel = accountModelsByCollection[req.auth.accountCollection]
+    if (!AccountModel) {
+      return res.status(404).json({ message: 'Account could not be found.' })
+    }
+
+    const user = await AccountModel.findById(req.auth.id).select('+passwordHash')
+    if (!user) {
+      return res.status(404).json({ message: 'Account could not be found.' })
+    }
+
+    // If already deleted
+    if (user.status === 'deleted') {
+      return res.status(400).json({ message: 'This account has already been deleted.' })
+    }
+
+    // 5. Password verification (if account has a password)
+    if (user.passwordHash) {
+      const submittedPassword = password || currentPassword
+      if (typeof submittedPassword !== 'string' || !submittedPassword) {
+        return res.status(400).json({
+          message: 'Please enter your current password to confirm account deletion.',
+        })
+      }
+      const isPasswordValid = await bcrypt.compare(submittedPassword, user.passwordHash)
+      if (!isPasswordValid) {
+        return res.status(401).json({
+          message: 'The password you entered is incorrect.',
+        })
+      }
+    }
+
+    const studentId = user._id
+    const originalEmail = String(user.email || '').toLowerCase().trim()
+    const emailHash = createHash('sha256').update(originalEmail).digest('hex')
+    const deletedAt = new Date()
+    const anonymizedEmail = `deleted_${studentId}@deleted.aiHustle.internal`
+    const anonymizedUsername = `deleted_${studentId}`
+
+    // 6. Execute atomic deletion / anonymization with transaction (fallback if standalone)
+    let session = null
+    try {
+      session = await mongoose.startSession()
+    } catch {
+      session = null
+    }
+
+    const performDeletion = async (sess) => {
+      const opts = sess ? { session: sess } : {}
+
+      // A. Anonymize Student record
+      await AccountModel.updateOne(
+        { _id: studentId },
+        {
+          $set: {
+            fullName: 'Deleted Student',
+            email: anonymizedEmail,
+            username: anonymizedUsername,
+            status: 'deleted',
+            isActive: false,
+            deletedAt,
+            registrationDetails: {},
+            studentId: '',
+            hearAboutUsOther: '',
+            twoFactorEnabled: false,
+            approvalStatus: 'rejected',
+          },
+          $unset: {
+            passwordHash: 1,
+            twoFactorSecret: 1,
+            phone: 1,
+            dateOfBirth: 1,
+            gender: 1,
+            address: 1,
+          },
+        },
+        opts,
+      )
+
+      // B. Delete AccountIdentity to release username and email
+      await AccountIdentity.deleteOne(
+        { accountCollection: 'students', accountId: studentId },
+        opts,
+      )
+
+      // C. Invalidate all RefreshSessions
+      await RefreshSession.deleteMany(
+        { userId: studentId },
+        opts,
+      )
+
+      // D. Cancel Enrollments
+      await Enrollment.updateMany(
+        { userId: studentId, status: { $ne: 'cancelled' } },
+        { $set: { status: 'cancelled' } },
+        opts,
+      )
+
+      // E. Delete personal learning progress, activities, quiz attempts, submissions, and notifications
+      await Promise.all([
+        Progress.deleteMany({ userId: studentId }, opts),
+        LearningActivity.deleteMany({ studentId }, opts),
+        QuizAttempt.deleteMany({ userId: studentId }, opts),
+        QuizAttemptState.deleteMany({ userId: studentId }, opts),
+        AssignmentSubmission.deleteMany({ userId: studentId }, opts),
+        VideoAttentionResponse.deleteMany({ userId: studentId }, opts),
+        Notification.deleteMany({ recipientId: studentId }, opts),
+        NotificationPreference.deleteMany({ userId: studentId }, opts),
+        (mongoose.connection.readyState === 0 && StudentNote.deleteMany === mongoose.Model.deleteMany
+          ? Promise.resolve()
+          : StudentNote.deleteMany({ studentId }, opts).catch(() => {})),
+      ])
+
+      // F. Anonymize Support Tickets
+      await SupportTicket.updateMany(
+        { userId: studentId },
+        {
+          $set: {
+            requesterName: 'Deleted Student',
+            requesterEmail: 'deleted@deleted.local',
+          },
+        },
+        opts,
+      )
+
+      // G. Scenario A: Referrals where this user was the REFERRED student
+      await ReferralCode.updateMany(
+        {
+          $or: [
+            { usedBy: studentId },
+            ...(user.referredByCode ? [{ code: user.referredByCode }] : []),
+          ],
+        },
+        {
+          $set: {
+            registrationStatus: 'account_deleted',
+            rewardStatus: 'cancelled',
+            referredEmailHash: emailHash,
+            referredUserAnonymized: true,
+          },
+        },
+        opts,
+      )
+
+      // H. Scenario B: Referrals where this user was the REFERRER
+      await ReferralCode.updateMany(
+        { generatedBy: studentId },
+        {
+          $set: {
+            isDeactivated: true,
+            status: 'expired',
+          },
+        },
+        opts,
+      )
+    }
+
+    if (session) {
+      try {
+        await session.withTransaction(async () => {
+          await performDeletion(session)
+        })
+      } catch (txErr) {
+        const isTxUnsupported =
+          txErr?.code === 20 ||
+          txErr?.codeName === 'IllegalOperation' ||
+          txErr?.message?.includes('Transaction numbers are only allowed') ||
+          txErr?.message?.includes('transactions are not supported') ||
+          txErr?.message?.includes('standalone') ||
+          txErr?.message?.includes('replica set')
+        if (isTxUnsupported) {
+          await performDeletion(null)
+        } else {
+          throw txErr
+        }
+      } finally {
+        await session.endSession().catch(() => {})
+      }
+    } else {
+      await performDeletion(null)
+    }
+
+    // 7. Clear refresh session cookie
+    try {
+      clearRefreshCookie(res)
+    } catch {
+      res.clearCookie('lms_refresh', { path: '/api/auth' })
+    }
+
+    return res.json({
+      success: true,
+      message: 'Your account has been deleted and personal information removed in accordance with our data policy.',
+    })
+  } catch (error) {
+    return next(error)
+  }
+}
+
+router.delete('/account', handleDeleteAccount)
+router.post('/delete-account', handleDeleteAccount)
 
 export default router

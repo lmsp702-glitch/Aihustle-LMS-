@@ -65,15 +65,18 @@ function formatUploadLimit(maxBytes) {
 }
 
 function handleUploadError(upload, maxBytes, fileLabel) {
-  return (req, res, next) => upload(req, res, (error) => {
-    if (!error) return next()
-    if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
-      return res.status(413).json({ message: `The selected ${fileLabel} exceeds the ${formatUploadLimit(maxBytes)} upload limit.` })
-    }
-    if (error.statusCode === 415) return res.status(415).json({ message: error.message })
-    if (error instanceof multer.MulterError) return res.status(400).json({ message: 'The upload request is invalid.' })
-    return next(error)
-  })
+  return (req, res, next) => {
+    if (req.file) return next()
+    return upload(req, res, (error) => {
+      if (!error) return next()
+      if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ message: `The selected ${fileLabel} exceeds the ${formatUploadLimit(maxBytes)} upload limit.` })
+      }
+      if (error.statusCode === 415) return res.status(415).json({ message: error.message })
+      if (error instanceof multer.MulterError) return res.status(400).json({ message: 'The upload request is invalid.' })
+      return next(error)
+    })
+  }
 }
 
 export const receiveCourseVideo = handleUploadError(

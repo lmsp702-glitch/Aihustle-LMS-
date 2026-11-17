@@ -37,6 +37,7 @@ export const config = Object.freeze({
   courseResourceMaxBytes: positiveSafeInteger(process.env.COURSE_RESOURCE_MAX_BYTES, defaultCourseResourceMaxBytes),
   nodeEnv: process.env.NODE_ENV,
   port: process.env.PORT || 5000,
+  dnsServers: process.env.DNS_SERVERS || process.env.MONGODB_DNS_SERVERS,
 })
 
 export function requireJwtSecret() {

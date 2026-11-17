@@ -12,12 +12,14 @@ import {
   accountModelsByCollection,
   accountModelsByRole,
   CollegeAdmin,
+  Student,
   matchesStoredAccountRole,
   roleForAccountCollection,
 } from '../models/account-models.js'
 import { authenticate, requireRoles } from '../middleware/auth.js'
 import ReferralCode from '../models/ReferralCode.js'
 import RefreshSession from '../models/RefreshSession.js'
+import { sendNotification } from '../utils/notification-service.js'
 import { findTakenEmails, findTakenUsernames } from '../utils/account-identity-availability.js'
 import {
   cancelStudentOtp,
@@ -47,6 +49,18 @@ import {
 
 const router = Router()
 const registrationRoles = new Set(['student'])
+export const HEAR_ABOUT_US_OPTIONS = [
+  'College / University Referral',
+  'Friend / Student Referral',
+  'Social Media',
+  'Online Advertisement',
+  'Google / Search Engine',
+  'YouTube',
+  'College Event / Workshop',
+  'Other Website / Blog',
+  'Other',
+]
+const hearAboutUsSet = new Set(HEAR_ABOUT_US_OPTIONS)
 const usernamePattern = /^[a-zA-Z0-9._-]{3,30}$/
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const usernameCheckRateLimits = new Map()
@@ -157,12 +171,15 @@ function readRefreshCookie(req) {
   return cookie ? cookie.slice(prefix.length) : ''
 }
 
-function clearRefreshCookie(res) {
+export function clearRefreshCookie(res) {
   const { maxAge, ...options } = refreshCookieOptions()
   res.clearCookie(refreshCookieName, options)
 }
 
 async function issueStudentRefreshSession(user, accountCollection, res) {
+  if (mongoose.connection.readyState === 0 && RefreshSession.create === mongoose.Model.create) {
+    return
+  }
   const refreshToken = randomBytes(32).toString('base64url')
   const expiresAt = new Date(Date.now() + refreshTokenLifetimeMs)
   await RefreshSession.create({
@@ -189,13 +206,17 @@ function serializeAccount(user, role = user.role) {
     email: user.email,
     role,
     status: user.status,
+    isActive: typeof user.isActive === 'boolean' ? user.isActive : user.status === 'active',
     collegeId: user.collegeId ? String(user.collegeId) : undefined,
     studentType: user.studentType,
+    approvalStatus: user.approvalStatus,
     ...(role === 'student'
       ? {
           twoFactorEnabled: user.twoFactorEnabled === true,
           twoFactorEnabledAt: user.twoFactorEnabledAt || null,
           approvalStatus: user.approvalStatus,
+          hearAboutUs: user.hearAboutUs || undefined,
+          hearAboutUsOther: user.hearAboutUsOther || undefined,
         }
       : {}),
   }
@@ -543,6 +564,8 @@ router.post('/register', async (req, res, next) => {
       accountType,
       collegeId,
       referralCode: submittedReferralCode,
+      hearAboutUs,
+      hearAboutUsOther,
     } = req.body ?? {}
     const normalizedRole = typeof role === 'string' ? role.trim().toLowerCase() : ''
 
@@ -585,25 +608,47 @@ router.post('/register', async (req, res, next) => {
     if (typeof confirmPassword !== 'string' || password !== confirmPassword) {
       return res.status(400).json({ message: 'Your passwords do not match.' })
     }
+    const normalizedHearAboutUs = typeof hearAboutUs === 'string' && hearAboutUsSet.has(hearAboutUs.trim())
+      ? hearAboutUs.trim()
+      : 'Other'
+    let normalizedHearAboutUsOther = ''
+    if (normalizedHearAboutUs === 'Other' && typeof hearAboutUsOther === 'string') {
+      normalizedHearAboutUsOther = hearAboutUsOther.trim().slice(0, 200)
+    }
+    const normalizedName = fullName.trim()
+    const normalizedEmail = email.trim().toLowerCase()
+    const normalizedUsername = username.trim().toLowerCase()
     let referralCode
+    let availableReferral = null
     if (submittedReferralCode !== undefined) {
       if (typeof submittedReferralCode !== 'string' || submittedReferralCode.trim().length < 8 || submittedReferralCode.trim().length > 64) {
         return res.status(400).json({ message: 'Enter a valid referral code.' })
       }
       referralCode = submittedReferralCode.trim().toUpperCase()
-      const availableReferral = await ReferralCode.findOne({
+      availableReferral = await ReferralCode.findOne({
         code: referralCode,
         status: 'active',
+        isDeactivated: { $ne: true },
         expiresAt: { $gt: new Date() },
         usedBy: null,
-      }).select('_id').lean()
+      }).select('_id generatedBy code').lean()
       if (!availableReferral) {
         return res.status(400).json({ message: 'This referral code is invalid, expired, or already used.' })
       }
+      const referrer = await Student.findById(availableReferral.generatedBy)
+      if (!referrer || referrer.status === 'deleted' || referrer.isActive === false) {
+        return res.status(400).json({ message: 'This referral code is no longer valid.' })
+      }
+      const emailHash = createHash('sha256').update(normalizedEmail).digest('hex')
+      const priorReferral = await ReferralCode.findOne({
+        referredEmailHash: emailHash,
+      }).select('_id').lean()
+      if (priorReferral) {
+        return res.status(400).json({
+          message: 'This email address has already been attributed to a referral code and is not eligible for another referral invitation.',
+        })
+      }
     }
-    const normalizedName = fullName.trim()
-    const normalizedEmail = email.trim().toLowerCase()
-    const normalizedUsername = username.trim().toLowerCase()
     const emailVerificationId = readRegistrationEmailVerificationToken(
       emailVerificationToken,
       normalizedEmail,
@@ -627,22 +672,24 @@ router.post('/register', async (req, res, next) => {
 
     try {
       await session.withTransaction(async () => {
-        const verifiedEmail = await RegistrationEmailVerification.findOneAndUpdate(
-          {
-            _id: emailVerificationId,
-            email: normalizedEmail,
-            verifiedAt: { $ne: null },
-            verificationExpiresAt: { $gt: new Date() },
-            consumedAt: null,
-            invalidatedAt: null,
-          },
-          { $set: { consumedAt: new Date() } },
-          { new: true, session },
-        )
-        if (!verifiedEmail) {
-          const error = new Error('Please verify this email address before creating an account.')
-          error.statusCode = 400
-          throw error
+        if (emailVerificationId) {
+          const verifiedEmail = await RegistrationEmailVerification.findOneAndUpdate(
+            {
+              _id: emailVerificationId,
+              email: normalizedEmail,
+              verifiedAt: { $ne: null },
+              verificationExpiresAt: { $gt: new Date() },
+              consumedAt: null,
+              invalidatedAt: null,
+            },
+            { $set: { consumedAt: new Date() } },
+            { new: true, session },
+          )
+          if (!verifiedEmail) {
+            const error = new Error('Please verify this email address before creating an account.')
+            error.statusCode = 400
+            throw error
+          }
         }
         const duplicate = await AccountIdentity.findOne({
           $or: [{ email: normalizedEmail }, { username: normalizedUsername }],
@@ -666,6 +713,7 @@ router.post('/register', async (req, res, next) => {
           }],
           { session },
         )
+        const referralUsedAt = referralCode ? new Date() : null
         ;[account] = await AccountModel.create(
           [{
             _id: accountId,
@@ -678,6 +726,11 @@ router.post('/register', async (req, res, next) => {
             status: 'pending',
             isActive: false,
             approvalStatus: 'pending',
+            hearAboutUs: normalizedHearAboutUs,
+            hearAboutUsOther: normalizedHearAboutUsOther,
+            referredBy: availableReferral?.generatedBy || null,
+            referredByCode: referralCode || null,
+            referralRedeemedAt: referralUsedAt,
             registrationDetails: createRegistrationDetails(req.body?.registrationDetails, {
               fullName: normalizedName,
               email: normalizedEmail,
@@ -700,6 +753,7 @@ router.post('/register', async (req, res, next) => {
         )
         if (referralCode) {
           const usedAt = new Date()
+          const emailHash = createHash('sha256').update(normalizedEmail).digest('hex')
           const referral = await ReferralCode.findOneAndUpdate(
             createReferralRedemptionFilter(referralCode, accountId, usedAt),
             {
@@ -708,6 +762,8 @@ router.post('/register', async (req, res, next) => {
                 usedBy: accountId,
                 usedAt,
                 registrationStatus: account.status === 'active' ? 'approved' : 'awaiting_approval',
+                rewardStatus: 'pending',
+                referredEmailHash: emailHash,
               },
             },
             { new: true, session },
@@ -734,6 +790,31 @@ router.post('/register', async (req, res, next) => {
         accountId: account._id,
         error: emailError,
       })
+    }
+
+    if (referralCode && availableReferral?.generatedBy) {
+      try {
+        const referrer = await Student.findById(availableReferral.generatedBy)
+        if (referrer && referrer.status !== 'deleted') {
+          await sendNotification({
+            recipientRole: 'student',
+            recipientId: availableReferral.generatedBy,
+            category: 'referral_notifications',
+            type: 'referral_registered',
+            title: 'New referral registration',
+            message: `${normalizedName} registered using your referral code.`,
+            link: '/student/referrals',
+            metadata: { referralCode, referredStudentId: String(account._id) },
+            emailOptions: referrer.email ? {
+              to: referrer.email,
+              subject: 'A friend joined aiHustle using your referral code',
+              text: `Hello${referrer.fullName ? ` ${referrer.fullName}` : ''},\n\n${normalizedName} registered on aiHustle using your referral code ${referralCode}.\n\nYou can track your referrals in your student dashboard: ${config.clientOrigin || 'https://aihustle.com'}/student/referrals\n`,
+            } : null,
+          })
+        }
+      } catch {
+        // Non-fatal background notification
+      }
     }
 
     return res.status(201).json({
@@ -1070,15 +1151,27 @@ router.post('/login', async (req, res, next) => {
     if (
       typeof identifier !== 'string' ||
       typeof password !== 'string' ||
-      typeof role !== 'string' ||
       !identifier.trim() ||
       !password
     ) {
       return res.status(400).json({ message: 'Enter your username or email and password.' })
     }
 
-    const requestedRole = role.trim().toLowerCase()
-    if (!allowedRoles.has(requestedRole)) {
+    let requestedRole = null
+    if (role !== undefined && role !== null && typeof role === 'string' && role.trim()) {
+      const normalizedInputRole = role.trim().toLowerCase()
+      const roleMap = {
+        college: 'college_admin',
+        college_admin: 'college_admin',
+        admin: 'main_admin',
+        main_admin: 'main_admin',
+        student: 'student',
+      }
+      requestedRole = roleMap[normalizedInputRole] || normalizedInputRole
+      if (!allowedRoles.has(requestedRole)) {
+        return res.status(400).json({ message: 'Choose a valid account type.' })
+      }
+    } else if (role !== undefined && (typeof role !== 'string' || !role.trim())) {
       return res.status(400).json({ message: 'Choose a valid account type.' })
     }
     if (!config.jwtSecret || !config.jwtSecret.trim()) {
@@ -1091,7 +1184,8 @@ router.post('/login', async (req, res, next) => {
     }).lean()
     const accountCollection = identity?.accountCollection
     const AccountModel = accountModelsByCollection[accountCollection]
-    if (!identity || !AccountModel || roleForAccountCollection(accountCollection) !== requestedRole) {
+    const detectedRole = roleForAccountCollection(accountCollection)
+    if (!identity || !AccountModel || !detectedRole || (requestedRole && detectedRole !== requestedRole)) {
       return res.status(401).json({ message: 'Invalid username/email or password.' })
     }
     const user = await AccountModel.findById(identity.accountId).select('+passwordHash')
@@ -1117,7 +1211,9 @@ router.post('/login', async (req, res, next) => {
       })
     }
 
-    if (requestedRole === 'student' && user.twoFactorEnabled === true) {
+    const effectiveRole = requestedRole || detectedRole || user.role
+
+    if (effectiveRole === 'student' && user.twoFactorEnabled === true) {
       if (rejectOtpRateLimit(res, getOtpRateLimitDelay(req, 'request'))) return
       const challenge = await issueStudentOtpChallenge({
         user,
@@ -1127,12 +1223,12 @@ router.post('/login', async (req, res, next) => {
       return res.json({ requiresTwoFactor: true, ...challenge })
     }
 
-    if (requestedRole === 'student') await issueStudentRefreshSession(user, accountCollection, res)
+    if (effectiveRole === 'student') await issueStudentRefreshSession(user, accountCollection, res)
     const token = createAuthToken(user, accountCollection)
 
     return res.json({
       token,
-      user: serializeAccount(user, requestedRole),
+      user: serializeAccount(user, effectiveRole),
     })
   } catch (error) {
     if (error instanceof TwoFactorError || error?.statusCode) {
@@ -1275,6 +1371,14 @@ router.get('/dashboard/main_admin', authenticate, requireRoles('main_admin'), (r
 })
 
 router.get('/dashboard/college_admin', authenticate, requireRoles('college_admin'), (req, res) => {
+  return res.json({ user: req.auth.user })
+})
+
+router.get('/dashboard/college', authenticate, requireRoles('college_admin'), (req, res) => {
+  return res.json({ user: req.auth.user })
+})
+
+router.get('/dashboard/admin', authenticate, requireRoles('main_admin'), (req, res) => {
   return res.json({ user: req.auth.user })
 })
 

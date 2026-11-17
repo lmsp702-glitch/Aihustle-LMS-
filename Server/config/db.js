@@ -1,5 +1,6 @@
 import mongoose from 'mongoose'
 import { config } from './env.js'
+import { ensureMongoDnsResolution } from './dns.js'
 import { Admin, CollegeAdmin, CollegeStudent, Student } from '../models/account-models.js'
 import AccountIdentity from '../models/AccountIdentity.js'
 import Course from '../models/Course.js'
@@ -20,6 +21,21 @@ import RegistrationEmailVerification from '../models/RegistrationEmailVerificati
 import ReferralCode from '../models/ReferralCode.js'
 import ReferralCodeDailyLimit from '../models/ReferralCodeDailyLimit.js'
 import RefreshSession from '../models/RefreshSession.js'
+import Notification from '../models/Notification.js'
+import NotificationPreference from '../models/NotificationPreference.js'
+import AcademicEvent from '../models/AcademicEvent.js'
+import Attendance from '../models/Attendance.js'
+import Batch from '../models/Batch.js'
+import CollegeDocument from '../models/CollegeDocument.js'
+import Department from '../models/Department.js'
+import Examination from '../models/Examination.js'
+import Faculty from '../models/Faculty.js'
+import LearningActivity from '../models/LearningActivity.js'
+import PlacementDrive from '../models/PlacementDrive.js'
+import Progress from '../models/Progress.js'
+import Semester from '../models/Semester.js'
+import StudentNote from '../models/StudentNote.js'
+import Resource from '../models/Resource.js'
 
 const requiredModels = [
   Admin,
@@ -45,6 +61,21 @@ const requiredModels = [
   ReferralCode,
   ReferralCodeDailyLimit,
   RefreshSession,
+  Notification,
+  NotificationPreference,
+  AcademicEvent,
+  Attendance,
+  Batch,
+  CollegeDocument,
+  Department,
+  Examination,
+  Faculty,
+  LearningActivity,
+  PlacementDrive,
+  Progress,
+  Semester,
+  StudentNote,
+  Resource,
 ]
 
 async function runDatabaseOperation(operation, collection, callback) {
@@ -65,6 +96,8 @@ export async function connectToDatabase() {
   if (!config.mongoUri) {
     throw new Error('MONGO_URI is not set.')
   }
+
+  await ensureMongoDnsResolution(config.mongoUri)
 
   await runDatabaseOperation(
     'connect',

@@ -152,9 +152,121 @@
   flex: 1 1 220px;
 }
 
+.admin-support__badges-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.admin-support__quick-actions-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: #faf8f2;
+  border: 1px solid #dedace;
+  border-radius: 9px;
+  flex-wrap: wrap;
+}
+
+.admin-support__quick-actions-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: #626d67;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.admin-support__quick-btn {
+  padding: 6px 12px;
+  border-radius: 7px;
+  font-size: 11.5px;
+  font-weight: 650;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: all 160ms ease;
+}
+
+.admin-support__quick-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.admin-support__quick-btn.is-teal {
+  background: #e6f4f1;
+  border-color: #b2e0d7;
+  color: #20675c;
+}
+.admin-support__quick-btn.is-teal:hover:not(:disabled) {
+  background: #d4ece8;
+  border-color: #92d1c5;
+}
+
+.admin-support__quick-btn.is-amber {
+  background: #fef3e7;
+  border-color: #f7d8b5;
+  color: #9c5b1b;
+}
+.admin-support__quick-btn.is-amber:hover:not(:disabled) {
+  background: #fcebd6;
+  border-color: #f0c598;
+}
+
+.admin-support__quick-btn.is-green {
+  background: #eaf5ec;
+  border-color: #bde3c3;
+  color: #276e39;
+}
+.admin-support__quick-btn.is-green:hover:not(:disabled) {
+  background: #daf0dd;
+  border-color: #a4d6ac;
+}
+
+.admin-support__quick-btn.is-slate {
+  background: #edf0ee;
+  border-color: #cfd6d1;
+  color: #4a5750;
+}
+.admin-support__quick-btn.is-slate:hover:not(:disabled) {
+  background: #dfe5e1;
+  border-color: #b8c2bc;
+}
+
 .admin-support.is-dark {
   background: #171d1c;
   color: #edf0e9;
+}
+
+.admin-support.is-dark .admin-support__quick-actions-bar {
+  background: #252d29;
+  border-color: #38423d;
+}
+
+.admin-support.is-dark .admin-support__quick-actions-label {
+  color: #a0aca4;
+}
+
+.admin-support.is-dark .admin-support__quick-btn.is-teal {
+  background: #1e332e;
+  border-color: #2e544a;
+  color: #79ded0;
+}
+.admin-support.is-dark .admin-support__quick-btn.is-amber {
+  background: #382c1b;
+  border-color: #594628;
+  color: #f3be7a;
+}
+.admin-support.is-dark .admin-support__quick-btn.is-green {
+  background: #1c3322;
+  border-color: #2f5939;
+  color: #8edaa2;
+}
+.admin-support.is-dark .admin-support__quick-btn.is-slate {
+  background: #2a332f;
+  border-color: #3f4d47;
+  color: #d1ded8;
 }
 
 .admin-support.is-dark .admin-support__topbar {

@@ -18,6 +18,7 @@ const enrollmentSchema = new mongoose.Schema(
       default: 'active',
       required: true,
     },
+    completedAt: { type: Date },
     completedLessonIds: {
       type: [{ type: mongoose.Schema.Types.ObjectId }],
       default: [],

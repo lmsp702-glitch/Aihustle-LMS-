@@ -76,7 +76,9 @@ textarea:focus-visible {
   color: var(--theme-ink);
 }
 
-:root[data-theme='dark'] .student-dashboard {
+:root[data-theme='dark'] .student-dashboard,
+.student-dashboard.is-dark,
+.student-dashboard[data-theme='dark'] {
   --student-ink: var(--theme-ink);
   --student-muted: var(--theme-muted);
   --student-soft: #a4afa5;
@@ -118,6 +120,7 @@ textarea:focus-visible {
 :root[data-theme='dark'] .student-sidebar__identity small,
 :root[data-theme='dark'] .student-profile-trigger__copy small,
 :root[data-theme='dark'] .student-sidebar__link,
+:root[data-theme='dark'] .student-nav__item,
 :root[data-theme='dark'] .student-breadcrumb,
 :root[data-theme='dark'] .student-stat__label,
 :root[data-theme='dark'] .student-stat > small,
@@ -129,22 +132,91 @@ textarea:focus-visible {
 :root[data-theme='dark'] .student-achievement-item > span:last-child,
 :root[data-theme='dark'] .student-courses__card p,
 :root[data-theme='dark'] .student-courses__card small {
-  color: var(--theme-muted);
+  color: var(--theme-muted) !important;
+}
+
+:root[data-theme='dark'] .student-icon-button,
+:root[data-theme='dark'] .student-topbar .student-theme-toggle,
+.student-dashboard.is-dark .student-icon-button,
+.student-dashboard.is-dark .student-topbar .student-theme-toggle,
+.student-dashboard[data-theme='dark'] .student-icon-button,
+.student-dashboard[data-theme='dark'] .student-topbar .student-theme-toggle {
+  color: #b0b9af;
 }
 
 :root[data-theme='dark'] .student-sidebar__link:hover,
+:root[data-theme='dark'] .student-nav__item:hover,
 :root[data-theme='dark'] .student-sidebar__logout:hover,
 :root[data-theme='dark'] .student-icon-button:hover,
 :root[data-theme='dark'] .student-topbar .student-theme-toggle:hover {
   border-color: #46564d;
   background: #29332e;
-  color: #dce8df;
+  color: #dce8df !important;
 }
 
-:root[data-theme='dark'] .student-sidebar__link.is-active {
+:root[data-theme='dark'] .student-category,
+.student-dashboard.is-dark .student-category,
+.student-dashboard[data-theme='dark'] .student-category {
+  border-color: #3a4540;
+  background: #252d29;
+  color: #e6ebe4;
+}
+
+:root[data-theme='dark'] .student-category.is-selected,
+.student-dashboard.is-dark .student-category.is-selected,
+.student-dashboard[data-theme='dark'] .student-category.is-selected,
+:root[data-theme='dark'] .student-category:hover,
+.student-dashboard.is-dark .student-category:hover,
+.student-dashboard[data-theme='dark'] .student-category:hover {
+  border-color: #d9b34d;
+  background: #2f3833;
+  color: #f5eedc;
+}
+
+:root[data-theme='dark'] .student-category svg,
+.student-dashboard.is-dark .student-category svg,
+.student-dashboard[data-theme='dark'] .student-category svg {
+  color: #d9b34d;
+}
+
+:root[data-theme='dark'] .student-donut strong,
+.student-dashboard.is-dark .student-donut strong,
+.student-dashboard[data-theme='dark'] .student-donut strong {
+  color: #e6ebe4;
+}
+
+:root[data-theme='dark'] .student-donut span,
+.student-dashboard.is-dark .student-donut span,
+.student-dashboard[data-theme='dark'] .student-donut span {
+  color: #b0b9af;
+}
+
+:root[data-theme='dark'] .student-lesson-count,
+.student-dashboard.is-dark .student-lesson-count,
+.student-dashboard[data-theme='dark'] .student-lesson-count {
+  color: #b0b9af;
+}
+
+:root[data-theme='dark'] .student-lesson-count strong,
+.student-dashboard.is-dark .student-lesson-count strong,
+.student-dashboard[data-theme='dark'] .student-lesson-count strong {
+  color: #e6ebe4;
+}
+
+:root[data-theme='dark'] .student-lesson-counts > p,
+.student-dashboard.is-dark .student-lesson-counts > p,
+.student-dashboard[data-theme='dark'] .student-lesson-counts > p,
+:root[data-theme='dark'] .student-data-note,
+.student-dashboard.is-dark .student-data-note,
+.student-dashboard[data-theme='dark'] .student-data-note {
+  color: #8f9b92;
+}
+
+:root[data-theme='dark'] .student-sidebar__link.is-active,
+:root[data-theme='dark'] .student-nav__item.is-active {
   border-color: #776533;
   background: #383321;
-  color: #f0dfaa;
+  color: #f0dfaa !important;
 }
 
 :root[data-theme='dark'] .student-sidebar__bottom {
@@ -172,6 +244,61 @@ textarea:focus-visible {
 :root[data-theme='dark'] .student-achievement-item {
   border-color: #3f4a43;
   background: #252e2a;
+}
+
+:root[data-theme='dark'] .student-achievement-date {
+  color: var(--theme-muted) !important;
+}
+
+:root[data-theme='dark'] .student-achievement-btn--preview,
+:root[data-theme='dark'] .student-achievement-btn--primary {
+  border-color: #2b5c51 !important;
+  background: #15332c !important;
+  color: #72dbc5 !important;
+}
+
+:root[data-theme='dark'] .student-achievement-btn--preview:hover:not(:disabled),
+:root[data-theme='dark'] .student-achievement-btn--primary:hover:not(:disabled) {
+  background: #1b4239 !important;
+  border-color: #3d7d70 !important;
+}
+
+:root[data-theme='dark'] .student-achievement-btn--download,
+:root[data-theme='dark'] .student-achievement-btn--secondary {
+  border-color: #295369 !important;
+  background: #162933 !important;
+  color: #78bfe0 !important;
+}
+
+:root[data-theme='dark'] .student-achievement-btn--download:hover:not(:disabled),
+:root[data-theme='dark'] .student-achievement-btn--secondary:hover:not(:disabled) {
+  background: #1d3542 !important;
+  border-color: #3b7391 !important;
+}
+
+:root[data-theme='dark'] .student-achievement-unavailable {
+  background: rgba(255, 255, 255, 0.06);
+  color: #92a299;
+}
+
+:root[data-theme='dark'] .student-certificate-preview__panel {
+  background: #1d2622;
+  border: 1px solid #36463e;
+}
+
+:root[data-theme='dark'] .student-certificate-preview__panel header {
+  border-color: #36463e;
+  color: #e4ebe7;
+}
+
+:root[data-theme='dark'] .student-certificate-preview__title-group strong {
+  color: #e4ebe7;
+}
+
+:root[data-theme='dark'] .student-certificate-preview__panel header button.student-certificate-preview__close-btn,
+:root[data-theme='dark'] .student-certificate-preview__panel header button:not(.student-certificate-preview__download-btn) {
+  background: #2a3731;
+  color: #e4ebe7;
 }
 
 :root[data-theme='dark'] .student-stat__icon,

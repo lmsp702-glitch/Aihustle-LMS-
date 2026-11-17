@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { CollegesManagement, EnrollmentManagement } from './AdminDataViews.jsx'
 import AdminCourseManagement from './AdminCourseManagement.jsx'
+import AdminResourcesManagement from './AdminResourcesManagement.jsx'
 import { API_BASE_URL } from './api-base-url.js'
 import { isInvalidSessionResponse } from './auth-session.js'
 import IndependentStudentApprovals from './IndependentStudentApprovals.jsx'
@@ -20,6 +21,7 @@ const navigation = [
   { id: 'independent-approvals', label: 'Student Approval', icon: '✓' },
   { id: 'colleges', label: 'Colleges', icon: '▦' },
   { id: 'courses', label: 'Courses', group: 'COURSE MANAGEMENT', icon: '▤' },
+  { id: 'resources', label: 'Resources', icon: 'resources' },
   { id: 'enrollments', label: 'Enrollments', icon: '⇄' },
   { id: 'reports', label: 'Reports & Analytics', icon: '⌁' },
   { id: 'feedback', label: 'Feedback', group: 'COMMUNICATION & SUPPORT', icon: '☷' },
@@ -35,6 +37,7 @@ function AdminNavigationIcon({ name }) {
     'independent-approvals': <><path d="M8 3h8l1 3h3v15H4V6h3z" /><path d="m8 13 2.5 2.5L16 10" /></>,
     colleges: <><path d="m3 9 9-5 9 5M5 10v9m4-9v9m6-9v9m4-9v9M3 21h18M2 10h20" /></>,
     courses: <><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v17H6.5A2.5 2.5 0 0 0 4 22z" /><path d="M4 5.5v16M8 7h8m-8 4h8" /></>,
+    resources: <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /><line x1="10" y1="9" x2="8" y2="9" /></>,
     enrollments: <><path d="M5 8h13m0 0-3-3m3 3-3 3M19 16H6m0 0 3-3m-3 3 3 3" /></>,
     reports: <><path d="M3 20V4m0 16h18" /><path d="m6 15 4-4 3 3 6-7m-4 0h4v4" /></>,
     notifications: <><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9m-8 12a2 2 0 0 0 4 0" /></>,
@@ -1767,6 +1770,7 @@ function AdminDashboard({
     'independent-approvals': 'Student Approval',
     colleges: 'Colleges',
     courses: 'Course Management',
+    resources: 'Resource Management',
     enrollments: 'Enrollments',
     reports: 'Reports & Analytics',
     notifications: 'Notifications',
@@ -1811,6 +1815,9 @@ function AdminDashboard({
                 >
                   <span className="admin-nav__icon"><AdminNavigationIcon name={item.id} /></span>
                   <span>{item.label}</span>
+                  {item.id === 'support-tickets' && overview?.statistics?.pendingSupportTickets > 0 && (
+                    <span className="admin-nav__count">{overview.statistics.pendingSupportTickets}</span>
+                  )}
                 </Link>
               ) : (
                 <button
@@ -2569,6 +2576,7 @@ function AdminDashboard({
 
           {activeView === 'colleges' && <CollegesManagement onLogout={onLogout} />}
           {activeView === 'courses' && <AdminCourseManagement onLogout={onLogout} />}
+          {activeView === 'resources' && <AdminResourcesManagement onLogout={onLogout} />}
           {activeView === 'enrollments' && <EnrollmentManagement onLogout={onLogout} />}
           {activeView === 'independent-approvals' && (
             <IndependentStudentApprovals
@@ -2948,6 +2956,18 @@ function AdminDashboard({
                     <div><dt>College ID</dt><dd>{studentDetails.student.studentType === 'college' ? studentDetails.student.collegeId || 'No data available yet' : 'Not Applicable'}</dd></div>
                     <div><dt>Registration Date</dt><dd>{studentDetails.student.createdAt ? formatDate(studentDetails.student.createdAt) : 'No data available yet'}</dd></div>
                     <div><dt>Account Status</dt><dd><StatusBadge status={studentDetails.student.status} /></dd></div>
+                    {studentDetails.student.studentType === 'independent' && (
+                      <div>
+                        <dt>How they heard about us</dt>
+                        <dd>
+                          {studentDetails.student.hearAboutUs
+                            ? studentDetails.student.hearAboutUs === 'Other' && studentDetails.student.hearAboutUsOther
+                              ? `Other (${studentDetails.student.hearAboutUsOther})`
+                              : studentDetails.student.hearAboutUs
+                            : 'Not specified'}
+                        </dd>
+                      </div>
+                    )}
                   </dl>
                 </section>
 

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { API_BASE_URL } from './api-base-url.js'
 import {
@@ -21,6 +21,11 @@ import { filterCoursesByCategory, getCourseCategoryNames, normalizeCourseCategor
 import { findActiveTranscriptCueIndex, formatTranscriptTime } from './srt-transcript.js'
 import { createAttentionCheckSchedule } from './video-attention-checks.js'
 import './StudentDashboard.css'
+import './StudentNotesSystem.css'
+import StudentNotesSection from './StudentNotesSystem.jsx'
+import StudentLearningResourcesPage from './StudentLearningResourcesPage.jsx'
+
+
 
 const studentCertificateCache = new Map()
 const studentCertificateRequests = new Map()
@@ -45,10 +50,11 @@ function getStudentCertificateCacheKey() {
   }
 }
 
+
 const navigation = [
   { label: 'Dashboard', icon: 'grid', path: '/student/dashboard' },
   { label: 'My Courses', icon: 'book', path: '/student/courses' },
-  { label: 'Assignments', icon: 'check', path: '/student/assignments' },
+  { label: 'Quizzes & Assignments', icon: 'clipboardCheck', path: '/student/assignments' },
   { label: 'Grades & Results', icon: 'chart', path: '/student/results' },
   { label: 'Learning Resources', icon: 'folder', path: '/student/resources' },
   { label: 'Messages', icon: 'message', path: '/student/messages' },
@@ -105,6 +111,8 @@ const tools = [
   { title: 'Settings', description: 'Manage your account and preferences.', icon: 'settings', id: 'student-settings', path: '/student/settings' },
 ]
 
+
+
 function Icon({ name, size = 19 }) {
   const paths = {
     layoutDashboard: <><rect x="3" y="3" width="7" height="9" rx="1" /><rect x="14" y="3" width="7" height="5" rx="1" /><rect x="14" y="12" width="7" height="9" rx="1" /><rect x="3" y="16" width="7" height="5" rx="1" /></>,
@@ -129,6 +137,7 @@ function Icon({ name, size = 19 }) {
     settings: <><circle cx="12" cy="12" r="3" /><path d="m19.4 15 .1.1 1.4 1.1-1.4 2.4-1.8-.6a8 8 0 0 1-1.7 1l-.3 1.9h-2.8l-.3-1.9a8 8 0 0 1-1.7-1l-1.8.6-1.4-2.4 1.4-1.1a7 7 0 0 1 0-2l-1.4-1.1 1.4-2.4 1.8.6a8 8 0 0 1 1.7-1l.3-1.9h2.8l.3 1.9a8 8 0 0 1 1.7 1l1.8-.6 1.4 2.4-1.4 1.1a7 7 0 0 1 0 2Z" transform="translate(-1 -1)" /></>,
     spark: <><path d="m12 2 1.7 6.3L20 10l-6.3 1.7L12 18l-1.7-6.3L4 10l6.3-1.7z" /><path d="m19 15 .8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z" /></>,
     search: <><circle cx="10.8" cy="10.8" r="6.8" /><path d="m16 16 4.5 4.5" /></>,
+    eye: <><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" /></>,
     bell: <><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9m-8 12a2 2 0 0 0 4 0" /></>,
     help: <><circle cx="12" cy="12" r="9" /><path d="M9.6 9a2.5 2.5 0 1 1 4.5 1.5c-.9 1.1-2.1 1.3-2.1 3m0 3h.01" /></>,
     menu: <><path d="M4 6h16M4 12h16M4 18h16" /></>,
@@ -148,6 +157,15 @@ function Icon({ name, size = 19 }) {
     flask: <><path d="M9 3h6m-5 0v7l-6 10a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1l-6-10V3m-8 12h12" /></>,
     calculator: <><rect x="4" y="3" width="16" height="18" rx="2" /><path d="M8 7h8v3H8zm0 7h.01M12 14h.01M16 14h.01M8 17h.01M12 17h.01M16 17h.01" /></>,
     database: <><ellipse cx="12" cy="5" rx="8" ry="3" /><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3" /></>,
+    xCircle: <><circle cx="12" cy="12" r="9" /><path d="m15 9-6 6m0-6 6 6" /></>,
+    alertCircle: <><circle cx="12" cy="12" r="9" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></>,
+    download: <><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></>,
+    printer: <><polyline points="6 9 6 2 18 2 18 9" /><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" /><rect x="6" y="14" width="12" height="8" /></>,
+    chevronDown: <polyline points="6 9 12 15 18 9" />,
+    chevronUp: <polyline points="18 15 12 9 6 15" />,
+    pin: <><line x1="12" y1="17" x2="12" y2="22" /><path d="M5 17h14v-2l-3-4V4h1V2H7v2h1v7l-3 4v2z" /></>,
+    trash: <><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></>,
+    plus: <><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></>,
   }
 
   return (
@@ -166,6 +184,7 @@ function Icon({ name, size = 19 }) {
     </svg>
   )
 }
+
 
 function LearningIllustration() {
   return (
@@ -194,6 +213,10 @@ function EmptyState({ icon, title, description }) {
     </div>
   )
 }
+
+
+
+
 
 function EarnedCertificateSkeleton() {
   return (
@@ -233,6 +256,10 @@ function InProgressCertificateSkeleton() {
   )
 }
 
+
+
+
+
 function StudentRoutePage({ title, children, to, showHeading = false, className = '' }) {
   const Element = to ? Link : 'section'
   return (
@@ -249,7 +276,11 @@ function StudentRoutePage({ title, children, to, showHeading = false, className 
   )
 }
 
-function StudentCertificatesPage({ onLogout }) {
+
+
+
+
+function StudentCertificatesPage({ user, onLogout }) {
   const navigate = useNavigate()
   const initialCache = studentCertificateCache.get(getStudentCertificateCacheKey())
   const [courses, setCourses] = useState(initialCache?.certificates || null)
@@ -616,6 +647,7 @@ function StudentCertificatesPage({ onLogout }) {
   )
 }
 
+
 async function fetchMyEnrollments(onLogout, signal) {
   const savedAuth = sessionStorage.getItem('lms.auth')
   const auth = savedAuth ? JSON.parse(savedAuth) : null
@@ -809,6 +841,99 @@ async function fetchStudentCertificates(onLogout, signal) {
   if (!Array.isArray(result.certificates)) throw new Error('The server returned invalid certificate data.')
   return result.certificates
 }
+
+
+
+
+
+async function fetchStudentActivities(onLogout, signal) {
+  const savedAuth = sessionStorage.getItem('lms.auth')
+  const auth = savedAuth ? JSON.parse(savedAuth) : null
+  if (typeof auth?.token !== 'string') {
+    onLogout()
+    throw new Error('Your session has ended. Please sign in again.')
+  }
+  const response = await fetchWithAuth(`${API_BASE_URL}/learning/activities`, {
+    headers: { Authorization: `Bearer ${auth.token}` },
+    signal,
+  }, API_BASE_URL, auth.token)
+  const result = await response.json()
+  if (isInvalidSessionResponse(response, result)) {
+    onLogout()
+    throw new Error('Your session has ended. Please sign in again.')
+  }
+  if (!response.ok) throw new Error(result.message || 'Quizzes and assignments could not be loaded.')
+  return result
+}
+
+async function fetchCourseDetails(courseId, onLogout, signal) {
+  const savedAuth = sessionStorage.getItem('lms.auth')
+  const auth = savedAuth ? JSON.parse(savedAuth) : null
+  if (typeof auth?.token !== 'string') {
+    onLogout()
+    throw new Error('Your session has ended. Please sign in again.')
+  }
+  const response = await fetchWithAuth(`${API_BASE_URL}/courses/${encodeURIComponent(courseId)}/details`, {
+    headers: { Authorization: `Bearer ${auth.token}` },
+    signal,
+  }, API_BASE_URL, auth.token)
+  const result = await response.json()
+  if (isInvalidSessionResponse(response, result)) {
+    onLogout()
+    throw new Error('Your session has ended. Please sign in again.')
+  }
+  if (!response.ok) throw new Error(result.message || 'Course details could not be loaded.')
+  return result
+}
+
+async function enrollInCourse(courseId, onLogout) {
+  const savedAuth = sessionStorage.getItem('lms.auth')
+  const auth = savedAuth ? JSON.parse(savedAuth) : null
+  if (typeof auth?.token !== 'string') {
+    onLogout()
+    throw new Error('Your session has ended. Please sign in again.')
+  }
+  const response = await fetchWithAuth(`${API_BASE_URL}/courses/${encodeURIComponent(courseId)}/enroll`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${auth.token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ courseId }),
+  }, API_BASE_URL, auth.token)
+  const result = await response.json()
+  if (isInvalidSessionResponse(response, result)) {
+    onLogout()
+    throw new Error('Your session has ended. Please sign in again.')
+  }
+  if (!response.ok) throw new Error(result.message || 'You could not be enrolled in this course.')
+  return result
+}
+
+async function unenrollFromCourse(courseId, onLogout) {
+  const savedAuth = sessionStorage.getItem('lms.auth')
+  const auth = savedAuth ? JSON.parse(savedAuth) : null
+  if (typeof auth?.token !== 'string') {
+    onLogout()
+    throw new Error('Your session has ended. Please sign in again.')
+  }
+  const response = await fetchWithAuth(`${API_BASE_URL}/courses/${encodeURIComponent(courseId)}/unenroll`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${auth.token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ courseId }),
+  }, API_BASE_URL, auth.token)
+  const result = await response.json()
+  if (isInvalidSessionResponse(response, result)) {
+    onLogout()
+    throw new Error('Your session has ended. Please sign in again.')
+  }
+  if (!response.ok) throw new Error(result.message || 'Could not unenroll from this course.')
+  return result
+}
+
 
 function getCourseQuizTitle(course, quizId) {
   const quizzes = [
@@ -1686,6 +1811,8 @@ async function fetchPublishedCourses(onLogout, signal) {
   return result.courses
 }
 
+
+
 function getCourseCounts(course) {
   const lessonCount = (course.modules || []).reduce((count, module) => {
     const items = module.contentItems || []
@@ -1704,9 +1831,7 @@ function formatCourseDuration(minutes) {
   return remainder ? `${hours} hr ${remainder} min` : `${hours} hr`
 }
 
-function isValidLessonId(value) {
-  return /^[a-f\d]{24}$/i.test(String(value || ''))
-}
+
 
 function getCourseLessons(course) {
   return (course?.modules || []).flatMap((module, moduleIndex) => {
@@ -1720,6 +1845,113 @@ function getCourseLessons(course) {
     }))
   })
 }
+
+
+
+function buildClientCourseSequence(course) {
+  const lessons = getCourseLessons(course)
+  const existingQuizzes = [
+    ...(course?.modules || []).flatMap((m) => [
+      ...(m.contentItems || []).filter((i) => i.type === 'quiz').map((i) => i.quiz || i),
+      ...(m.quiz?.questions?.length ? [m.quiz] : []),
+    ]),
+    ...(course?.quizzes || []),
+  ].filter((q, idx, arr) => q?._id && arr.findIndex((x) => String(x._id) === String(q._id)) === idx)
+
+  const existingAssessments = [
+    ...(course?.modules || []).flatMap((m) => (m.contentItems || []).filter((i) => i.type === 'assignment')),
+    ...(course?.assignments || []),
+  ].filter((a, idx, arr) => a?._id && arr.findIndex((x) => String(x._id) === String(a._id)) === idx)
+
+  const totalVideos = lessons.length
+  const shouldSequence = totalVideos >= 4 || existingQuizzes.length > 0 || existingAssessments.length > 0
+
+  const sequence = []
+  let videoCount = 0
+  let quizIndex = 0
+  let assessmentIndex = 0
+
+  for (const entry of lessons) {
+    videoCount++
+    sequence.push({
+      sequenceIndex: sequence.length + 1,
+      type: 'video-lesson',
+      id: String(entry.lesson._id || entry.lessonKey),
+      title: entry.lesson.title,
+      durationSeconds: entry.lesson.durationSeconds,
+      lessonEntry: entry,
+      lesson: entry.lesson,
+      _learningKey: String(entry.lesson._id || entry.lessonKey),
+    })
+
+    if (shouldSequence) {
+      if (videoCount % 2 === 0) {
+        quizIndex++
+        const quizObj = existingQuizzes[quizIndex - 1] || {
+          _id: `derived-quiz-${course?._id}-${quizIndex}`,
+          title: `Quiz ${quizIndex}`,
+          passingPercentage: 70,
+          maxAttempts: 3,
+        }
+        sequence.push({
+          sequenceIndex: sequence.length + 1,
+          type: 'quiz',
+          id: String(quizObj._id),
+          title: quizObj.title || `Quiz ${quizIndex}`,
+          quiz: quizObj,
+          _learningKey: String(quizObj._id),
+        })
+      }
+
+      if (videoCount % 4 === 0) {
+        assessmentIndex++
+        const assessmentObj = existingAssessments[assessmentIndex - 1] || {
+          _id: `derived-assessment-${course?._id}-${assessmentIndex}`,
+          title: `Assessment ${assessmentIndex}`,
+          points: 100,
+        }
+        sequence.push({
+          sequenceIndex: sequence.length + 1,
+          type: 'assessment',
+          id: String(assessmentObj._id),
+          title: assessmentObj.title || `Assessment ${assessmentIndex}`,
+          assignment: assessmentObj,
+          _learningKey: String(assessmentObj._id),
+        })
+      }
+    }
+  }
+
+  while (quizIndex < existingQuizzes.length) {
+    const quizObj = existingQuizzes[quizIndex]
+    quizIndex++
+    sequence.push({
+      sequenceIndex: sequence.length + 1,
+      type: 'quiz',
+      id: String(quizObj._id),
+      title: quizObj.title || `Quiz ${quizIndex}`,
+      quiz: quizObj,
+      _learningKey: String(quizObj._id),
+    })
+  }
+
+  while (assessmentIndex < existingAssessments.length) {
+    const assessmentObj = existingAssessments[assessmentIndex]
+    assessmentIndex++
+    sequence.push({
+      sequenceIndex: sequence.length + 1,
+      type: 'assessment',
+      id: String(assessmentObj._id),
+      title: assessmentObj.title || `Assessment ${assessmentIndex}`,
+      assignment: assessmentObj,
+      _learningKey: String(assessmentObj._id),
+    })
+  }
+
+  return sequence
+}
+
+
 
 function createEmptyAttentionSession(lessonId = '') {
   return {
@@ -1740,16 +1972,61 @@ function createEmptyAttentionSession(lessonId = '') {
   }
 }
 
+
 function getCourseProgress(enrollment) {
-  const lessons = getCourseLessons(enrollment.courseId)
-  const completedIds = new Set((enrollment.completedLessonIds || []).map(String))
-  const completedCount = lessons.filter(({ lesson }) => completedIds.has(String(lesson._id))).length
+  if (!enrollment?.courseId) {
+    return {
+      completedCount: 0,
+      totalCount: 0,
+      percentage: 0,
+      isCompleted: false,
+      videoStats: { completed: 0, total: 0 },
+      quizStats: { passed: 0, total: 0 },
+      assessmentStats: { completed: 0, total: 0 },
+      nextActivity: null,
+      status: 'active',
+    }
+  }
+
+  if (enrollment.progress && typeof enrollment.progress.percentage === 'number') {
+    const p = enrollment.progress
+    return {
+      completedCount: p.completedActivities ?? p.completedCount ?? 0,
+      totalCount: p.totalRequiredActivities ?? p.totalLessons ?? 0,
+      percentage: p.percentage ?? p.progressPercentage ?? 0,
+      isCompleted: p.isCompleted === true || enrollment.status === 'completed',
+      videoStats: p.videoStats || { completed: p.completedCount || 0, total: p.totalLessons || 0 },
+      quizStats: p.quizStats || { passed: 0, total: 0 },
+      assessmentStats: p.assessmentStats || { completed: 0, total: 0 },
+      nextActivity: p.nextActivity || null,
+      status: enrollment.status,
+    }
+  }
+
+  const sequence = buildClientCourseSequence(enrollment.courseId)
+  const completedLessonIds = new Set((enrollment.completedLessonIds || []).map(String))
+
+  const videoItems = sequence.filter((item) => item.type === 'video-lesson')
+  const completedVideos = videoItems.filter((item) => completedLessonIds.has(item.id)).length
+  const totalVideos = videoItems.length
+
+  const isCompleted = enrollment.status === 'completed'
+  const percentage = totalVideos ? Math.round((completedVideos / totalVideos) * 100) : 0
+
   return {
-    completedCount,
-    totalCount: lessons.length,
-    percentage: lessons.length ? Math.round((completedCount / lessons.length) * 100) : 0,
+    completedCount: completedVideos,
+    totalCount: totalVideos,
+    percentage,
+    isCompleted,
+    videoStats: { completed: completedVideos, total: totalVideos },
+    quizStats: { passed: 0, total: 0 },
+    assessmentStats: { completed: 0, total: 0 },
+    nextActivity: sequence.find((s) => !completedLessonIds.has(s.id)) || null,
+    status: enrollment.status,
   }
 }
+
+
 
 function getModuleLearningItems(module, moduleIndex) {
   const moduleKey = String(module._id || `${module.title}-${moduleIndex}`)
@@ -1859,11 +2136,11 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
       }
       const formData = new FormData()
       formData.append('file', file)
-      const response = await fetchWithAuth(`${API_BASE_URL}/courses/${encodeURIComponent(courseId)}/assignments/${encodeURIComponent(assignment._id)}/submissions`, {
+      const response = await fetch(`${API_BASE_URL}/courses/${encodeURIComponent(courseId)}/assignments/${encodeURIComponent(assignment._id)}/submissions`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${auth.token}` },
         body: formData,
-      }, API_BASE_URL, auth.token)
+      })
       const result = await response.json()
       if (isInvalidSessionResponse(response, result)) {
         onLogout()
@@ -2011,9 +2288,7 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
                   onLogout()
                   return
                 }
-                const response = await fetchWithAuth(event.currentTarget.href, {
-                  headers: { Authorization: `Bearer ${auth.token}` },
-                }, API_BASE_URL, auth.token)
+                const response = await fetch(event.currentTarget.href, { headers: { Authorization: `Bearer ${auth.token}` } })
                 if (isInvalidSessionResponse(response, {})) {
                   onLogout()
                   return
@@ -2117,53 +2392,116 @@ function StudentNotePanel({ item }) {
 }
 
 function EnrollmentCourseCard({ enrollment }) {
-  const course = enrollment.courseId
-  const courseId = String(course._id)
+  const course = enrollment?.courseId && typeof enrollment.courseId === 'object'
+    ? enrollment.courseId
+    : {}
+  const courseId = String(
+    (enrollment?.courseId && typeof enrollment.courseId === 'object' ? enrollment.courseId._id : null) ||
+    enrollment?.courseId ||
+    enrollment?.course?._id ||
+    ''
+  )
   const counts = getCourseCounts(course)
-  const { completedCount, totalCount, percentage } = getCourseProgress(enrollment)
+  const progressData = getCourseProgress(enrollment)
+  const {
+    percentage,
+    isCompleted,
+    nextActivity,
+  } = progressData
+
   const difficultyLabels = {
     beginner: 'Beginner',
     intermediate: 'Intermediate',
     advanced: 'Advanced',
     'all-levels': 'All levels',
   }
-  const coursePath = `/student/course/${encodeURIComponent(courseId)}/learn`
+
+  const targetActivity = nextActivity || { id: '', type: 'video-lesson' }
+  const coursePath = targetActivity?.id
+    ? targetActivity.type === 'video-lesson'
+      ? `/student/course/${encodeURIComponent(courseId)}/learn?lesson=${encodeURIComponent(targetActivity.id)}`
+      : `/student/course/${encodeURIComponent(courseId)}/learn?activity=${encodeURIComponent(targetActivity.id)}&type=${targetActivity.type}`
+    : `/student/course/${encodeURIComponent(courseId)}/learn`
+
+  const nextLessonTitle = nextActivity?.title || ''
 
   return (
-    <article className="student-available-course student-enrolled-course">
-      {course.thumbnailUrl
-        ? <img className="student-available-course__thumbnail" src={course.thumbnailUrl} alt={`${course.title} course thumbnail`} />
-        : <div className="student-available-course__thumbnail student-available-course__thumbnail--empty" aria-label="No course thumbnail"><Icon name="book" size={28} /></div>}
-      <div className="student-available-course__body student-enrolled-course__body">
-        <div className="student-available-course__heading">
-          <div>
-            <p className="student-available-course__category">
-              {course.category || 'Other'} <span>·</span> {difficultyLabels[course.difficulty] || 'Not specified'}
-            </p>
-            <h3>{course.title}</h3>
+    <article className="student-enrolled-course">
+      {course.thumbnailUrl ? (
+        <img
+          className="student-enrolled-course__thumbnail"
+          src={course.thumbnailUrl}
+          alt={`${course.title} course thumbnail`}
+        />
+      ) : (
+        <div
+          className="student-enrolled-course__thumbnail student-enrolled-course__thumbnail--empty"
+          aria-label="No course thumbnail"
+        >
+          <Icon name="book" size={28} />
+        </div>
+      )}
+
+      <div className="student-enrolled-course__body">
+        <div className="student-enrolled-course__header">
+          <div className="student-enrolled-course__meta-top">
+            <span className="student-enrolled-course__category">
+              {course.category || 'General'}
+            </span>
+            <span className="student-enrolled-course__meta-dot">·</span>
+            <span className="student-enrolled-course__difficulty">
+              {difficultyLabels[course.difficulty] || 'All levels'}
+            </span>
           </div>
-          <span className="student-available-course__status">
-            {course.status === 'published' ? 'Published' : 'Enrolled'}
+          <span className={`student-enrolled-course__status ${isCompleted ? 'is-completed' : 'is-progress'}`}>
+            {isCompleted ? 'Completed' : 'In Progress'}
           </span>
         </div>
-        <p className="student-available-course__description">{course.description || course.detailedDescription || 'No course description is available.'}</p>
-        <div className="student-available-course__meta">
-          <span>{counts.modules} modules</span>
-          <span>{counts.lessons} lessons</span>
-          <span>{formatCourseDuration(course.estimatedDurationMinutes)}</span>
+
+        <h3 className="student-enrolled-course__title" title={course.title}>
+          {course.title}
+        </h3>
+
+        <div className="student-enrolled-course__curriculum-meta">
+          <span>{counts.modules} {counts.modules === 1 ? 'module' : 'modules'}</span>
+          <span className="student-enrolled-course__meta-dot">·</span>
+          <span>{counts.lessons} {counts.lessons === 1 ? 'lesson' : 'lessons'}</span>
         </div>
+
         <div className="student-enrolled-course__progress">
           <div className="student-enrolled-course__progress-copy">
-            <span>Learning progress</span>
-            <strong>{completedCount} of {totalCount} lessons · {percentage}%</strong>
+            <span>Overall Course Progress</span>
+            <strong>{percentage}%</strong>
           </div>
-          <div className="student-enrolled-course__progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={percentage} aria-label={`${course.title} progress`}>
-            <span style={{ width: `${percentage}%` }} />
+          <div
+            className="student-enrolled-course__progress-track"
+            role="progressbar"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-valuenow={percentage}
+            aria-label={`${course.title} progress`}
+          >
+            <span
+              className={isCompleted ? 'is-completed' : ''}
+              style={{ width: `${Math.min(100, percentage)}%` }}
+            />
           </div>
+
+          {!isCompleted && nextLessonTitle && (
+            <p className="student-enrolled-course__next-lesson">
+              <span className="student-enrolled-course__next-label">Next lesson:</span>{' '}
+              <span className="student-enrolled-course__next-title" title={nextLessonTitle}>
+                {nextLessonTitle}
+              </span>
+            </p>
+          )}
         </div>
-        <Link className="student-enrolled-course__continue" to={coursePath}>
-          Continue Learning
-          <Icon name="arrow" size={16} />
+
+        <Link
+          className="student-enrolled-course__continue"
+          to={`/student/course/${encodeURIComponent(courseId)}/details`}
+        >
+          <span>Course Details →</span>
         </Link>
       </div>
     </article>
@@ -2206,7 +2544,7 @@ function EnrollmentCourseSkeletons() {
   )
 }
 
-function StudentDashboardCourses({ onLogout, selectedCategory }) {
+function StudentDashboardCourses({ onLogout, selectedCategory, refreshKey }) {
   const [initialEnrollments] = useState(getCachedStudentPageEnrollments)
   const [enrollments, setEnrollments] = useState(initialEnrollments || [])
   const [loading, setLoading] = useState(initialEnrollments === null)
@@ -2221,7 +2559,7 @@ function StudentDashboardCourses({ onLogout, selectedCategory }) {
       })
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
-  }, [onLogout])
+  }, [onLogout, refreshKey])
 
   const categoryEnrollments = selectedCategory
     ? enrollments.filter((entry) => (
@@ -2266,7 +2604,11 @@ function StudentAvailableCourseCard({ course, enrollment, onEnroll, enrolling, e
             <p className="student-available-course__category">
               {course.category || 'Other'} <span>·</span> {difficultyLabels[course.difficulty] || 'Beginner'}
             </p>
-            <h3>{course.title}</h3>
+            <h3>
+              <Link to={`/student/course/${encodeURIComponent(course._id)}/details`} className="student-available-course__title-link">
+                {course.title}
+              </Link>
+            </h3>
           </div>
           <span className="student-available-course__status">{enrollment ? 'Enrolled' : 'Not Enrolled'}</span>
         </div>
@@ -2338,14 +2680,14 @@ function StudentAvailableCourses({ user, onLogout, onLearningDataChanged, onCate
         onLogout()
         return
       }
-      const response = await fetchWithAuth(`${API_BASE_URL}/enrollments`, {
+      const response = await fetch(`${API_BASE_URL}/enrollments`, {
         method: 'POST',
         headers: {
-          Authorization: `******`,
+          Authorization: `Bearer ${auth.token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ courseId }),
-      }, API_BASE_URL, auth.token)
+      })
       const result = await response.json()
       if (isInvalidSessionResponse(response, result)) {
         onLogout()
@@ -2404,6 +2746,8 @@ function StudentAvailableCourses({ user, onLogout, onLearningDataChanged, onCate
   )
 }
 
+
+
 function StudentCourseLearning({
   enrollment,
   onEnrollmentUpdated,
@@ -2438,7 +2782,40 @@ function StudentCourseLearning({
       _moduleKey: '',
     })),
   ]
-  const allContentItems = [...moduleItems.flatMap(({ items }) => items), ...courseLevelItems]
+    const sequencedActivities = useMemo(() => {
+    if (enrollment.progress?.sequence?.length) {
+      return enrollment.progress.sequence.map((item, idx) => ({
+        ...item,
+        _learningKey: String(item.id || item.quizId || item.assignmentId || item.lessonId),
+        _moduleKey: item.moduleId ? String(item.moduleId) : '',
+        sequenceNumber: item.sequenceIndex || (idx + 1),
+      }))
+    }
+    return buildClientCourseSequence(course).map((item, idx) => ({
+      ...item,
+      _learningKey: String(item.id),
+      _moduleKey: '',
+      sequenceNumber: item.sequenceIndex || (idx + 1),
+    }))
+  }, [course, enrollment.progress])
+
+  const allContentItems = useMemo(() => {
+    if (sequencedActivities.length > 0) {
+      return sequencedActivities.map((item) => {
+        if (item.type === 'video-lesson') {
+          const entry = lessons.find((l) => String(l.lesson._id || l.lessonKey) === String(item.id || item.lessonId))
+          return {
+            ...item,
+            lesson: entry?.lesson || item.lesson || { _id: item.id, title: item.title, videoUrl: item.videoUrl },
+            module: entry?.module || item.module,
+            moduleKey: entry?.moduleKey || item._moduleKey,
+          }
+        }
+        return item
+      })
+    }
+    return [...moduleItems.flatMap(({ items }) => items), ...courseLevelItems]
+  }, [sequencedActivities, lessons, moduleItems, courseLevelItems])
   const [activeLessonId, setActiveLessonId] = useState(() => (
     lessons.some(({ lesson }) => String(lesson._id) === requestedLessonId)
       ? requestedLessonId
@@ -2473,6 +2850,8 @@ function StudentCourseLearning({
   const [courseCertificatePdfRetry, setCourseCertificatePdfRetry] = useState(0)
   const courseCertificatePdfUrlRef = useRef('')
   const videoPlayerRef = useRef(null)
+  const pendingSeekTimeRef = useRef(null)
+  const requestOpenNoteEditorRef = useRef(null)
   const transcriptCueListRef = useRef(null)
   const transcriptCueRefs = useRef([])
   const transcriptScriptRef = useRef(null)
@@ -2511,7 +2890,7 @@ function StudentCourseLearning({
   const activeTranscriptCueIndex = transcriptPlayback.lessonKey === activeVideoKey
     ? transcriptPlayback.cueIndex
     : findActiveTranscriptCueIndex(transcriptCues, 0)
-  const activeContentItem = allContentItems.find((item) => item._learningKey === activeContentItemId)
+  const activeContentItem = allContentItems.find((item) => String(item._learningKey || item.id) === activeContentItemId)
   const showCourseCertificate = course.generateCertificate !== false
   const hasCurrentCourseCertificate = String(courseCertificate?.courseId || '') === String(course._id)
   const completedLessonIds = new Set((enrollment.completedLessonIds || []).map(String))
@@ -2539,7 +2918,11 @@ function StudentCourseLearning({
     item._learningKey === activeContentItemId
     || (!activeContentItemId && item.type === 'video-lesson' && item._learningKey === activeEntry?.lessonKey)
   ))
-  const showVideoPlayer = detailsTab === 'overview'
+  const showVideoPlayer = (detailsTab === 'overview' || detailsTab === 'notes' || detailsTab === 'resources')
+    && activeContentItemId !== COURSE_NOTES_KEY
+    && activeContentItemId !== COURSE_RESOURCES_KEY
+    && activeContentItemId !== COURSE_CERTIFICATE_KEY
+    && detailsTab !== 'certificate'
     && (!activeContentItem || activeContentItem.type === 'video-lesson')
   const isActiveQuiz = detailsTab === 'overview' && activeContentItem?.type === 'quiz'
   const isActiveAssignment = detailsTab === 'overview' && activeContentItem?.type === 'assignment'
@@ -3182,7 +3565,12 @@ function StudentCourseLearning({
 
   function handleVideoMetadata(video, entry) {
     initializeAttentionCheckSession(video, entry)
-    video.currentTime = 0
+    if (pendingSeekTimeRef.current !== null && !isNaN(pendingSeekTimeRef.current)) {
+      video.currentTime = pendingSeekTimeRef.current
+      pendingSeekTimeRef.current = null
+    } else {
+      video.currentTime = 0
+    }
     updateTranscriptPlaybackTime(video)
     setAutoplayBlockedLessonId('')
     const playback = video.play()
@@ -3192,6 +3580,28 @@ function StudentCourseLearning({
           setAutoplayBlockedLessonId(lessonId)
         }
       })
+    }
+  }
+
+  function handleSeekToLessonTimestamp(targetLessonId, timestampSeconds) {
+    const matchedEntry = lessons.find(({ lesson, lessonKey }) => (
+      String(lesson._id || lessonKey) === String(targetLessonId)
+    ))
+
+    const currentLessonId = String(activeEntry?.lesson?._id || activeEntry?.lessonKey || '')
+    const isSameLesson = matchedEntry && String(matchedEntry.lesson._id || matchedEntry.lessonKey) === currentLessonId
+
+    if (isSameLesson) {
+      if (videoPlayerRef.current && timestampSeconds != null && !isNaN(timestampSeconds)) {
+        videoPlayerRef.current.currentTime = timestampSeconds
+        videoPlayerRef.current.play().catch(() => {})
+        videoPlayerRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      }
+    } else if (matchedEntry) {
+      if (timestampSeconds != null && !isNaN(timestampSeconds)) {
+        pendingSeekTimeRef.current = timestampSeconds
+      }
+      selectLesson(matchedEntry)
     }
   }
 
@@ -3383,7 +3793,78 @@ function StudentCourseLearning({
             <header className="student-course-learning__sidebar-header">
               <h2 className={course.title?.trim().toLowerCase() === 'python' ? 'is-python' : undefined}>{course.title}</h2>
             </header>
-            {filteredModuleItems.map(({ module, moduleKey, items }) => {
+            {sequencedActivities.length > 0 ? (
+              <section className="student-course-learning__module is-expanded" style={{ borderBottom: 'none' }}>
+                <div style={{ padding: '10px 16px 6px', fontWeight: '700', fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--student-ink-muted, #777)' }}>
+                  Course Activities ({allContentItems.length})
+                </div>
+                <ul>
+                  {allContentItems
+                    .filter((item) => !contentSearch || item.title?.toLowerCase().includes(contentSearch.trim().toLowerCase()))
+                    .map((item, index) => {
+                      const isSelected = String(item._learningKey || item.id) === String(activeContentItemId)
+                        || (!activeContentItemId && detailsTab === 'overview' && item.type === 'video-lesson' && String(item._learningKey || item.id) === String(activeEntry?.lessonKey || activeEntry?.lesson?._id))
+
+                      const isLessonCompleted = item.type === 'video-lesson' && completedLessonIds.has(String(item.id || item.lesson?._id))
+
+                      const attempts = quizAttempts.filter((a) => String(a.quizId) === String(item.quizId || item.quiz?._id || item.id))
+                      const isQuizPassed = attempts.some((a) => a.status === 'submitted' && a.passed === true) || (item.isCompleted === true && item.type === 'quiz')
+                      const isQuizFailed = attempts.length > 0 && !isQuizPassed
+
+                      const isAssessmentSubmitted = (item.type === 'assignment' || item.type === 'assessment') && (
+                        assignmentSubmissions.some((s) => String(s.assignmentId) === String(item.assignmentId || item._id || item.id))
+                        || (item.isCompleted === true)
+                      )
+
+                      const isItemComplete = isLessonCompleted || isQuizPassed || isAssessmentSubmitted
+                      const isItemFailed = isQuizFailed
+
+                      const statusText = item.type === 'video-lesson'
+                        ? isItemComplete ? 'Completed' : item.durationSeconds ? `${Math.ceil(item.durationSeconds / 60)} min` : 'Video'
+                        : item.type === 'quiz'
+                          ? isItemComplete ? 'Passed (✓)' : isItemFailed ? 'Failed - Retry' : 'Quiz (Pending)'
+                          : item.type === 'assessment' || item.type === 'assignment'
+                            ? isItemComplete ? 'Submitted (✓)' : 'Pending submission'
+                            : getStudentContentLabel(item.type)
+
+                      return (
+                        <li key={item._learningKey || `${item.type}-${index}`}>
+                          <button
+                            id={item.id ? `student-content-${item.id}` : undefined}
+                            className={`${isSelected ? 'is-selected' : ''} ${isItemFailed ? 'is-item-failed' : ''}`}
+                            type="button"
+                            aria-current={isSelected ? 'true' : undefined}
+                            onClick={() => selectContentItem(item)}
+                            style={isItemFailed ? { borderColor: 'rgba(211, 47, 47, 0.4)' } : undefined}
+                          >
+                            <span
+                              className={`student-course-learning__item-icon${isItemComplete ? ' is-complete' : ''}${isItemFailed ? ' is-failed' : ''}`}
+                              style={isItemFailed ? { background: 'rgba(211, 47, 47, 0.15)', color: '#d32f2f' } : undefined}
+                            >
+                              <Icon
+                                name={isItemComplete ? 'check' : isItemFailed ? 'alertCircle' : item.type === 'assignment' || item.type === 'assessment' ? 'clipboardCheck' : item.type === 'quiz' ? 'clipboardCheck' : 'play'}
+                                size={15}
+                              />
+                            </span>
+                            <span className="student-course-learning__item-copy">
+                              <strong>
+                                <span style={{ color: 'var(--student-ink-muted, #777)', marginRight: '4px', fontSize: '11px' }}>
+                                  #${item.sequenceNumber || item.sequenceIndex || (index + 1)}.
+                                </span>
+                                {item.title}
+                              </strong>
+                              <small style={isItemFailed ? { color: '#d32f2f', fontWeight: '600' } : undefined}>
+                                {statusText}
+                              </small>
+                            </span>
+                            {isSelected && <span className="student-course-learning__play">▶</span>}
+                          </button>
+                        </li>
+                      )
+                    })}
+                </ul>
+              </section>
+            ) : filteredModuleItems.map(({ module, moduleKey, items }) => {
               const expanded = expandedModules.has(moduleKey) || Boolean(contentSearch.trim())
               return (
                 <section className={`student-course-learning__module${expanded ? ' is-expanded' : ''}`} key={moduleKey}>
@@ -3702,6 +4183,21 @@ function StudentCourseLearning({
             {showVideoPlayer && (
               <div className="student-course-learning__video-nav">
                 <button type="button" disabled={activeContentIndex <= 0} onClick={() => moveContent(-1)}>← Previous</button>
+                <button
+                  type="button"
+                  className="student-course-learning__take-note-nav-btn"
+                  onClick={() => {
+                    setActiveContentItemId('')
+                    setDetailsTab('notes')
+                    if (requestOpenNoteEditorRef.current) {
+                      requestOpenNoteEditorRef.current()
+                    }
+                  }}
+                  title="Add a personal study note at this exact video moment"
+                >
+                  <Icon name="pen" size={13} />
+                  <span>Take Note</span>
+                </button>
                 <button type="button" disabled={activeContentIndex < 0 || activeContentIndex >= allContentItems.length - 1} onClick={() => moveContent(1)}>Next →</button>
               </div>
             )}
@@ -3754,9 +4250,13 @@ function StudentCourseLearning({
                     <button
                       type="button"
                       role="tab"
-                      aria-selected={lessonInfoTab === 'overview'}
-                      className={lessonInfoTab === 'overview' ? 'is-active' : ''}
-                      onClick={() => setLessonInfoTab('overview')}
+                      aria-selected={detailsTab === 'overview' && lessonInfoTab === 'overview'}
+                      className={detailsTab === 'overview' && lessonInfoTab === 'overview' ? 'is-active' : ''}
+                      onClick={() => {
+                        setActiveContentItemId('')
+                        setDetailsTab('overview')
+                        setLessonInfoTab('overview')
+                      }}
                     >
                       <Icon name="book" size={15} />
                       Lesson Overview
@@ -3764,9 +4264,13 @@ function StudentCourseLearning({
                     <button
                       type="button"
                       role="tab"
-                      aria-selected={lessonInfoTab === 'transcript'}
-                      className={lessonInfoTab === 'transcript' ? 'is-active' : ''}
-                      onClick={() => setLessonInfoTab('transcript')}
+                      aria-selected={detailsTab === 'overview' && lessonInfoTab === 'transcript'}
+                      className={detailsTab === 'overview' && lessonInfoTab === 'transcript' ? 'is-active' : ''}
+                      onClick={() => {
+                        setActiveContentItemId('')
+                        setDetailsTab('overview')
+                        setLessonInfoTab('transcript')
+                      }}
                     >
                       <Icon name="book" size={15} />
                       Transcript
@@ -3787,29 +4291,48 @@ function StudentCourseLearning({
                     Overview
                   </button>
                 )}
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={detailsTab === 'notes'}
+                  className={detailsTab === 'notes' ? 'is-active' : ''}
+                  onClick={() => {
+                    setActiveContentItemId('')
+                    setDetailsTab('notes')
+                  }}
+                >
+                  <Icon name="pen" size={15} />
+                  My Notes
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={detailsTab === 'resources'}
+                  className={detailsTab === 'resources' ? 'is-active' : ''}
+                  onClick={() => {
+                    setActiveContentItemId('')
+                    setDetailsTab('resources')
+                  }}
+                >
+                  <Icon name="link" size={15} />
+                  Resources
+                  {courseResources.length > 0 && <span className="student-course-learning__tab-badge">{courseResources.length}</span>}
+                </button>
               </div>}
               {detailsTab === 'certificate' ? (
                 <div className="student-course-learning__tab-content">{renderCourseCertificate()}</div>
               ) : detailsTab === 'notes' ? (
                 <div className="student-course-learning__tab-content">
-                  {courseNotes.length ? courseNotes.map((note) => (
-                    <article className="student-course-learning__note-card" key={note._learningKey}>
-                      <h3>{note.title}</h3>
-                      {note.content && <p>{note.content}</p>}
-                      {note.resources?.length > 0 && (
-                        <ul className="student-course-note__resources">
-                          {note.resources.map((resource, index) => (
-                            <li key={resource._id || `${resource.url}-${index}`}>
-                              <a href={resource.url} target="_blank" rel="noreferrer" download={resource.resourceType === 'raw' || resource.format === 'pdf' ? resource.title : undefined}>
-                                {resource.title || `Resource ${index + 1}`}
-                              </a>
-                              {resource.format && <small>{resource.format.toUpperCase()}</small>}
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </article>
-                  )) : <p className="student-course-learning__tab-empty">No notes have been added to this course.</p>}
+                  <StudentNotesSection
+                    course={course}
+                    lessons={lessons}
+                    activeEntry={activeEntry}
+                    videoPlayerRef={videoPlayerRef}
+                    onSeekToLessonTimestamp={handleSeekToLessonTimestamp}
+                    onLogout={onLogout}
+                    apiBaseUrl={API_BASE_URL}
+                    onRequestOpenEditorRef={requestOpenNoteEditorRef}
+                  />
                 </div>
               ) : detailsTab === 'resources' ? (
                 <div className="student-course-learning__tab-content">
@@ -3961,6 +4484,19 @@ function StudentCourseLearning({
                 <div className="student-course-learning__active-heading"><h2>Course Certificate</h2></div>
                 <div className="student-course-learning__tab-content">{renderCourseCertificate()}</div>
               </>
+            ) : detailsTab === 'notes' ? (
+              <div className="student-course-learning__tab-content">
+                <StudentNotesSection
+                  course={course}
+                  lessons={lessons}
+                  activeEntry={activeEntry}
+                  videoPlayerRef={videoPlayerRef}
+                  onSeekToLessonTimestamp={handleSeekToLessonTimestamp}
+                  onLogout={onLogout}
+                  apiBaseUrl={API_BASE_URL}
+                  onRequestOpenEditorRef={requestOpenNoteEditorRef}
+                />
+              </div>
             ) : <EmptyState icon="book" title="Course content is not available yet" description="This enrolled course does not currently have any lessons or activities." />}
           </div>
         </div>
@@ -4001,12 +4537,60 @@ async function referralsRequest(path, { onLogout, method = 'GET', body, signal }
   return result
 }
 
+
+
 function formatReferralDate(value) {
   const date = new Date(value)
   return Number.isNaN(date.getTime())
     ? 'Date unavailable'
     : new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
 }
+
+async function learningRequest(path, { onLogout, method = 'GET', body, signal } = {}) {
+  const savedAuth = sessionStorage.getItem('lms.auth')
+  const auth = savedAuth ? JSON.parse(savedAuth) : null
+  if (typeof auth?.token !== 'string') {
+    if (onLogout) onLogout()
+    throw new Error('Your session has ended. Please sign in again.')
+  }
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${auth.token}`,
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+    signal,
+  })
+  const result = await response.json()
+  if (isInvalidSessionResponse(response, result)) {
+    if (onLogout) onLogout()
+    throw new Error('Your session has ended. Please sign in again.')
+  }
+  if (!response.ok) {
+    throw new Error(result.message || 'Learning data could not be loaded.')
+  }
+  return result
+}
+
+function formatDuration(totalSeconds = 0) {
+  const secs = Math.max(0, Math.round(Number(totalSeconds) || 0))
+  if (secs < 60) return `${secs}s`
+  const minutes = Math.floor(secs / 60)
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  const remainingMins = minutes % 60
+  return remainingMins > 0 ? `${hours}h ${remainingMins}m` : `${hours}h`
+}
+
+function formatMinutes(totalMinutes = 0) {
+  const mins = Math.max(0, Math.round(Number(totalMinutes) || 0))
+  if (mins < 60) return `${mins}m`
+  const hours = Math.floor(mins / 60)
+  const remainingMins = mins % 60
+  return remainingMins > 0 ? `${hours}h ${remainingMins}m` : `${hours}h`
+}
+
 
 function StudentReferrals({ onLogout }) {
   const [referralData, setReferralData] = useState(null)
@@ -4016,6 +4600,8 @@ function StudentReferrals({ onLogout }) {
   const [loadAttempt, setLoadAttempt] = useState(0)
   const [notice, setNotice] = useState('')
   const [copiedCode, setCopiedCode] = useState('')
+  const [selectedQuantity, setSelectedQuantity] = useState(1)
+  const [filterTab, setFilterTab] = useState('active') // 'active', 'all', 'used', 'expired'
   const pendingRequestId = useRef('')
 
   useEffect(() => {
@@ -4028,6 +4614,10 @@ function StudentReferrals({ onLogout }) {
           throw new Error('The server returned invalid referral information.')
         }
         setReferralData(result)
+        const remaining = result.stats.remainingGenerations !== undefined
+          ? result.stats.remainingGenerations
+          : (result.stats.remainingSlots !== undefined ? result.stats.remainingSlots : Math.max(0, 20 - (result.stats.totalGenerated || 0)))
+        setSelectedQuantity((prev) => Math.min(Math.max(1, prev), Math.max(1, remaining)))
       })
       .catch((loadError) => {
         if (loadError.name !== 'AbortError') {
@@ -4040,7 +4630,28 @@ function StudentReferrals({ onLogout }) {
     return () => controller.abort()
   }, [onLogout, loadAttempt])
 
-  async function generateReferralCode() {
+  const stats = referralData?.stats || {
+    totalGenerated: 0,
+    maxLifetimeLimit: 20,
+    lifetimeLimit: 20,
+    active: 0,
+    remainingSlots: 20,
+    remainingGenerations: 20,
+    successfullyUsed: 0,
+    expired: 0,
+  }
+
+  const allCodes = referralData?.codes || []
+  const totalGenerated = stats.totalGenerated !== undefined ? stats.totalGenerated : allCodes.length
+  const maxLimit = stats.maxLifetimeLimit || stats.lifetimeLimit || stats.maxActiveLimit || 20
+  const remainingSlots = stats.remainingSlots !== undefined
+    ? stats.remainingSlots
+    : (stats.remainingGenerations !== undefined ? stats.remainingGenerations : Math.max(0, maxLimit - totalGenerated))
+  const remainingGenerations = remainingSlots
+  const isAtLimit = remainingSlots <= 0 || totalGenerated >= maxLimit
+
+  async function generateReferralCodes() {
+    if (isAtLimit) return
     setGenerating(true)
     setError('')
     setNotice('')
@@ -4051,22 +4662,31 @@ function StudentReferrals({ onLogout }) {
         }
         pendingRequestId.current = window.crypto.randomUUID()
       }
-      await referralsRequest('/referrals/generate', {
+
+      const qty = Math.min(Math.max(1, Number(selectedQuantity) || 1), remainingGenerations)
+      const res = await referralsRequest('/referrals/generate', {
         onLogout,
         method: 'POST',
-        body: { requestId: pendingRequestId.current },
+        body: {
+          requestId: pendingRequestId.current,
+          quantity: qty,
+        },
       })
       pendingRequestId.current = ''
-      setNotice('Your referral code has been generated.')
+      const countGenerated = res?.count || (res?.codes ? res.codes.length : 1)
+      setNotice(
+        countGenerated === 1
+          ? 'Your referral code has been generated.'
+          : `Successfully generated ${countGenerated} referral codes.`,
+      )
       const result = await referralsRequest('/referrals/me', { onLogout })
       setReferralData(result)
+      const newRemaining = result.stats.remainingGenerations !== undefined
+        ? result.stats.remainingGenerations
+        : (result.stats.remainingSlots !== undefined ? result.stats.remainingSlots : Math.max(0, 20 - (result.stats.totalGenerated || 0)))
+      setSelectedQuantity(Math.min(1, Math.max(1, newRemaining)))
+      setFilterTab('active')
     } catch (generateError) {
-      if (generateError?.statusCode === 429) {
-        setReferralData((current) => current && ({
-          ...current,
-          stats: { ...current.stats, generatedToday: current.stats.dailyLimit },
-        }))
-      }
       setError(generateError instanceof Error ? generateError.message : 'A referral code could not be generated.')
     } finally {
       setGenerating(false)
@@ -4077,50 +4697,110 @@ function StudentReferrals({ onLogout }) {
     try {
       await navigator.clipboard.writeText(code)
       setCopiedCode(code)
-      setNotice('Referral code copied.')
+      setNotice(`Referral code ${code} copied to clipboard.`)
       setError('')
+      setTimeout(() => setCopiedCode(''), 3000)
     } catch {
       setError('The referral code could not be copied. Please copy it manually.')
     }
   }
 
-  const stats = referralData?.stats || {
-    totalGenerated: 0,
-    generatedToday: 0,
-    dailyLimit: 5,
-    successfullyUsed: 0,
-    active: 0,
-    expired: 0,
-  }
+  const activeCodes = allCodes.filter((c) => c.status === 'active' && !c.friendRegistered)
+  const usedCodes = allCodes.filter((c) => c.friendRegistered || c.status === 'used')
+  const expiredCodes = allCodes.filter((c) => c.status === 'expired')
+
+  const displayedCodes = filterTab === 'active'
+    ? activeCodes
+    : filterTab === 'used'
+      ? usedCodes
+      : filterTab === 'expired'
+        ? expiredCodes
+        : allCodes
+
   const summary = [
-    { label: 'Total referral codes', value: stats.totalGenerated, tone: 'gold' },
-    { label: 'Generated today', value: `${stats.generatedToday}/${stats.dailyLimit}`, tone: 'blue' },
-    { label: 'Successfully used', value: stats.successfullyUsed, tone: 'mint' },
-    { label: 'Active codes', value: stats.active, tone: 'peach' },
-    { label: 'Expired codes', value: stats.expired, tone: 'lavender' },
+    { label: 'Total Generated', value: `${totalGenerated} / ${maxLimit}`, tone: 'gold', icon: 'folder' },
+    { label: 'Remaining Generations', value: remainingGenerations, tone: 'mint', icon: 'spark' },
+    { label: 'Active Codes', value: activeCodes.length, tone: 'peach', icon: 'users' },
+    { label: 'Successfully Used', value: stats.successfullyUsed, tone: 'blue', icon: 'check' },
+    { label: 'Expired Codes', value: stats.expired, tone: 'lavender', icon: 'clock' },
   ]
 
   return (
     <div className="student-referrals">
       <section className="student-panel student-referrals__intro">
-        <div>
+        <div className="student-referrals__intro-copy">
           <span className="student-eyebrow">SHARE YOUR LEARNING JOURNEY</span>
           <h1>My Referrals</h1>
-          <p>Invite a friend to join Morrow Learning with a one-time referral code.</p>
+          <p>Invite friends to join aiHustle with a one-time referral code. You can generate up to 20 referral codes over the lifetime of your account. Each code expires independently 15 days after creation.</p>
         </div>
-        <button
-          className="student-button"
-          type="button"
-          onClick={generateReferralCode}
-          disabled={loading || !referralData || generating || stats.generatedToday >= stats.dailyLimit}
-        >
-          {generating ? 'Generating…' : 'Generate Referral Code'}
-        </button>
-        {stats.generatedToday >= stats.dailyLimit && (
-          <p className="student-referrals__limit" role="status">
-            You’ve reached today’s limit of 5 codes. The limit resets at 00:00 UTC.
-          </p>
-        )}
+
+        <div className="student-referrals__generator-box">
+          <div className="student-referrals__slots-meter">
+            <div className="student-referrals__slots-meter-info">
+              <span>Total Generated: <strong>{totalGenerated} / {maxLimit}</strong></span>
+              <span>Remaining Generations: <strong>{remainingGenerations}</strong></span>
+            </div>
+            <div className="student-progress-bar-track">
+              <div
+                className="student-progress-bar-fill"
+                style={{ width: `${Math.min(100, (totalGenerated / maxLimit) * 100)}%` }}
+              />
+            </div>
+          </div>
+
+          <div className="student-referrals__generator-controls">
+            <div className="student-referrals__qty-wrap">
+              <label htmlFor="referral-qty-select">Quantity:</label>
+              <select
+                id="referral-qty-select"
+                value={selectedQuantity}
+                onChange={(e) => setSelectedQuantity(Number(e.target.value))}
+                disabled={loading || generating || isAtLimit}
+              >
+                {isAtLimit ? (
+                  <option value={0}>0 generations available</option>
+                ) : (
+                  Array.from({ length: Math.min(remainingGenerations, 20) }, (_, i) => i + 1).map((n) => (
+                    <option key={n} value={n}>
+                      {n} {n === 1 ? 'code' : 'codes'}
+                    </option>
+                  ))
+                )}
+              </select>
+            </div>
+
+            <button
+              className="student-button student-button--primary"
+              type="button"
+              onClick={generateReferralCodes}
+              disabled={loading || !referralData || generating || isAtLimit}
+            >
+              {generating
+                ? 'Generating…'
+                : isAtLimit
+                  ? 'Lifetime Limit Reached (20/20)'
+                  : `Generate ${selectedQuantity > 1 ? selectedQuantity + ' ' : ''}Referral Code${selectedQuantity > 1 ? 's' : ''}`}
+            </button>
+          </div>
+
+          {isAtLimit ? (
+            <div className="student-referrals__status-banner is-limit" role="status">
+              <Icon name="lock" size={16} />
+              <div>
+                <strong>You have reached your lifetime limit of 20 referral codes.</strong>
+                <small>Each student account can generate a maximum of 20 referral codes in total. Used and expired codes cannot be restored.</small>
+              </div>
+            </div>
+          ) : (
+            <div className="student-referrals__status-banner is-available" role="status">
+              <Icon name="spark" size={16} />
+              <div>
+                <span>{totalGenerated} of {maxLimit} lifetime referral codes generated. You can generate {remainingGenerations} more referral code{remainingGenerations === 1 ? '' : 's'}.</span>
+                <small>Each generated code expires independently 15 days after its creation timestamp.</small>
+              </div>
+            </div>
+          )}
+        </div>
       </section>
 
       {error && (
@@ -4142,7 +4822,7 @@ function StudentReferrals({ onLogout }) {
       <section className="student-referrals__summary" aria-label="Referral summary">
         {summary.map((item) => (
           <article className="student-stat" key={item.label}>
-            <span className={`student-stat__icon is-${item.tone}`}><Icon name="users" size={18} /></span>
+            <span className={`student-stat__icon is-${item.tone}`}><Icon name={item.icon || 'users'} size={18} /></span>
             <span className="student-stat__label">{item.label}</span>
             <strong className="student-stat__value">{referralData ? item.value : '—'}</strong>
           </article>
@@ -4153,42 +4833,173 @@ function StudentReferrals({ onLogout }) {
         <div className="student-section-heading">
           <div>
             <span className="student-eyebrow">YOUR CODE ACTIVITY</span>
-            <h2 id="student-referral-history-title">Referral history</h2>
+            <h2 id="student-referral-history-title">Referral History</h2>
           </div>
-          <span className="student-data-note">Codes expire 15 days after they’re generated.</span>
+          <span className="student-data-note">Each code expires independently exactly 15 days after creation.</span>
         </div>
+
+        <div className="student-referrals__tabs" role="tablist" aria-label="Filter referral codes">
+          <button
+            type="button"
+            className={`student-referrals__tab ${filterTab === 'active' ? 'is-active' : ''}`}
+            onClick={() => setFilterTab('active')}
+          >
+            Active Codes ({activeCodes.length})
+          </button>
+          <button
+            type="button"
+            className={`student-referrals__tab ${filterTab === 'all' ? 'is-active' : ''}`}
+            onClick={() => setFilterTab('all')}
+          >
+            All Codes ({allCodes.length})
+          </button>
+          <button
+            type="button"
+            className={`student-referrals__tab ${filterTab === 'used' ? 'is-active' : ''}`}
+            onClick={() => setFilterTab('used')}
+          >
+            Used ({usedCodes.length})
+          </button>
+          <button
+            type="button"
+            className={`student-referrals__tab ${filterTab === 'expired' ? 'is-active' : ''}`}
+            onClick={() => setFilterTab('expired')}
+          >
+            Expired ({expiredCodes.length})
+          </button>
+        </div>
+
+        {filterTab === 'expired' && expiredCodes.length > 0 && (
+          <div className="student-referrals__expired-notice">
+            <Icon name="clock" size={16} />
+            <span>
+              Expired codes are preserved in your historical records. Under the referral policy, all generated codes count toward your 20 lifetime limit. Expired codes can no longer be used for registration.
+            </span>
+          </div>
+        )}
+
         {loading ? (
           <p role="status">Loading your referral history…</p>
-        ) : referralData?.codes.length ? (
+        ) : displayedCodes.length ? (
           <div className="student-referrals__list">
-            {referralData.codes.map((code) => (
-              <article className="student-referral-card" key={code.code}>
-                <div className="student-referral-card__top">
-                  <strong className="student-referral-card__code">{code.code}</strong>
-                  <span className={`student-referral-card__status is-${code.status}`}>{code.status}</span>
-                  {code.status === 'active' && (
-                    <button className="student-button student-button--quiet" type="button" onClick={() => copyReferralCode(code.code)}>
-                      {copiedCode === code.code ? 'Copied' : 'Copy'}
-                    </button>
+            {displayedCodes.map((code) => {
+              const isExpired = code.status === 'expired'
+              const isUsed = code.status === 'used' || code.friendRegistered
+              const isActive = code.status === 'active' && !code.friendRegistered
+              const statusLabel = isUsed ? 'Used' : (isExpired ? 'Expired' : 'Active')
+              return (
+                <article className={`student-referral-card is-${code.status}`} key={code.code}>
+                  <div className="student-referral-card__top">
+                    <strong className="student-referral-card__code">{code.code}</strong>
+                    <span className={`student-referral-card__status is-${code.status}`}>
+                      {statusLabel}
+                    </span>
+                    {isActive && (
+                      <button
+                        className="student-button student-button--quiet student-button--sm"
+                        type="button"
+                        onClick={() => copyReferralCode(code.code)}
+                      >
+                        {copiedCode === code.code ? '✓ Copied' : 'Copy'}
+                      </button>
+                    )}
+                  </div>
+
+                  {isUsed && (code.referralMessage || code.referredStudentName) && (
+                    <div className="student-referral-card__attribution-banner">
+                      <Icon name="check" size={15} />
+                      <span>{code.referralMessage || `${code.referredStudentName} joined aiHustle using your referral code.`}</span>
+                    </div>
                   )}
-                </div>
-                <dl>
-                  <div><dt>Generated</dt><dd>{formatReferralDate(code.createdAt)}</dd></div>
-                  <div><dt>Expires</dt><dd>{formatReferralDate(code.expiresAt)}</dd></div>
-                  <div><dt>Friend registered</dt><dd>{code.friendRegistered ? 'Yes' : 'No'}</dd></div>
-                  {code.usedAt && <div><dt>Used</dt><dd>{formatReferralDate(code.usedAt)}</dd></div>}
-                  {code.registrationStatus && (
-                    <div><dt>Registration status</dt><dd>{code.registrationStatus.replaceAll('_', ' ')}</dd></div>
-                  )}
-                </dl>
-              </article>
-            ))}
+
+                  <dl>
+                    <div><dt>Generated</dt><dd>{formatReferralDate(code.createdAt)}</dd></div>
+                    <div>
+                      <dt>{isExpired ? 'Expired On' : 'Expires On'}</dt>
+                      <dd className={isExpired ? 'is-expired-text' : 'is-active-text'}>
+                        {formatReferralDate(code.expiresAt)}
+                      </dd>
+                    </div>
+                    {isUsed ? (
+                      <>
+                        <div>
+                          <dt>Referred Student</dt>
+                          <dd><strong>{code.referredStudentName || 'Registered Student'}</strong></dd>
+                        </div>
+                        {code.referredStudentRegistrationDate && (
+                          <div>
+                            <dt>Registration Date</dt>
+                            <dd>{formatReferralDate(code.referredStudentRegistrationDate)}</dd>
+                          </div>
+                        )}
+                        {code.usedAt && (
+                          <div>
+                            <dt>Used On</dt>
+                            <dd>{formatReferralDate(code.usedAt)}</dd>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div><dt>Redeemed</dt><dd>Not yet</dd></div>
+                    )}
+                    {code.registrationStatus && (
+                      <div>
+                        <dt>Registration status</dt>
+                        <dd>
+                          <span className={`student-referral-reg-status is-${code.registrationStatus}`}>
+                            {code.registrationStatus === 'account_deleted'
+                              ? 'Account Deleted'
+                              : code.registrationStatus === 'approved'
+                                ? 'Qualified'
+                                : code.registrationStatus === 'awaiting_approval'
+                                  ? 'Pending Verification'
+                                  : code.registrationStatus.replaceAll('_', ' ')}
+                          </span>
+                        </dd>
+                      </div>
+                    )}
+                    {code.rewardStatus && (
+                      <div>
+                        <dt>Reward status</dt>
+                        <dd>
+                          <span className={`student-referral-reward-status is-${code.rewardStatus}`}>
+                            {code.rewardStatus === 'cancelled'
+                              ? 'Cancelled'
+                              : code.rewardStatus === 'earned'
+                                ? 'Earned'
+                                : code.rewardStatus === 'pending'
+                                  ? 'Pending'
+                                  : code.rewardStatus}
+                          </span>
+                        </dd>
+                      </div>
+                    )}
+                  </dl>
+                </article>
+              )
+            })}
           </div>
         ) : !error ? (
           <EmptyState
-            icon="users"
-            title="No referral codes yet"
-            description="Generate a code to invite a friend. Your used and expired codes will stay in this history."
+            icon={filterTab === 'expired' ? 'clock' : filterTab === 'used' ? 'check' : 'users'}
+            title={
+              filterTab === 'active'
+                ? 'No active referral codes'
+                : filterTab === 'expired'
+                  ? 'No expired referral codes'
+                  : filterTab === 'used'
+                    ? 'No used referral codes yet'
+                    : 'No referral codes yet'
+            }
+            description={
+              filterTab === 'active'
+                ? (remainingSlots > 0 ? `You have ${remainingSlots} slot${remainingSlots === 1 ? '' : 's'} available. Select a quantity above and click Generate!` : 'You currently have no active codes.')
+                : filterTab === 'expired'
+                  ? 'When a referral code reaches its 15-day expiration without being used, it will appear here.'
+                  : filterTab === 'used'
+                    ? 'When friends register with your referral codes, they will appear here.'
+                    : 'Generate a code to invite friends to join aiHustle.'
+            }
           />
         ) : null}
       </section>
@@ -4196,148 +5007,829 @@ function StudentReferrals({ onLogout }) {
   )
 }
 
+
+function StudentCertificateModal({ certificate, onClose }) {
+  if (!certificate) return null
+
+  const issueDateFormatted = certificate.issueDate
+    ? new Date(certificate.issueDate).toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' })
+    : new Date().toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' })
+  const completionDateFormatted = certificate.completionDate
+    ? new Date(certificate.completionDate).toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' })
+    : issueDateFormatted
+
+  return (
+    <div className="student-cert-modal-backdrop" onClick={onClose} role="dialog" aria-modal="true">
+      <div className="student-cert-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="student-cert-modal__toolbar no-print">
+          <div className="student-cert-modal__info">
+            <strong>Verified Certificate of Completion</strong>
+            <span>ID: {certificate.certificateId}</span>
+          </div>
+          <div className="student-cert-modal__toolbar-actions">
+            <button
+              type="button"
+              className="student-button student-button--primary"
+              onClick={() => window.print()}
+            >
+              <Icon name="printer" size={15} />
+              <span>Print / Save as PDF</span>
+            </button>
+            <button
+              type="button"
+              className="student-cert-modal__close-btn"
+              onClick={onClose}
+              aria-label="Close certificate"
+            >
+              <Icon name="xCircle" size={18} />
+            </button>
+          </div>
+        </div>
+
+        <div className="student-cert-document" id="printable-certificate">
+          <div className="student-cert-document__border">
+            <div className="student-cert-document__inner">
+              <header className="student-cert-document__header">
+                <div className="student-cert-document__brand">aiHustle LMS</div>
+                <span className="student-cert-document__eyebrow">VERIFIED CERTIFICATE OF ACHIEVEMENT</span>
+                <h1 className="student-cert-document__title">Certificate of Completion</h1>
+              </header>
+
+              <div className="student-cert-document__body">
+                <p className="student-cert-document__presentation">This certificate is proudly awarded to</p>
+                <h2 className="student-cert-document__recipient">{certificate.studentName}</h2>
+                <p className="student-cert-document__narrative">
+                  for demonstrating exceptional commitment, completing all video curriculum lessons, and successfully passing all knowledge checkpoints and milestone assessments for
+                </p>
+                <h3 className="student-cert-document__course-name">{certificate.courseTitle}</h3>
+                <p className="student-cert-document__category">{certificate.courseCategory || 'Professional Skill Path'}</p>
+              </div>
+
+              <footer className="student-cert-document__footer">
+                <div className="student-cert-document__col">
+                  <span className="student-cert-document__val">{completionDateFormatted}</span>
+                  <span className="student-cert-document__lbl">Completion Date</span>
+                </div>
+                <div className="student-cert-document__seal">
+                  <Icon name="award" size={32} />
+                  <span>OFFICIAL CREDENTIAL</span>
+                </div>
+                <div className="student-cert-document__col">
+                  <span className="student-cert-document__val">{certificate.certificateId}</span>
+                  <span className="student-cert-document__lbl">Certificate ID</span>
+                </div>
+              </footer>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function StudentUnenrollConfirmModal({ courseTitle, onConfirm, onCancel, loading, error }) {
+  return (
+    <div className="student-cert-modal-backdrop" onClick={() => !loading && onCancel()} role="alertdialog" aria-modal="true">
+      <div className="student-unenroll-dialog" onClick={(e) => e.stopPropagation()}>
+        <div className="student-unenroll-dialog__header">
+          <span className="student-unenroll-dialog__icon"><Icon name="alertCircle" size={24} /></span>
+          <h3>Unenroll from course?</h3>
+        </div>
+        <p className="student-unenroll-dialog__message">
+          Are you sure you want to unenroll from <strong>{courseTitle}</strong>? Your active enrollment will be deactivated and removed from your active courses.
+        </p>
+        {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
+        <div className="student-unenroll-dialog__actions">
+          <button
+            type="button"
+            className="student-button student-button--subtle"
+            onClick={onCancel}
+            disabled={loading}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="student-button student-button--danger"
+            onClick={onConfirm}
+            disabled={loading}
+          >
+            {loading ? 'Unenrolling…' : 'Confirm Unenroll'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function StudentCourseDetailsPage({ user, onLogout, onLearningDataChanged }) {
-  const { courseId } = useParams()
+  const { courseId: rawCourseId } = useParams()
+  const courseId = (rawCourseId || '').trim().replace(/\/details\/?$/, '').trim()
   const navigate = useNavigate()
-  const [course, setCourse] = useState(null)
+  const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
-  const [enrolling, setEnrolling] = useState(false)
   const [error, setError] = useState('')
+  const [enrolling, setEnrolling] = useState(false)
+  const [enrollSuccessMessage, setEnrollSuccessMessage] = useState('')
+  const [showUnenrollModal, setShowUnenrollModal] = useState(false)
+  const [unenrolling, setUnenrolling] = useState(false)
+  const [unenrollError, setUnenrollError] = useState('')
+  const [showCertificateModal, setShowCertificateModal] = useState(false)
+  const [expandedModules, setExpandedModules] = useState(() => new Set(['0', '1', '2']))
+
   const isCollegeStudent = user?.studentType === 'college' || Boolean(user?.collegeId)
-  const courseLessons = course ? getCourseLessons(course) : []
-  const courseCounts = course ? getCourseCounts(course) : { modules: 0, lessons: 0 }
+
+  const loadDetails = useCallback((signal) => {
+    if (!courseId) {
+      setLoading(false)
+      setError('A valid course must be selected.')
+      return
+    }
+    setLoading(true)
+    setError('')
+    fetchCourseDetails(courseId, onLogout, signal)
+      .then((res) => {
+        setData(res)
+        if (res.curriculum?.length) {
+          setExpandedModules(new Set(res.curriculum.map((_, i) => String(i))))
+        }
+      })
+      .catch(async (err) => {
+        if (err.name === 'AbortError') return
+
+        // Fallback: Check if the course is already available in student enrollments or published catalog
+        try {
+          const [enrollments, published] = await Promise.all([
+            fetchMyEnrollments(onLogout, signal).catch(() => []),
+            fetchPublishedCourses(onLogout, signal).catch(() => []),
+          ])
+
+          const matchingEnrollment = (enrollments || []).find((e) => {
+            const cid = e.courseId && typeof e.courseId === 'object' ? String(e.courseId._id) : String(e.courseId || '')
+            return cid === courseId || String(e._id) === courseId
+          })
+          const enrolledCourse = matchingEnrollment?.courseId && typeof matchingEnrollment.courseId === 'object'
+            ? matchingEnrollment.courseId
+            : null
+          const matchingPublished = (published || []).find((c) => String(c._id) === courseId)
+          const fallbackCourse = enrolledCourse || matchingPublished
+
+          if (fallbackCourse) {
+            const fallbackCounts = getCourseCounts(fallbackCourse)
+            const fallbackProgress = matchingEnrollment ? getCourseProgress(matchingEnrollment) : null
+            const isCompleted = Boolean(fallbackProgress?.isCompleted || matchingEnrollment?.status === 'completed')
+
+            const fallbackCurriculum = (fallbackCourse.modules || []).map((mod, mIdx) => {
+              const items = (mod.contentItems || []).length
+                ? mod.contentItems
+                : (mod.lessons || []).map((l) => ({ ...l, type: 'video-lesson' }))
+              return {
+                moduleId: String(mod._id || `mod-${mIdx}`),
+                title: mod.title || `Module ${mIdx + 1}`,
+                description: mod.description || '',
+                itemCount: items.length,
+                items: items.map((item) => ({
+                  id: String(item._id),
+                  type: item.type || 'video-lesson',
+                  title: item.title || 'Lesson',
+                  description: item.description || '',
+                  durationSeconds: Number(item.durationSeconds) || 0,
+                  points: Number(item.points) || 0,
+                  isCompleted: false,
+                  isFailed: false,
+                  isSubmitted: false,
+                })),
+              }
+            })
+
+            setData({
+              isEnrolled: Boolean(matchingEnrollment),
+              enrollment: matchingEnrollment ? {
+                _id: String(matchingEnrollment._id),
+                status: matchingEnrollment.status,
+                enrolledAt: matchingEnrollment.createdAt,
+                completedAt: matchingEnrollment.completedAt,
+                isCompleted,
+                progressPercentage: fallbackProgress?.percentage || 0,
+              } : null,
+              course: {
+                _id: String(fallbackCourse._id),
+                title: fallbackCourse.title || 'Course Details',
+                description: fallbackCourse.description || '',
+                detailedDescription: fallbackCourse.detailedDescription || fallbackCourse.description || '',
+                category: fallbackCourse.category || 'General',
+                difficulty: fallbackCourse.difficulty || 'beginner',
+                thumbnailUrl: fallbackCourse.thumbnailUrl || '',
+                learningObjectives: fallbackCourse.learningObjectives || [],
+                prerequisites: fallbackCourse.prerequisites || [],
+                targetAudience: fallbackCourse.targetAudience || 'Beginners, professionals, and students.',
+                estimatedDurationMinutes: Number(fallbackCourse.estimatedDurationMinutes) || 0,
+                instructor: fallbackCourse.instructor || { name: 'aiHustle Certified Instructor' },
+                status: fallbackCourse.status || 'published',
+              },
+              counts: {
+                modules: fallbackCourse.modules?.length || 0,
+                lessons: fallbackCounts.lessons || 0,
+                quizzes: fallbackCourse.quizzes?.length || 0,
+                assignments: fallbackCourse.assignments?.length || 0,
+                assessments: fallbackCourse.assignments?.length || 0,
+                durationMinutes: fallbackCourse.estimatedDurationMinutes || 0,
+              },
+              curriculum: fallbackCurriculum,
+              progress: matchingEnrollment ? {
+                progressPercentage: fallbackProgress?.percentage || 0,
+                totalRequiredActivities: fallbackProgress?.totalRequired || 0,
+                completedActivities: fallbackProgress?.completed || 0,
+                isCompleted,
+                videoStats: { total: fallbackCounts.lessons, completed: fallbackProgress?.completed || 0 },
+                quizStats: { total: 0, completed: 0 },
+                assessmentStats: { total: 0, completed: 0 },
+                nextActivity: fallbackProgress?.nextActivity || null,
+              } : null,
+              certificate: null,
+              canUnenroll: Boolean(matchingEnrollment && !isCompleted),
+            })
+            if (fallbackCurriculum.length) {
+              setExpandedModules(new Set(fallbackCurriculum.map((_, i) => String(i))))
+            }
+            return
+          }
+        } catch {
+          // If fallback also fails, set error
+        }
+
+        setError(err instanceof Error ? err.message : 'Course details could not be loaded.')
+      })
+      .finally(() => {
+        setLoading(false)
+      })
+  }, [courseId, onLogout])
 
   useEffect(() => {
     const controller = new AbortController()
-    Promise.all([
-      fetchPublishedCourses(onLogout, controller.signal),
-      fetchMyEnrollments(onLogout, controller.signal),
-    ])
-      .then(([publishedCourses, enrollments]) => {
-        const enrolled = enrollments.find((entry) => String(entry.courseId?._id || entry.courseId) === courseId)
-        if (enrolled) {
-          navigate(`/student/course/${encodeURIComponent(courseId)}/learn`, { replace: true })
-          return
-        }
-        const selectedCourse = publishedCourses.find((item) => String(item._id) === courseId)
-        if (!selectedCourse) throw new Error('This course is not currently published or available.')
-        setCourse(selectedCourse)
-      })
-      .catch((loadError) => {
-        if (loadError.name !== 'AbortError') {
-          setError(loadError instanceof Error ? loadError.message : 'Course details could not be loaded.')
-        }
-      })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false) })
+    loadDetails(controller.signal)
     return () => controller.abort()
-  }, [courseId, navigate, onLogout])
+  }, [loadDetails])
 
-  async function enroll() {
+  async function handleEnroll() {
     setEnrolling(true)
     setError('')
+    setEnrollSuccessMessage('')
     try {
-      const savedAuth = sessionStorage.getItem('lms.auth')
-      const auth = savedAuth ? JSON.parse(savedAuth) : null
-      if (typeof auth?.token !== 'string') {
-        onLogout()
-        return
+      const res = await enrollInCourse(courseId, onLogout)
+      setEnrollSuccessMessage(res.message || 'You have successfully enrolled in this course!')
+      if (typeof onLearningDataChanged === 'function') {
+        onLearningDataChanged()
       }
-      const response = await fetchWithAuth(`${API_BASE_URL}/enrollments`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${auth.token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ courseId }),
-      }, API_BASE_URL, auth.token)
-      const result = await response.json()
-      if (isInvalidSessionResponse(response, result)) {
-        onLogout()
-        return
-      }
-      if (!response.ok) throw new Error(result.message || 'You could not be enrolled in this course.')
-      if (!result.enrollment?._id) throw new Error('The server did not confirm your enrollment.')
-      onLearningDataChanged()
-      navigate(`/student/course/${encodeURIComponent(courseId)}/learn`, { replace: true })
-    } catch (enrollError) {
-      setError(enrollError instanceof Error ? enrollError.message : 'You could not be enrolled in this course.')
+      loadDetails()
+    } catch (enrollErr) {
+      setError(enrollErr instanceof Error ? enrollErr.message : 'Unable to enroll in course.')
     } finally {
       setEnrolling(false)
     }
   }
 
+  async function handleUnenroll() {
+    setUnenrolling(true)
+    setUnenrollError('')
+    try {
+      await unenrollFromCourse(courseId, onLogout)
+      setShowUnenrollModal(false)
+      if (typeof onLearningDataChanged === 'function') {
+        onLearningDataChanged()
+      }
+      loadDetails()
+    } catch (unenrollErr) {
+      setUnenrollError(unenrollErr instanceof Error ? unenrollErr.message : 'Unable to unenroll from course.')
+    } finally {
+      setUnenrolling(false)
+    }
+  }
+
+  function toggleModule(mIndex) {
+    const key = String(mIndex)
+    setExpandedModules((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  const isEnrolled = Boolean(data?.isEnrolled)
+  const isCompleted = Boolean(data?.enrollment?.isCompleted || data?.progress?.isCompleted || data?.enrollment?.status === 'completed')
+  const course = data?.course
+  const counts = data?.counts || { modules: 0, lessons: 0, quizzes: 0, assignments: 0, assessments: 0, durationMinutes: 0 }
+  const curriculum = data?.curriculum || []
+  const progress = data?.progress
+  const certificate = data?.certificate
+  const canUnenroll = Boolean(data?.canUnenroll && !isCompleted)
+
+  const difficultyLabels = {
+    beginner: 'Beginner',
+    intermediate: 'Intermediate',
+    advanced: 'Advanced',
+    'all-levels': 'All levels',
+  }
+
   return (
-    <StudentRoutePage title={course?.title || 'Course details'}>
-      {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
-      {loading ? <p role="status">Loading course details…</p> : course && (
-        <div className="student-course-details">
-          <Link className="student-section-link" to="/student/dashboard">← Back to dashboard</Link>
-          <section className="student-course-details__intro">
-            <header className="student-course-details__header">
-              <div className="student-course-details__identity">
-                <p className="student-course-details__category">
-                  {course.category || 'Other'} <span>·</span> {course.difficulty?.replaceAll('-', ' ') || 'Beginner'}
-                </p>
-                <h1>{course.title}</h1>
-                <span className="student-course-details__published">Published</span>
+    <div className="student-panel student-course-details-page">
+      {/* Breadcrumb Navigation */}
+      <nav className="student-course-details__breadcrumb" aria-label="Breadcrumb">
+        <Link to="/student/courses" className="student-course-details__breadcrumb-link">
+          <Icon name="book" size={14} />
+          <span>My Courses</span>
+        </Link>
+        <span className="student-course-details__breadcrumb-sep">/</span>
+        <span className="student-course-details__breadcrumb-current">
+          {course?.title || 'Course Details'}
+        </span>
+      </nav>
+
+      {/* Notifications / Alerts */}
+      {enrollSuccessMessage && (
+        <div className="student-course-details__success-banner" role="status">
+          <Icon name="check" size={16} />
+          <span>{enrollSuccessMessage}</span>
+        </div>
+      )}
+
+      {loading ? (
+        <div className="student-activities-loading" role="status">
+          <p>Loading course details…</p>
+        </div>
+      ) : error ? (
+        <div className="student-activities-empty-box" role="alert">
+          <div className="student-activities-empty-box__icon is-danger">
+            <Icon name="alertCircle" size={28} />
+          </div>
+          <h3>Course Details Unavailable</h3>
+          <p>{error}</p>
+          <div className="student-activities-empty-box__action" style={{ display: 'flex', gap: '12px' }}>
+            <button
+              type="button"
+              className="student-button student-button--primary"
+              onClick={() => loadDetails()}
+            >
+              <span>Retry</span>
+            </button>
+            <Link to="/student/courses" className="student-button student-button--subtle">
+              <span>Back to My Courses</span>
+            </Link>
+          </div>
+        </div>
+      ) : !course ? (
+        <EmptyState
+          icon="book"
+          title="Course Not Found"
+          description="The requested course does not exist or has been removed from the catalog."
+        />
+      ) : (
+        <>
+          {/* Hero Overview Card */}
+          <section className="student-course-details__hero">
+            <div className="student-course-details__hero-left">
+              <div className="student-course-details__meta-badges">
+                <span className="student-course-details__badge is-category">
+                  {course.category || 'General'}
+                </span>
+                <span className="student-course-details__badge is-difficulty">
+                  {difficultyLabels[course.difficulty] || 'Beginner'}
+                </span>
+                {isCompleted ? (
+                  <span className="student-course-details__badge is-completed">
+                    Completed · 100%
+                  </span>
+                ) : isEnrolled ? (
+                  <span className="student-course-details__badge is-enrolled">
+                    In Progress · {progress?.progressPercentage || 0}%
+                  </span>
+                ) : (
+                  <span className="student-course-details__badge is-available">
+                    Available for Enrollment
+                  </span>
+                )}
               </div>
-              <div className="student-course-details__enroll">
-                {isCollegeStudent
-                  ? <p>Enrollment for this course is managed by your college administrator.</p>
-                  : <button type="button" className="student-enrolled-course__continue" disabled={enrolling} onClick={enroll}>
-                    {enrolling ? 'Enrolling…' : 'Enroll for free'}
-                  </button>}
+
+              <h1 className="student-course-details__title">{course.title}</h1>
+
+              <p className="student-course-details__summary">
+                {course.description || course.detailedDescription || 'Learn in-demand skills through comprehensive lessons, guided practice checkpoints, and practical milestones.'}
+              </p>
+
+              {/* Key Facts Chips */}
+              <div className="student-course-details__facts-bar">
+                <div className="student-course-details__fact-item">
+                  <Icon name="clock" size={14} />
+                  <span>{formatCourseDuration(counts.durationMinutes)}</span>
+                </div>
+                <div className="student-course-details__fact-item">
+                  <Icon name="folder" size={14} />
+                  <span>{counts.modules} {counts.modules === 1 ? 'module' : 'modules'}</span>
+                </div>
+                <div className="student-course-details__fact-item">
+                  <Icon name="play" size={14} />
+                  <span>{counts.lessons} {counts.lessons === 1 ? 'lesson' : 'lessons'}</span>
+                </div>
+                <div className="student-course-details__fact-item">
+                  <Icon name="clipboardCheck" size={14} />
+                  <span>{counts.quizzes} {counts.quizzes === 1 ? 'quiz' : 'quizzes'}</span>
+                </div>
+                <div className="student-course-details__fact-item">
+                  <Icon name="check" size={14} />
+                  <span>{counts.assignments} {counts.assignments === 1 ? 'assignment' : 'assignments'}</span>
+                </div>
               </div>
-            </header>
-            <p className="student-course-details__description">{course.description || course.detailedDescription || 'No course description added yet.'}</p>
+
+              {/* Instructor Information */}
+              <div className="student-course-details__instructor">
+                <span className="student-course-details__instructor-avatar">
+                  <Icon name="user" size={15} />
+                </span>
+                <div className="student-course-details__instructor-text">
+                  <span className="student-course-details__instructor-label">Course Instructor</span>
+                  <strong>{course.instructor?.name || 'aiHustle Senior Faculty'}</strong>
+                </div>
+              </div>
+            </div>
+
+            {/* Hero Right Card: Banner & Enrollment Action Box */}
+            <div className="student-course-details__hero-right">
+              <div className="student-course-details__banner-box">
+                {course.thumbnailUrl ? (
+                  <img
+                    src={course.thumbnailUrl}
+                    alt={`${course.title} banner`}
+                    className="student-course-details__banner-img"
+                  />
+                ) : (
+                  <div className="student-course-details__banner-fallback">
+                    <Icon name="book" size={42} />
+                  </div>
+                )}
+              </div>
+
+              {/* Dynamic Action Box based on Enrollment State */}
+              <div className="student-course-details__action-box">
+                {!isEnrolled ? (
+                  /* STATE A: NOT ENROLLED */
+                  <div className="student-course-details__state-box">
+                    <div className="student-course-details__price-line">
+                      <strong>Free Access</strong>
+                      <span>Full course &amp; certificate</span>
+                    </div>
+
+                    {isCollegeStudent ? (
+                      <div className="student-course-details__college-note">
+                        <Icon name="alertCircle" size={15} />
+                        <p>Enrollment for this course is coordinated by your college administrator.</p>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        className="student-button student-button--primary student-course-details__cta-btn"
+                        onClick={handleEnroll}
+                        disabled={enrolling}
+                      >
+                        <span>{enrolling ? 'Enrolling in course…' : 'Enroll Now →'}</span>
+                      </button>
+                    )}
+
+                    <ul className="student-course-details__perks">
+                      <li><Icon name="check" size={13} /> Immediate access to all video lessons</li>
+                      <li><Icon name="check" size={13} /> Practice quizzes &amp; milestone assessments</li>
+                      <li><Icon name="check" size={13} /> Official Certificate upon 100% completion</li>
+                    </ul>
+                  </div>
+                ) : !isCompleted ? (
+                  /* STATE B: ENROLLED & INCOMPLETE */
+                  <div className="student-course-details__state-box">
+                    <div className="student-course-details__progress-block">
+                      <div className="student-course-details__progress-header">
+                        <span>Learning Progress</span>
+                        <strong>{progress?.progressPercentage || 0}%</strong>
+                      </div>
+                      <div className="student-progress-track">
+                        <span style={{ width: `${Math.min(100, Math.max(0, progress?.progressPercentage || 0))}%` }} />
+                      </div>
+                      <span className="student-course-details__progress-sub">
+                        {progress?.completedActivities || 0} of {progress?.totalRequiredActivities || 0} required activities completed
+                      </span>
+                    </div>
+
+                    <Link
+                      to={`/student/course/${encodeURIComponent(courseId)}/learn`}
+                      className="student-button student-button--primary student-course-details__cta-btn"
+                    >
+                      <span>{(progress?.progressPercentage || 0) > 0 ? 'Continue Learning →' : 'Start Learning →'}</span>
+                    </Link>
+
+                    {/* Secondary Action: Unenroll */}
+                    {canUnenroll && (
+                      <button
+                        type="button"
+                        className="student-course-details__unenroll-btn"
+                        onClick={() => setShowUnenrollModal(true)}
+                      >
+                        Unenroll from course
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  /* STATE C: ENROLLED & COMPLETED */
+                  <div className="student-course-details__state-box is-completed">
+                    <div className="student-course-details__completed-badge">
+                      <Icon name="award" size={18} />
+                      <strong>Course Completed!</strong>
+                    </div>
+                    <p className="student-course-details__completed-copy">
+                      You have met all curriculum requirements and earned your official credential.
+                    </p>
+
+                    <Link
+                      to={`/student/course/${encodeURIComponent(courseId)}/learn`}
+                      className="student-button student-button--primary student-course-details__cta-btn"
+                    >
+                      <span>Review Course →</span>
+                    </Link>
+
+                    <button
+                      type="button"
+                      className="student-button student-button--secondary student-course-details__cert-action-btn"
+                      onClick={() => setShowCertificateModal(true)}
+                    >
+                      <Icon name="award" size={14} />
+                      <span>View Certificate</span>
+                    </button>
+                    {/* Unenroll option is COMPLETELY HIDDEN in State C */}
+                  </div>
+                )}
+              </div>
+            </div>
           </section>
-          <section className="student-course-details__facts" aria-label="Course overview">
-            <div><span>Course duration</span><strong>{formatCourseDuration(course.estimatedDurationMinutes)}</strong></div>
-            <div><span>Modules</span><strong>{courseCounts.modules}</strong></div>
-            <div><span>Lessons</span><strong>{courseCounts.lessons}</strong></div>
-          </section>
-          {(course.learningObjectives?.length > 0 || course.prerequisites?.length > 0) && (
-            <div className="student-course-details__information">
+
+          {/* Certificate Section (Only when Completed) */}
+          {isCompleted && certificate && (
+            <section className="student-course-details__certificate-panel" aria-labelledby="certificate-section-title">
+              <div className="student-course-details__certificate-header">
+                <span className="student-course-details__certificate-icon">
+                  <Icon name="award" size={24} />
+                </span>
+                <div>
+                  <span className="student-eyebrow">OFFICIAL ACCREDITATION</span>
+                  <h2 id="certificate-section-title">Certificate of Completion</h2>
+                  <p>Verified credential for mastering all lessons and passing all required checkpoints.</p>
+                </div>
+              </div>
+
+              <div className="student-cert-mini-card">
+                <div className="student-cert-mini-card__left">
+                  <div className="student-cert-mini-card__brand">aiHustle LMS</div>
+                  <h3 className="student-cert-mini-card__title">{course.title}</h3>
+                  <div className="student-cert-mini-card__meta">
+                    <span>Awarded to: <strong>{certificate.studentName || user?.fullName || user?.username}</strong></span>
+                    <span>Completed: <strong>{new Date(certificate.completionDate || data.enrollment?.completedAt || Date.now()).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</strong></span>
+                    <span>Verification ID: <code>{certificate.certificateId}</code></span>
+                  </div>
+                </div>
+
+                <div className="student-cert-mini-card__actions">
+                  <button
+                    type="button"
+                    className="student-button student-button--primary"
+                    onClick={() => setShowCertificateModal(true)}
+                  >
+                    <Icon name="award" size={15} />
+                    <span>View Certificate</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="student-button student-button--secondary"
+                    onClick={() => {
+                      setShowCertificateModal(true)
+                      setTimeout(() => window.print(), 350)
+                    }}
+                  >
+                    <Icon name="download" size={15} />
+                    <span>Download Certificate</span>
+                  </button>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {/* Course Details Grid: Description, Outcomes, Audience */}
+          <div className="student-course-details__main-grid">
+            <div className="student-course-details__content-col">
+              {/* Detailed Description */}
+              <section className="student-course-details__section">
+                <h2>About this course</h2>
+                <div className="student-course-details__rich-text">
+                  <p>{course.detailedDescription || course.description}</p>
+                </div>
+              </section>
+
+              {/* Learning Outcomes */}
               {course.learningObjectives?.length > 0 && (
                 <section className="student-course-details__section">
                   <h2>What you’ll learn</h2>
-                  <ul>{course.learningObjectives.map((objective, index) => <li key={`${objective}-${index}`}>{objective}</li>)}</ul>
-                </section>
-              )}
-              {course.prerequisites?.length > 0 && (
-                <section className="student-course-details__section">
-                  <h2>Prerequisites</h2>
-                  <ul>{course.prerequisites.map((prerequisite, index) => <li key={`${prerequisite}-${index}`}>{prerequisite}</li>)}</ul>
-                </section>
-              )}
-            </div>
-          )}
-          <section className="student-course-details__section">
-            <h2>Course modules</h2>
-            {course.modules?.length ? course.modules.map((module, moduleIndex) => {
-              const moduleKey = String(module._id || `${module.title}-${moduleIndex}`)
-              const moduleLessons = courseLessons.filter((entry) => entry.moduleKey === moduleKey)
-              return (
-                <article className="student-course-details__module" key={moduleKey}>
-                  <h3>{module.title}</h3>
-                  {module.description && <p>{module.description}</p>}
-                  {moduleLessons.length
-                    ? <ul>{moduleLessons.map(({ lesson, lessonKey }) => (
-                      <li key={lessonKey}>
-                        <strong>{lesson.title}</strong>
-                        {lesson.content && <p>{lesson.content}</p>}
+                  <ul className="student-course-details__outcomes-list">
+                    {course.learningObjectives.map((obj, i) => (
+                      <li key={i} className="student-course-details__outcome-item">
+                        <span className="student-course-details__outcome-check"><Icon name="check" size={14} /></span>
+                        <span>{obj}</span>
                       </li>
-                    ))}</ul>
-                    : <p>No lessons have been added to this module.</p>}
-                </article>
-              )
-            }) : <EmptyState icon="book" title="Course content is not available yet" description="This course does not currently have any modules or lessons." />}
-          </section>
-        </div>
+                    ))}
+                  </ul>
+                </section>
+              )}
+
+              {/* Course Curriculum */}
+              <section className="student-course-details__section" aria-labelledby="curriculum-heading">
+                <div className="student-section-heading">
+                  <div>
+                    <h2 id="curriculum-heading">Course Curriculum</h2>
+                    <span className="student-course-details__curriculum-summary">
+                      {counts.modules} modules · {counts.lessons} lessons · {counts.quizzes} quizzes · {counts.assignments} assignments
+                    </span>
+                  </div>
+                </div>
+
+                <div className="student-course-details__curriculum-accordion">
+                  {curriculum.length === 0 ? (
+                    <EmptyState
+                      icon="book"
+                      title="Curriculum pending"
+                      description="Lessons and learning activities are currently being prepared for this course."
+                    />
+                  ) : (
+                    curriculum.map((mod, mIndex) => {
+                      const isExpanded = expandedModules.has(String(mIndex))
+                      return (
+                        <div className="student-curriculum-module" key={mod.moduleId || mIndex}>
+                          <button
+                            type="button"
+                            className="student-curriculum-module__header"
+                            onClick={() => toggleModule(mIndex)}
+                            aria-expanded={isExpanded}
+                          >
+                            <div className="student-curriculum-module__title-wrap">
+                              <span className="student-curriculum-module__index">Module {mIndex + 1}</span>
+                              <h3 className="student-curriculum-module__title">{mod.title}</h3>
+                            </div>
+                            <div className="student-curriculum-module__meta-wrap">
+                              <span>{mod.itemCount} {mod.itemCount === 1 ? 'item' : 'items'}</span>
+                              <span className="student-curriculum-module__toggle-icon">
+                                <Icon name={isExpanded ? 'chevronUp' : 'chevronDown'} size={16} />
+                              </span>
+                            </div>
+                          </button>
+
+                          {isExpanded && (
+                            <div className="student-curriculum-module__body">
+                              {mod.description && (
+                                <p className="student-curriculum-module__description">{mod.description}</p>
+                              )}
+                              <ul className="student-curriculum-module__items-list">
+                                {mod.items.map((item, itemIndex) => {
+                                  const isLesson = item.type === 'video-lesson'
+                                  const isQuiz = item.type === 'quiz'
+
+                                  return (
+                                    <li className="student-curriculum-item" key={item.id || itemIndex}>
+                                      <div className="student-curriculum-item__left">
+                                        <span className={`student-curriculum-item__icon is-${item.type}`}>
+                                          <Icon
+                                            name={isLesson ? 'play' : isQuiz ? 'clipboardCheck' : 'check'}
+                                            size={14}
+                                          />
+                                        </span>
+                                        <div>
+                                          <strong className="student-curriculum-item__title">{item.title}</strong>
+                                          <div className="student-curriculum-item__details">
+                                            <span className="student-curriculum-item__type-label">
+                                              {isLesson ? 'Video Lesson' : isQuiz ? 'Quiz Checkpoint' : 'Milestone Assessment'}
+                                            </span>
+                                            {item.durationSeconds > 0 && (
+                                              <span>· {formatCourseDuration(Math.round(item.durationSeconds / 60))}</span>
+                                            )}
+                                            {item.points > 0 && (
+                                              <span>· {item.points} pts</span>
+                                            )}
+                                          </div>
+                                        </div>
+                                      </div>
+
+                                      <div className="student-curriculum-item__right">
+                                        {isEnrolled ? (
+                                          item.isCompleted ? (
+                                            <span className="student-activity-status-badge is-mint">
+                                              {isQuiz ? 'Passed' : 'Completed'}
+                                            </span>
+                                          ) : item.isFailed ? (
+                                            <span className="student-activity-status-badge is-peach">
+                                              Failed
+                                            </span>
+                                          ) : item.isSubmitted ? (
+                                            <span className="student-activity-status-badge is-teal">
+                                              Submitted
+                                            </span>
+                                          ) : (
+                                            <span className="student-activity-status-badge is-neutral">
+                                              Pending
+                                            </span>
+                                          )
+                                        ) : (
+                                          <span className="student-curriculum-item__preview-tag">
+                                            Preview
+                                          </span>
+                                        )}
+                                      </div>
+                                    </li>
+                                  )
+                                })}
+                              </ul>
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })
+                  )}
+                </div>
+              </section>
+            </div>
+
+            {/* Sidebar Column: Prerequisites & Audience */}
+            <div className="student-course-details__sidebar-col">
+              <div className="student-course-details__card">
+                <h3>Prerequisites</h3>
+                {course.prerequisites?.length > 0 ? (
+                  <ul className="student-course-details__check-list">
+                    {course.prerequisites.map((req, i) => (
+                      <li key={i}>{req}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="student-course-details__muted-text">
+                    No prior technical knowledge required. Suitable for beginners and self-paced learners.
+                  </p>
+                )}
+              </div>
+
+              <div className="student-course-details__card">
+                <h3>Target Audience</h3>
+                <p className="student-course-details__muted-text">
+                  {course.targetAudience || 'Curious minds, students, and professionals aiming to build practical, in-demand skills.'}
+                </p>
+              </div>
+
+              <div className="student-course-details__card">
+                <h3>Skill Level &amp; Effort</h3>
+                <div className="student-course-details__info-row">
+                  <span>Level:</span>
+                  <strong>{difficultyLabels[course.difficulty] || 'All Levels'}</strong>
+                </div>
+                <div className="student-course-details__info-row">
+                  <span>Estimated Time:</span>
+                  <strong>{formatCourseDuration(counts.durationMinutes)}</strong>
+                </div>
+                <div className="student-course-details__info-row">
+                  <span>Language:</span>
+                  <strong>English</strong>
+                </div>
+                <div className="student-course-details__info-row">
+                  <span>Certificate:</span>
+                  <strong>Official Verified Certificate</strong>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Certificate Modal */}
+          {showCertificateModal && (
+            <StudentCertificateModal
+              certificate={certificate}
+              onClose={() => setShowCertificateModal(false)}
+            />
+          )}
+
+          {/* Unenroll Confirmation Modal */}
+          {showUnenrollModal && (
+            <StudentUnenrollConfirmModal
+              courseTitle={course.title}
+              onConfirm={handleUnenroll}
+              onCancel={() => setShowUnenrollModal(false)}
+              loading={unenrolling}
+              error={unenrollError}
+            />
+          )}
+        </>
       )}
-    </StudentRoutePage>
+    </div>
   )
 }
+
+
 
 function StudentCourseLearningPage({
   onLogout,
@@ -4350,10 +5842,7 @@ function StudentCourseLearningPage({
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const location = useLocation()
-  const searchParams = new URLSearchParams(location.search)
-  const requestedLessonId = searchParams.get('lesson')
-  const requestedActivityId = searchParams.get('activity')
-  const requestedActivityType = searchParams.get('activityType')
+  const requestedLessonId = new URLSearchParams(location.search).get('lesson')
 
   useEffect(() => {
     onCourseTitleChange(enrollment?.courseId?.title || '')
@@ -4394,8 +5883,6 @@ function StudentCourseLearningPage({
           onLearningDataChanged={onLearningDataChanged}
           onLogout={onLogout}
           requestedLessonId={requestedLessonId}
-          requestedActivityId={requestedActivityId}
-          requestedActivityType={requestedActivityType}
           contentSearch={contentSearch}
         />
       )}
@@ -4426,9 +5913,14 @@ function StudentCourses({ user, onLogout }) {
   }, [onLogout, user?.id])
 
   const filteredEnrollments = enrollmentFilter
-    ? enrollments.filter((entry) => enrollmentFilter === 'enrolled'
-      ? ['active', 'completed'].includes(entry.status)
-      : entry.status === enrollmentFilter)
+    ? enrollments.filter((entry) => {
+      const { percentage } = getCourseProgress(entry)
+      const isComplete = entry.status === 'completed' || percentage >= 100
+      if (enrollmentFilter === 'enrolled') return true
+      if (enrollmentFilter === 'completed') return isComplete
+      if (enrollmentFilter === 'active') return !isComplete
+      return true
+    })
     : enrollments
   const pageTitle = enrollmentFilter === 'completed'
     ? 'Completed Courses'
@@ -4454,67 +5946,753 @@ function StudentCourses({ user, onLogout }) {
   )
 }
 
-function StudentAchievements({ onLogout }) {
-  const [enrollments, setEnrollments] = useState([])
+
+
+function formatActivityDueDate(dateStr, isOverdue) {
+  if (!dateStr) return { text: 'No due date', isOverdue: false }
+  try {
+    const d = new Date(dateStr)
+    if (Number.isNaN(d.getTime())) return { text: 'No due date', isOverdue: false }
+    const formatted = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+    return {
+      text: isOverdue ? `Overdue · Due ${formatted}` : `Due ${formatted}`,
+      isOverdue,
+    }
+  } catch {
+    return { text: 'No due date', isOverdue: false }
+  }
+}
+
+function getActivityStatusDetails(activity) {
+  const isQuiz = activity.type === 'quiz'
+  if (isQuiz) {
+    if (activity.status === 'completed') return { text: 'Completed', tone: 'mint' }
+    if (activity.status === 'failed') return { text: 'Failed', tone: 'peach' }
+    if (activity.status === 'in_progress') return { text: 'In Progress', tone: 'blue' }
+    return { text: 'Pending', tone: 'neutral' }
+  }
+  if (activity.status === 'graded') return { text: 'Graded', tone: 'mint' }
+  if (activity.status === 'submitted') return { text: 'Submitted', tone: 'teal' }
+  if (activity.status === 'overdue' || activity.isOverdue) return { text: 'Overdue', tone: 'peach' }
+  return { text: 'Pending', tone: 'neutral' }
+}
+
+function getActivityActionLabel(activity) {
+  const isQuiz = activity.type === 'quiz'
+  if (isQuiz) {
+    if (activity.status === 'completed') return 'Review Quiz'
+    if (activity.status === 'failed') return 'Retry Quiz'
+    if (activity.status === 'in_progress') return 'Continue Quiz'
+    return 'Start Quiz'
+  }
+  if (activity.status === 'graded') return 'View Submission'
+  if (activity.status === 'submitted') return 'View Submission'
+  if (activity.status === 'overdue' || activity.isOverdue) return 'Submit Assignment'
+  return 'Submit Assignment'
+}
+
+function StudentQuizzesAndAssignments({ user, onLogout }) {
+  const [data, setData] = useState({
+    summary: { total: 0, completed: 0, remaining: 0, overdue: 0 },
+    quizStats: { total: 0, completed: 0, remaining: 0, percentage: 0 },
+    assignmentStats: { total: 0, completed: 0, remaining: 0, percentage: 0 },
+    activities: [],
+  })
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [activeFilter, setActiveFilter] = useState('all')
+  const [searchQuery, setSearchQuery] = useState('')
+  const [refreshKey, setRefreshKey] = useState(0)
 
   useEffect(() => {
     const controller = new AbortController()
-    fetchMyEnrollments(onLogout, controller.signal)
-      .then(setEnrollments)
-      .catch((loadError) => {
-        if (loadError.name !== 'AbortError') setError(loadError instanceof Error ? loadError.message : 'Achievements could not be loaded.')
+    setLoading(true)
+    setError('')
+    fetchStudentActivities(onLogout, controller.signal)
+      .then((res) => {
+        if (!controller.signal.aborted) {
+          setData({
+            summary: res.summary || { total: 0, completed: 0, remaining: 0, overdue: 0 },
+            quizStats: res.quizStats || { total: 0, completed: 0, remaining: 0, percentage: 0 },
+            assignmentStats: res.assignmentStats || { total: 0, completed: 0, remaining: 0, percentage: 0 },
+            activities: Array.isArray(res.activities) ? res.activities : [],
+          })
+        }
       })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false) })
+      .catch((err) => {
+        if (err.name !== 'AbortError') {
+          setError(err instanceof Error ? err.message : 'Unable to load quizzes and assignments.')
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false)
+      })
+    return () => controller.abort()
+  }, [onLogout, user?.id, refreshKey])
+
+  const activities = data.activities || []
+
+  const filteredActivities = useMemo(() => {
+    return activities.filter((item) => {
+      if (activeFilter === 'quizzes' && item.type !== 'quiz') return false
+      if (activeFilter === 'assignments' && item.type !== 'assignment') return false
+      if (activeFilter === 'completed') {
+        const isComplete = item.type === 'quiz'
+          ? item.status === 'completed'
+          : (item.status === 'submitted' || item.status === 'graded')
+        if (!isComplete) return false
+      }
+      if (activeFilter === 'remaining') {
+        const isComplete = item.type === 'quiz'
+          ? item.status === 'completed'
+          : (item.status === 'submitted' || item.status === 'graded')
+        if (isComplete) return false
+      }
+      if (activeFilter === 'overdue') {
+        if (!item.isOverdue && item.status !== 'overdue') return false
+      }
+
+      if (searchQuery.trim()) {
+        const q = searchQuery.trim().toLowerCase()
+        const matchesTitle = item.title?.toLowerCase().includes(q)
+        const matchesCourse = item.courseName?.toLowerCase().includes(q)
+        const matchesModule = item.moduleTitle?.toLowerCase().includes(q)
+        if (!matchesTitle && !matchesCourse && !matchesModule) return false
+      }
+
+      return true
+    })
+  }, [activities, activeFilter, searchQuery])
+
+  const tabs = [
+    { id: 'all', label: 'All Activities', count: data.summary.total },
+    { id: 'quizzes', label: 'Quizzes', count: data.quizStats.total },
+    { id: 'assignments', label: 'Assignments', count: data.assignmentStats.total },
+    { id: 'completed', label: 'Completed', count: data.summary.completed },
+    { id: 'remaining', label: 'Remaining', count: data.summary.remaining },
+    { id: 'overdue', label: 'Overdue', count: data.summary.overdue },
+  ]
+
+  return (
+    <section className="student-panel student-activities-page" aria-labelledby="student-activities-heading">
+      <div className="student-section-heading student-activities-page__header">
+        <div>
+          <span className="student-eyebrow">CENTRALIZED ACTIVITY TRACKER</span>
+          <h2 id="student-activities-heading">Quizzes &amp; Assignments</h2>
+          <p className="student-activities-subtitle">
+            Track quizzes, milestone assignments, submission statuses, and deadlines across all your enrolled courses.
+          </p>
+        </div>
+        <button
+          type="button"
+          className="student-activities-refresh-btn"
+          onClick={() => setRefreshKey((k) => k + 1)}
+          disabled={loading}
+          aria-label="Refresh activities"
+        >
+          <Icon name="spark" size={15} />
+          <span>{loading ? 'Refreshing…' : 'Refresh'}</span>
+        </button>
+      </div>
+
+      {error && (
+        <div className="student-activities-error-banner" role="alert">
+          <Icon name="alertCircle" size={18} />
+          <div className="student-activities-error-banner__content">
+            <strong>Unable to load activities</strong>
+            <p>{error}</p>
+          </div>
+          <button
+            type="button"
+            className="student-activities-retry-btn"
+            onClick={() => setRefreshKey((k) => k + 1)}
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      {loading && !activities.length ? (
+        <div className="student-activities-loading" role="status">
+          <p>Loading your quizzes and assignments…</p>
+        </div>
+      ) : !error && (
+        <>
+          {/* Top 4 Summary Cards */}
+          <div className="student-activities-summary-grid">
+            <article className="student-activity-stat-card is-gold">
+              <div className="student-activity-stat-card__header">
+                <span className="student-activity-stat-card__icon is-gold"><Icon name="clipboardCheck" size={18} /></span>
+                <span className="student-activity-stat-card__eyebrow">TOTAL ACTIVITIES</span>
+              </div>
+              <strong className="student-activity-stat-card__value">{data.summary.total}</strong>
+              <span className="student-activity-stat-card__caption">Quizzes &amp; assignments assigned</span>
+            </article>
+
+            <article className="student-activity-stat-card is-mint">
+              <div className="student-activity-stat-card__header">
+                <span className="student-activity-stat-card__icon is-mint"><Icon name="award" size={18} /></span>
+                <span className="student-activity-stat-card__eyebrow">COMPLETED</span>
+              </div>
+              <strong className="student-activity-stat-card__value">{data.summary.completed}</strong>
+              <span className="student-activity-stat-card__caption">Passed quizzes &amp; submissions</span>
+            </article>
+
+            <article className="student-activity-stat-card is-blue">
+              <div className="student-activity-stat-card__header">
+                <span className="student-activity-stat-card__icon is-blue"><Icon name="clock" size={18} /></span>
+                <span className="student-activity-stat-card__eyebrow">REMAINING</span>
+              </div>
+              <strong className="student-activity-stat-card__value">{data.summary.remaining}</strong>
+              <span className="student-activity-stat-card__caption">Pending or in progress work</span>
+            </article>
+
+            <article className="student-activity-stat-card is-peach">
+              <div className="student-activity-stat-card__header">
+                <span className="student-activity-stat-card__icon is-peach"><Icon name="alertCircle" size={18} /></span>
+                <span className="student-activity-stat-card__eyebrow">OVERDUE</span>
+              </div>
+              <strong className="student-activity-stat-card__value">{data.summary.overdue}</strong>
+              <span className="student-activity-stat-card__caption">Past scheduled deadline</span>
+            </article>
+          </div>
+
+          {/* Separate Activity Statistics */}
+          <div className="student-activities-split">
+            <article className="student-activities-section-card">
+              <div className="student-activities-section-card__top">
+                <div>
+                  <span className="student-activity-type-pill is-quiz">QUIZZES</span>
+                  <h3 className="student-activities-section-card__title">Knowledge Checkpoints</h3>
+                </div>
+                <span className="student-activities-section-card__badge">{data.quizStats.percentage}% Completed</span>
+              </div>
+              <div className="student-progress-track student-activities-section-card__progress">
+                <span style={{ width: `${Math.min(100, Math.max(0, data.quizStats.percentage))}%` }} />
+              </div>
+              <div className="student-activities-stats-row">
+                <div className="student-activities-stat-cell">
+                  <span className="student-activities-stat-cell__label">Total Quizzes</span>
+                  <strong className="student-activities-stat-cell__val">{data.quizStats.total}</strong>
+                </div>
+                <div className="student-activities-stat-cell">
+                  <span className="student-activities-stat-cell__label">Passed</span>
+                  <strong className="student-activities-stat-cell__val is-mint">{data.quizStats.completed}</strong>
+                </div>
+                <div className="student-activities-stat-cell">
+                  <span className="student-activities-stat-cell__label">Remaining</span>
+                  <strong className="student-activities-stat-cell__val">{data.quizStats.remaining}</strong>
+                </div>
+                <div className="student-activities-stat-cell">
+                  <span className="student-activities-stat-cell__label">Pass Rate</span>
+                  <strong className="student-activities-stat-cell__val">{data.quizStats.percentage}%</strong>
+                </div>
+              </div>
+            </article>
+
+            <article className="student-activities-section-card">
+              <div className="student-activities-section-card__top">
+                <div>
+                  <span className="student-activity-type-pill is-assignment">ASSIGNMENTS</span>
+                  <h3 className="student-activities-section-card__title">Practical Milestones</h3>
+                </div>
+                <span className="student-activities-section-card__badge">{data.assignmentStats.percentage}% Completed</span>
+              </div>
+              <div className="student-progress-track student-activities-section-card__progress">
+                <span style={{ width: `${Math.min(100, Math.max(0, data.assignmentStats.percentage))}%` }} />
+              </div>
+              <div className="student-activities-stats-row">
+                <div className="student-activities-stat-cell">
+                  <span className="student-activities-stat-cell__label">Total Assignments</span>
+                  <strong className="student-activities-stat-cell__val">{data.assignmentStats.total}</strong>
+                </div>
+                <div className="student-activities-stat-cell">
+                  <span className="student-activities-stat-cell__label">Submitted / Graded</span>
+                  <strong className="student-activities-stat-cell__val is-mint">{data.assignmentStats.completed}</strong>
+                </div>
+                <div className="student-activities-stat-cell">
+                  <span className="student-activities-stat-cell__label">Remaining</span>
+                  <strong className="student-activities-stat-cell__val">{data.assignmentStats.remaining}</strong>
+                </div>
+                <div className="student-activities-stat-cell">
+                  <span className="student-activities-stat-cell__label">Submission Rate</span>
+                  <strong className="student-activities-stat-cell__val">{data.assignmentStats.percentage}%</strong>
+                </div>
+              </div>
+            </article>
+          </div>
+
+          {/* Filters & Search Toolbar */}
+          <div className="student-activities-toolbar">
+            <div className="student-activities-tabs" role="tablist" aria-label="Activity filter tabs">
+              {tabs.map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={activeFilter === tab.id}
+                  className={`student-activities-tab ${activeFilter === tab.id ? 'is-active' : ''}`}
+                  onClick={() => setActiveFilter(tab.id)}
+                >
+                  <span>{tab.label}</span>
+                  <span className="student-activities-tab__badge">{tab.count}</span>
+                </button>
+              ))}
+            </div>
+
+            <div className="student-activities-search">
+              <span className="student-activities-search__icon"><Icon name="search" size={16} /></span>
+              <input
+                type="search"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search by activity, course, or module..."
+                aria-label="Search quizzes and assignments"
+                className="student-activities-search__input"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  className="student-activities-search__clear"
+                  aria-label="Clear search"
+                >
+                  <Icon name="xCircle" size={15} />
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Activity Cards List or Empty States */}
+          {activities.length === 0 ? (
+            <div className="student-activities-empty-box">
+              <EmptyState
+                icon="clipboardCheck"
+                title="No quizzes or assignments yet"
+                description="Your enrolled courses do not have quizzes or assignments assigned yet. As you advance through your lessons, activities will automatically appear here."
+              />
+              <div className="student-activities-empty-box__action">
+                <Link to="/student/courses" className="student-button">
+                  <span>Browse My Courses</span>
+                  <Icon name="arrow" size={14} />
+                </Link>
+              </div>
+            </div>
+          ) : filteredActivities.length === 0 ? (
+            <div className="student-activities-empty-box">
+              <EmptyState
+                icon="search"
+                title="No matching activities found"
+                description="No quizzes or assignments match your current filter or search criteria."
+              />
+              <div className="student-activities-empty-box__action">
+                <button
+                  type="button"
+                  className="student-button student-button--subtle"
+                  onClick={() => { setActiveFilter('all'); setSearchQuery('') }}
+                >
+                  <span>Reset filters</span>
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="student-activities-list">
+              {filteredActivities.map((item) => {
+                const isQuiz = item.type === 'quiz'
+                const statusDetails = getActivityStatusDetails(item)
+                const actionLabel = getActivityActionLabel(item)
+                const dueInfo = formatActivityDueDate(item.dueDate, item.isOverdue || item.status === 'overdue')
+
+                return (
+                  <article
+                    className={`student-activity-card is-${statusDetails.tone}`}
+                    key={`${item.enrollmentId}:${item.id}`}
+                  >
+                    <div className="student-activity-card__main">
+                      <div className="student-activity-card__header-line">
+                        <span className={`student-activity-type-pill is-${item.type}`}>
+                          {isQuiz ? 'Quiz' : 'Assignment'}
+                        </span>
+                        <Link
+                          to={`/student/course/${encodeURIComponent(item.courseId)}`}
+                          className="student-activity-card__course-tag"
+                          title={`Go to ${item.courseName}`}
+                        >
+                          <Icon name="book" size={13} />
+                          <span>{item.courseName}</span>
+                        </Link>
+                        {item.moduleTitle && (
+                          <span className="student-activity-card__module-tag">
+                            {item.moduleTitle}
+                          </span>
+                        )}
+                        <span className={`student-activity-status-badge is-${statusDetails.tone}`}>
+                          {statusDetails.text}
+                        </span>
+                      </div>
+
+                      <h4 className="student-activity-card__title">{item.title}</h4>
+
+                      {item.description && (
+                        <p className="student-activity-card__desc">{item.description}</p>
+                      )}
+
+                      <div className="student-activity-card__meta-bar">
+                        <span className={`student-activity-meta-item ${dueInfo.isOverdue ? 'is-overdue' : ''}`}>
+                          <Icon name="clock" size={13} />
+                          <span>{dueInfo.text}</span>
+                        </span>
+
+                        {item.score && (
+                          <span className="student-activity-meta-item is-score">
+                            <Icon name="award" size={13} />
+                            <span>Score: {item.score}</span>
+                          </span>
+                        )}
+
+                        {!item.score && (item.points || item.totalPoints) && (
+                          <span className="student-activity-meta-item">
+                            <Icon name="chart" size={13} />
+                            <span>{item.points || item.totalPoints} pts</span>
+                          </span>
+                        )}
+
+                        {isQuiz && (
+                          <span className="student-activity-meta-item">
+                            <span>Attempts: {item.attemptsCount || 0} / {item.maxAttempts || 3}</span>
+                          </span>
+                        )}
+
+                        {isQuiz && item.passingPercentage && (
+                          <span className="student-activity-meta-item">
+                            <span>Pass requirement: {item.passingPercentage}%</span>
+                          </span>
+                        )}
+
+                        {!isQuiz && item.latestSubmission?.submittedAt && (
+                          <span className="student-activity-meta-item">
+                            <span>Submitted {new Date(item.latestSubmission.submittedAt).toLocaleDateString()}</span>
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="student-activity-card__action">
+                      <Link
+                        to={item.navigationUrl}
+                        className={`student-activity-action-btn ${statusDetails.tone === 'mint' ? 'is-secondary' : 'is-primary'}`}
+                      >
+                        <span>{actionLabel}</span>
+                        <Icon name="arrow" size={13} />
+                      </Link>
+                    </div>
+                  </article>
+                )
+              })}
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  )
+}
+
+function StudentAchievements({ user, onLogout }) {
+  const [enrollments, setEnrollments] = useState([])
+  const [certificatesByCourse, setCertificatesByCourse] = useState(new Map())
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [actionCertificateId, setActionCertificateId] = useState('')
+  const [actionType, setActionType] = useState('')
+  const [preview, setPreview] = useState(null)
+  const previewUrlRef = useRef('')
+
+  useEffect(() => {
+    const controller = new AbortController()
+    setLoading(true)
+    setError('')
+
+    Promise.all([
+      fetchMyEnrollments(onLogout, controller.signal),
+      fetchStudentCertificates(onLogout, controller.signal).catch(() => []),
+    ])
+      .then(([enrollmentsData, certsData]) => {
+        if (controller.signal.aborted) return
+        setEnrollments(Array.isArray(enrollmentsData) ? enrollmentsData : [])
+        const certMap = new Map()
+        if (Array.isArray(certsData)) {
+          for (const item of certsData) {
+            if (item?.certificate && item?.courseId) {
+              certMap.set(String(item.courseId), item.certificate)
+            }
+          }
+        }
+        setCertificatesByCourse(certMap)
+      })
+      .catch((loadError) => {
+        if (!controller.signal.aborted && loadError.name !== 'AbortError') {
+          setError(loadError instanceof Error ? loadError.message : 'Achievements could not be loaded.')
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false)
+      })
+
     return () => controller.abort()
   }, [onLogout])
+
+  useEffect(() => {
+    return () => {
+      if (previewUrlRef.current) {
+        URL.revokeObjectURL(previewUrlRef.current)
+        previewUrlRef.current = ''
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!preview) return
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') closePreview()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [preview])
+
+  function closePreview() {
+    setPreview(null)
+    if (previewUrlRef.current) {
+      URL.revokeObjectURL(previewUrlRef.current)
+      previewUrlRef.current = ''
+    }
+  }
+
+  async function getStudentAuthToken() {
+    let auth
+    try {
+      auth = JSON.parse(sessionStorage.getItem('lms.auth') || 'null')
+    } catch {
+      onLogout()
+      throw new Error('Your saved student session is invalid. Please sign in again.')
+    }
+    if (typeof auth?.token !== 'string') {
+      onLogout()
+      throw new Error('Your session has ended. Please sign in again.')
+    }
+    return auth.token
+  }
+
+  async function handlePreviewCertificate(certificate, courseTitle) {
+    const certKey = certificate?.id || certificate?._id || certificate?.certificateId
+    if (!certKey) return
+    setActionCertificateId(certKey)
+    setActionType('preview')
+    setError('')
+    try {
+      const token = await getStudentAuthToken()
+      const response = await fetchWithAuth(
+        `${API_BASE_URL}/certificates/${encodeURIComponent(certKey)}/pdf`,
+        { headers: { Authorization: `Bearer ${token}` } },
+        API_BASE_URL,
+        token,
+      )
+      const result = response.ok ? null : await response.json().catch(() => ({}))
+      if (isInvalidSessionResponse(response, result)) {
+        onLogout()
+        throw new Error('Your session has ended. Please sign in again.')
+      }
+      if (!response.ok) {
+        throw new Error(result?.message || 'The certificate PDF could not be opened.')
+      }
+
+      const blob = await response.blob()
+      const objectUrl = URL.createObjectURL(blob)
+      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current)
+      previewUrlRef.current = objectUrl
+      setPreview({
+        ...certificate,
+        id: certKey,
+        courseName: certificate.courseName || courseTitle || 'Course Certificate',
+      })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'The certificate PDF could not be opened.')
+    } finally {
+      setActionCertificateId('')
+      setActionType('')
+    }
+  }
+
+  async function handleDownloadCertificate(certificate, courseTitle) {
+    const certKey = certificate?.id || certificate?._id || certificate?.certificateId
+    if (!certKey) return
+    setActionCertificateId(certKey)
+    setActionType('download')
+    setError('')
+    try {
+      const token = await getStudentAuthToken()
+      const response = await fetchWithAuth(
+        `${API_BASE_URL}/certificates/${encodeURIComponent(certKey)}/pdf?download=true`,
+        { headers: { Authorization: `Bearer ${token}` } },
+        API_BASE_URL,
+        token,
+      )
+      const result = response.ok ? null : await response.json().catch(() => ({}))
+      if (isInvalidSessionResponse(response, result)) {
+        onLogout()
+        throw new Error('Your session has ended. Please sign in again.')
+      }
+      if (!response.ok) {
+        throw new Error(result?.message || 'The certificate PDF could not be downloaded.')
+      }
+
+      const blob = await response.blob()
+      const objectUrl = URL.createObjectURL(blob)
+      const title = certificate.courseName || courseTitle || certificate.name || 'Course'
+      const slug = title
+        .replace(/[^a-zA-Z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+      const filename = slug ? `aiHustle-${slug}-Certificate.pdf` : `aiHustle-certificate-${certificate.certificateId || certKey}.pdf`
+
+      const link = document.createElement('a')
+      link.href = objectUrl
+      link.download = filename
+      document.body.append(link)
+      link.click()
+      link.remove()
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'The certificate PDF could not be downloaded.')
+    } finally {
+      setActionCertificateId('')
+      setActionType('')
+    }
+  }
 
   const completed = enrollments.filter((entry) => entry.status === 'completed')
 
   return (
     <StudentRoutePage eyebrow="YOUR ACHIEVEMENTS" title="My Achievements">
       {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
-      {loading ? <p role="status">Loading your achievements…</p> : !error && (
-        completed.length
-          ? <div className="student-achievements-list">{completed.map((entry) => (
-            <article className="student-achievement-item" key={entry._id}>
-              <span className="student-stat__icon is-mint"><Icon name="award" size={19} /></span>
-              <div><strong>{entry.courseId?.title || 'Completed course'}</strong><small>Course completion milestone</small></div>
-              <span>{entry.updatedAt ? new Date(entry.updatedAt).toLocaleDateString() : 'Date unavailable'}</span>
-            </article>
-          ))}</div>
-          : <EmptyState icon="award" title="No achievements yet" description="Completed-course milestones will appear here when recorded in your enrollment history. Certificates and badges are not yet tracked by the platform." />
+      {loading ? (
+        <p role="status">Loading your achievements…</p>
+      ) : (
+        completed.length ? (
+          <div className="student-achievements-list">
+            {completed.map((entry) => {
+              const courseId = String(entry.courseId?._id || entry.courseId || '')
+              const courseTitle = entry.courseId?.title || 'Completed course'
+              const certificate = certificatesByCourse.get(courseId) || entry.certificate || null
+              const certKey = certificate?.id || certificate?._id || certificate?.certificateId
+              const isPreviewing = Boolean(certKey && actionCertificateId === certKey && actionType === 'preview')
+              const isDownloading = Boolean(certKey && actionCertificateId === certKey && actionType === 'download')
+              const isBusy = Boolean(certKey && actionCertificateId === certKey)
+              const formattedDate = entry.completedAt || entry.updatedAt
+                ? new Date(entry.completedAt || entry.updatedAt).toLocaleDateString()
+                : 'Date unavailable'
+
+              return (
+                <article className="student-achievement-item" key={entry._id}>
+                  <span className="student-stat__icon is-mint">
+                    <Icon name="award" size={19} />
+                  </span>
+                  <div className="student-achievement-info">
+                    <strong>{courseTitle}</strong>
+                    <small>Course completion milestone</small>
+                  </div>
+                  <div className="student-achievement-actions">
+                    {certificate ? (
+                      <>
+                        <button
+                          type="button"
+                          className="student-achievement-btn student-achievement-btn--preview student-achievement-btn--primary"
+                          disabled={isBusy}
+                          onClick={() => handlePreviewCertificate(certificate, courseTitle)}
+                          title="Preview Certificate"
+                        >
+                          <Icon name="eye" size={13} />
+                          <span>{isPreviewing ? 'Opening…' : 'Preview Certificate'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="student-achievement-btn student-achievement-btn--download student-achievement-btn--secondary"
+                          disabled={isBusy}
+                          onClick={() => handleDownloadCertificate(certificate, courseTitle)}
+                          title="Download Certificate"
+                        >
+                          <Icon name="download" size={13} />
+                          <span>{isDownloading ? 'Downloading…' : 'Download Certificate'}</span>
+                        </button>
+                      </>
+                    ) : (
+                      <span className="student-achievement-unavailable">Certificate unavailable</span>
+                    )}
+                  </div>
+                  <span className="student-achievement-date">{formattedDate}</span>
+                </article>
+              )
+            })}
+          </div>
+        ) : (
+          <EmptyState
+            icon="award"
+            title="No achievements yet"
+            description="Completed course milestones and earned certificates will appear here as you finish your courses."
+          />
+        )
+      )}
+
+      {/* Preview Certificate Modal */}
+      {preview && previewUrlRef.current && (
+        <div
+          className="student-certificate-preview"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Certificate preview for ${preview.courseName}`}
+          onClick={(e) => { if (e.target === e.currentTarget) closePreview() }}
+        >
+          <div className="student-certificate-preview__panel">
+            <header>
+              <div className="student-certificate-preview__title-group">
+                <strong>{preview.courseName}</strong>
+                {preview.certificateId && <small>Certificate ID: {preview.certificateId}</small>}
+              </div>
+              <div className="student-certificate-preview__header-actions">
+                <button
+                  type="button"
+                  className="student-certificate-preview__download-btn"
+                  disabled={actionCertificateId === (preview.id || preview.certificateId) && actionType === 'download'}
+                  onClick={() => handleDownloadCertificate(preview, preview.courseName)}
+                  title="Download Certificate PDF"
+                >
+                  <Icon name="download" size={14} />
+                  <span>
+                    {actionCertificateId === (preview.id || preview.certificateId) && actionType === 'download'
+                      ? 'Downloading…'
+                      : 'Download Certificate'}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="student-certificate-preview__close-btn"
+                  onClick={closePreview}
+                  aria-label="Close certificate preview"
+                >
+                  ×
+                </button>
+              </div>
+            </header>
+            <iframe
+              title={`Certificate for ${preview.courseName}`}
+              src={`${previewUrlRef.current}#view=Fit`}
+            />
+          </div>
+        </div>
       )}
     </StudentRoutePage>
   )
 }
 
-function StudentLearningActivity({ onLogout }) {
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
-  const [hasEnrollments, setHasEnrollments] = useState(false)
 
-  useEffect(() => {
-    const controller = new AbortController()
-    fetchMyEnrollments(onLogout, controller.signal)
-      .then((enrollments) => setHasEnrollments(enrollments.length > 0))
-      .catch((loadError) => {
-        if (loadError.name !== 'AbortError') setError(loadError instanceof Error ? loadError.message : 'Learning activity could not be loaded.')
-      })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false) })
-    return () => controller.abort()
-  }, [onLogout])
-
-  return (
-    <StudentRoutePage eyebrow="YOUR LEARNING ACTIVITY" title="Learning Streak">
-      {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
-      {loading ? <p role="status">Checking your learning activity…</p> : !error && (
-        <EmptyState icon="spark" title={hasEnrollments ? 'Learning activity tracking is not available yet' : 'No learning activity recorded'} description={hasEnrollments ? 'Course enrollments are available, but lesson activity and daily streaks are not yet recorded by the platform.' : 'Your learning streak will begin when learning activity tracking is available and records your sessions.'} />
-      )}
-    </StudentRoutePage>
-  )
-}
 
 function StudentSearch({ onLogout, navigateTo }) {
   const [query, setQuery] = useState('')
@@ -4543,10 +6721,10 @@ function StudentSearch({ onLogout, navigateTo }) {
           onLogout()
           throw new Error('Your session has ended. Please sign in again.')
         }
-        const response = await fetchWithAuth(`${API_BASE_URL}/enrollments/me`, {
+        const response = await fetch(`${API_BASE_URL}/enrollments/me`, {
           headers: { Authorization: `Bearer ${auth.token}` },
           signal: controller.signal,
-        }, API_BASE_URL, auth.token)
+        })
         const result = await response.json()
         if (isInvalidSessionResponse(response, result)) {
           onLogout()
@@ -4667,6 +6845,8 @@ function StudentSearch({ onLogout, navigateTo }) {
   )
 }
 
+
+
 function StudentPurchases() {
   return (
     <StudentRoutePage eyebrow="YOUR ACCOUNT ACTIVITY" title="My Purchases">
@@ -4699,10 +6879,10 @@ function StudentProfile({ user, onLogout }) {
           onLogout()
           return
         }
-        const response = await fetchWithAuth(`${API_BASE_URL}/enrollments/me`, {
+        const response = await fetch(`${API_BASE_URL}/enrollments/me`, {
           headers: { Authorization: `Bearer ${auth.token}` },
           signal: controller.signal,
-        }, API_BASE_URL, auth.token)
+        })
         const result = await response.json()
         if (isInvalidSessionResponse(response, result)) {
           onLogout()
@@ -4795,19 +6975,495 @@ function StudentProfile({ user, onLogout }) {
   )
 }
 
-function StudentDashboard({
-  user,
+function LearningActivitySection({
+  overview,
+  todaySummary,
+  weeklyData,
+  weekOffset,
+  onWeekChange,
+  onGoalChange,
   loading,
   error,
+}) {
+  const [selectedGoal, setSelectedGoal] = useState(60)
+  const [savingGoal, setSavingGoal] = useState(false)
+  const [goalFeedback, setGoalFeedback] = useState('')
+
+  useEffect(() => {
+    if (todaySummary?.dailyLearningGoalMinutes) {
+      setSelectedGoal(todaySummary.dailyLearningGoalMinutes)
+    } else if (overview?.dailyLearningGoalMinutes) {
+      setSelectedGoal(overview.dailyLearningGoalMinutes)
+    }
+  }, [todaySummary?.dailyLearningGoalMinutes, overview?.dailyLearningGoalMinutes])
+
+  const handleGoalSelect = async (newGoal) => {
+    setSelectedGoal(newGoal)
+    setSavingGoal(true)
+    setGoalFeedback('')
+    try {
+      if (onGoalChange) {
+        await onGoalChange(newGoal)
+        setGoalFeedback(`Goal updated to ${newGoal} min/day`)
+        setTimeout(() => setGoalFeedback(''), 3000)
+      }
+    } catch (err) {
+      setGoalFeedback(err instanceof Error ? err.message : 'Failed to update goal')
+    } finally {
+      setSavingGoal(false)
+    }
+  }
+
+  if (loading && !overview && !todaySummary) {
+    return (
+      <section className="student-learning-section" aria-busy="true">
+        <div className="student-section-heading">
+          <div>
+            <span className="student-eyebrow"><span /> YOUR LEARNING ACTIVITY</span>
+            <h2>Your Learning Activity</h2>
+            <p className="student-section-subtitle">Loading your real-time learning metrics…</p>
+          </div>
+        </div>
+        <div className="student-learning-skeleton">
+          <div className="student-skeleton-card" />
+          <div className="student-skeleton-card" />
+        </div>
+      </section>
+    )
+  }
+
+  const safeToday = todaySummary || {
+    totalDurationSeconds: 0,
+    totalMinutes: 0,
+    lessonsCompleted: 0,
+    videosWatched: 0,
+    dailyLearningGoalMinutes: selectedGoal,
+    goalProgressPercentage: 0,
+    today: '',
+  }
+
+  const safeWeekly = weeklyData || {
+    days: [],
+    totalWeeklyMinutes: 0,
+    averageDailyMinutes: 0,
+    mostActiveDay: null,
+    mostActiveDayMinutes: 0,
+  }
+
+  const safeOverview = overview || {
+    totalHours: 0,
+    totalMinutes: 0,
+    totalCompletedLessons: 0,
+    totalEnrolledCourses: 0,
+    totalCompletedCourses: 0,
+    pendingLessonsCount: 0,
+    overallProgressPercentage: 0,
+    currentStreak: 0,
+    longestStreak: 0,
+    courses: [],
+  }
+
+  const maxWeeklyMinutes = Math.max(
+    selectedGoal,
+    ...(safeWeekly.days?.map((d) => d.durationMinutes || 0) || [0]),
+    30,
+  )
+
+  return (
+    <section className="student-learning-section" aria-labelledby="learning-activity-heading">
+      <div className="student-section-heading">
+        <div>
+          <span className="student-eyebrow"><span /> YOUR LEARNING ACTIVITY</span>
+          <h2 id="learning-activity-heading">Your Learning Activity</h2>
+          <p className="student-section-subtitle">Track your daily learning habits and weekly progress.</p>
+        </div>
+      </div>
+
+      {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
+      {goalFeedback && <p className="student-courses__message" role="status">{goalFeedback}</p>}
+
+      {/* Top 2-Column Grid: Daily Summary + Weekly Activity Chart */}
+      <div className="student-learning-grid">
+        {/* Card 1: Daily Learning Summary */}
+        <article className="student-panel student-learning-card student-daily-summary-card">
+          <div className="student-learning-card__header">
+            <div>
+              <span className="student-learning-card__tag">TODAY’S HABIT</span>
+              <h3>Daily Learning Summary</h3>
+            </div>
+            <div className="student-goal-selector">
+              <label htmlFor="daily-learning-goal-select">Goal:</label>
+              <select
+                id="daily-learning-goal-select"
+                value={selectedGoal}
+                onChange={(e) => handleGoalSelect(Number(e.target.value))}
+                disabled={savingGoal}
+              >
+                <option value={15}>15 mins</option>
+                <option value={30}>30 mins</option>
+                <option value={45}>45 mins</option>
+                <option value={60}>60 mins</option>
+                <option value={90}>90 mins</option>
+                <option value={120}>120 mins</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="student-daily-stats-row">
+            <div className="student-daily-stat-primary">
+              <strong className="student-daily-stat__number">
+                {formatDuration(safeToday.totalDurationSeconds)}
+              </strong>
+              <span className="student-daily-stat__label">Total learning time today</span>
+            </div>
+
+            {/* Circular Goal Gauge */}
+            <div className="student-daily-goal-gauge">
+              <svg className="student-gauge-svg" viewBox="0 0 100 100">
+                <circle className="student-gauge-bg" cx="50" cy="50" r="40" />
+                <circle
+                  className="student-gauge-fill"
+                  cx="50"
+                  cy="50"
+                  r="40"
+                  strokeDasharray={251.2}
+                  strokeDashoffset={251.2 - (251.2 * Math.min(100, safeToday.goalProgressPercentage)) / 100}
+                />
+              </svg>
+              <div className="student-gauge-center">
+                <strong>{safeToday.goalProgressPercentage}%</strong>
+                <span>GOAL</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Goal Progress Bar */}
+          <div className="student-goal-progress-bar-wrap">
+            <div className="student-goal-progress-info">
+              <span>{safeToday.totalMinutes} of {selectedGoal} min daily goal</span>
+              <span className="student-goal-badge">
+                {safeToday.goalProgressPercentage >= 100
+                  ? '🎉 Daily Goal Achieved!'
+                  : `${Math.max(0, selectedGoal - safeToday.totalMinutes)} min to go`}
+              </span>
+            </div>
+            <div className="student-progress-bar-track">
+              <div
+                className="student-progress-bar-fill"
+                style={{ width: `${Math.min(100, safeToday.goalProgressPercentage)}%` }}
+              />
+            </div>
+          </div>
+
+          {/* Today sub-metrics */}
+          <div className="student-daily-mini-grid">
+            <div className="student-daily-mini-item">
+              <div className="student-daily-mini-icon is-mint">
+                <Icon name="check" size={16} />
+              </div>
+              <div>
+                <strong>{safeToday.lessonsCompleted}</strong>
+                <span>Lessons completed today</span>
+              </div>
+            </div>
+            <div className="student-daily-mini-item">
+              <div className="student-daily-mini-icon is-blue">
+                <Icon name="play" size={14} />
+              </div>
+              <div>
+                <strong>{safeToday.videosWatched}</strong>
+                <span>Videos watched today</span>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        {/* Card 2: Weekly Learning Activity Chart */}
+        <article className="student-panel student-learning-card student-weekly-chart-card">
+          <div className="student-learning-card__header">
+            <div>
+              <span className="student-learning-card__tag">7-DAY ACTIVITY</span>
+              <h3>Weekly Learning Activity</h3>
+            </div>
+            <div className="student-week-toggle" role="tablist" aria-label="Select week">
+              <button
+                type="button"
+                className={`student-week-btn ${weekOffset === 0 ? 'is-active' : ''}`}
+                onClick={() => onWeekChange(0)}
+              >
+                This Week
+              </button>
+              <button
+                type="button"
+                className={`student-week-btn ${weekOffset === -1 ? 'is-active' : ''}`}
+                onClick={() => onWeekChange(-1)}
+              >
+                Previous Week
+              </button>
+            </div>
+          </div>
+
+          {/* 7-day Bar Chart */}
+          <div className="student-bar-chart-container">
+            <div className="student-bar-chart">
+              {safeWeekly.days?.map((day) => {
+                const isToday = day.date === safeToday.today
+                const heightPercent = maxWeeklyMinutes > 0
+                  ? Math.max(day.durationMinutes > 0 ? 10 : 3, Math.round((day.durationMinutes / maxWeeklyMinutes) * 100))
+                  : 3
+                return (
+                  <div
+                    key={day.date}
+                    className={`student-chart-col ${isToday ? 'is-today' : ''}`}
+                    tabIndex={0}
+                    aria-label={`${day.label}: ${formatDuration(day.durationSeconds)}, ${day.lessonsCompleted} lessons`}
+                  >
+                    <div className="student-chart-tooltip" role="tooltip">
+                      <strong>{day.label} {isToday ? '(Today)' : ''}</strong>
+                      <span>{formatDuration(day.durationSeconds)}</span>
+                      <span>{day.lessonsCompleted} lesson{day.lessonsCompleted === 1 ? '' : 's'} completed</span>
+                    </div>
+                    <div className="student-chart-bar-wrap">
+                      <div
+                        className="student-chart-bar-fill"
+                        style={{ height: `${heightPercent}%` }}
+                      />
+                    </div>
+                    <span className="student-chart-col__label">{day.dayName}</span>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+
+          {/* Weekly Summary Metrics Pills */}
+          <div className="student-weekly-pills">
+            <div className="student-weekly-pill">
+              <span>Total this week</span>
+              <strong>{formatMinutes(safeWeekly.totalWeeklyMinutes)}</strong>
+            </div>
+            <div className="student-weekly-pill">
+              <span>Daily average</span>
+              <strong>{formatMinutes(safeWeekly.averageDailyMinutes)} / day</strong>
+            </div>
+            <div className="student-weekly-pill">
+              <span>Most active day</span>
+              <strong>
+                {safeWeekly.mostActiveDay
+                  ? `${safeWeekly.mostActiveDay} (${formatMinutes(safeWeekly.mostActiveDayMinutes)})`
+                  : '—'}
+              </strong>
+            </div>
+          </div>
+        </article>
+      </div>
+
+      {/* Card 3: Overall Learning Progress */}
+      <article className="student-panel student-learning-card student-overall-progress-card">
+        <div className="student-learning-card__header">
+          <div>
+            <span className="student-learning-card__tag">ALL-TIME METRICS</span>
+            <h3>Overall Learning Progress</h3>
+          </div>
+          <div className="student-streak-badge">
+            <span className="student-streak-fire"><Icon name="flame" size={20} /></span>
+            <div>
+              <strong>{safeOverview.currentStreak} Day{safeOverview.currentStreak === 1 ? '' : 's'} Streak</strong>
+              <small>Personal best: {safeOverview.longestStreak} days</small>
+            </div>
+          </div>
+        </div>
+
+        {/* 4 Stat Tiles */}
+        <div className="student-overall-tiles">
+          <div className="student-overall-tile">
+            <span className="student-overall-tile__icon is-gold"><Icon name="clock" size={18} /></span>
+            <span className="student-overall-tile__label">Learning Hours</span>
+            <strong>{safeOverview.totalHours} hrs</strong>
+            <small>{safeOverview.totalMinutes} total minutes</small>
+          </div>
+          <div className="student-overall-tile">
+            <span className="student-overall-tile__icon is-mint"><Icon name="check" size={18} /></span>
+            <span className="student-overall-tile__label">Completed Lessons</span>
+            <strong>{safeOverview.totalCompletedLessons}</strong>
+            <small>Across all enrolled courses</small>
+          </div>
+          <div className="student-overall-tile">
+            <span className="student-overall-tile__icon is-blue"><Icon name="book" size={18} /></span>
+            <span className="student-overall-tile__label">Enrolled Courses</span>
+            <strong>{safeOverview.totalEnrolledCourses}</strong>
+            <small>{safeOverview.totalCompletedCourses} courses completed</small>
+          </div>
+          <div className="student-overall-tile">
+            <span className="student-overall-tile__icon is-peach"><Icon name="chart" size={18} /></span>
+            <span className="student-overall-tile__label">Overall Completion</span>
+            <strong>{safeOverview.overallProgressPercentage}%</strong>
+            <small>Curriculum mastery</small>
+          </div>
+        </div>
+
+        {/* Course-wise Progress Section */}
+        <div className="student-course-progress-list">
+          <h4>Course-Wise Progress</h4>
+          {safeOverview.courses && safeOverview.courses.length > 0 ? (
+            <div className="student-course-progress-cards">
+              {safeOverview.courses.map((course) => (
+                <div className="student-course-progress-item" key={course.courseId}>
+                  <div className="student-course-progress-info">
+                    <div className="student-course-progress-title-row">
+                      <h5>{course.title}</h5>
+                      <span className={`student-course-status-pill is-${course.status}`}>
+                        {course.status === 'completed'
+                          ? 'Completed'
+                          : course.status === 'in_progress'
+                            ? 'In Progress'
+                            : 'Not Started'}
+                      </span>
+                    </div>
+                    <p className="student-course-progress-meta">
+                      {course.completedLessons} of {course.totalLessons} lessons completed ({course.progressPercentage}%)
+                    </p>
+                    <div className="student-progress-bar-track">
+                      <div
+                        className="student-progress-bar-fill"
+                        style={{ width: `${course.progressPercentage}%` }}
+                      />
+                    </div>
+                  </div>
+                  <div className="student-course-progress-action">
+                    <Link
+                      to={
+                        course.nextLessonId
+                          ? `/student/courses?course=${course.courseId}&lesson=${course.nextLessonId}`
+                          : `/student/courses?course=${course.courseId}`
+                      }
+                      className="student-button student-button--primary student-button--sm"
+                    >
+                      {course.status === 'completed' ? 'Review Course' : 'Continue Learning →'}
+                    </Link>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="student-empty-learning-journey">
+              <div className="student-empty-journey-icon">
+                <Icon name="rocket" size={32} />
+              </div>
+              <h5>Your learning journey starts here!</h5>
+              <p>Enroll in a course to track your daily progress, build learning streaks, and master new skills.</p>
+              <Link to="/student/courses" className="student-button student-button--primary">
+                Explore Courses
+              </Link>
+            </div>
+          )}
+        </div>
+      </article>
+    </section>
+  )
+}
+
+function StudentLearningActivity({ onLogout }) {
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [overview, setOverview] = useState(null)
+  const [todaySummary, setTodaySummary] = useState(null)
+  const [weeklyData, setWeeklyData] = useState(null)
+  const [weekOffset, setWeekOffset] = useState(0)
+
+  const loadData = useCallback(async (offset = weekOffset) => {
+    setLoading(true)
+    setError('')
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+    try {
+      const [ovRes, tdRes, wkRes] = await Promise.all([
+        learningRequest(`/learning/overview?timezone=${encodeURIComponent(tz)}`, { onLogout }),
+        learningRequest(`/learning/summary/today?timezone=${encodeURIComponent(tz)}`, { onLogout }),
+        learningRequest(`/learning/activity/weekly?weekOffset=${offset}&timezone=${encodeURIComponent(tz)}`, { onLogout }),
+      ])
+      setOverview(ovRes)
+      setTodaySummary(tdRes)
+      setWeeklyData(wkRes)
+    } catch (loadError) {
+      if (loadError.message !== 'Your session has ended. Please sign in again.') {
+        setError(loadError instanceof Error ? loadError.message : 'Learning activity could not be loaded.')
+      }
+    } finally {
+      setLoading(false)
+    }
+  }, [onLogout, weekOffset])
+
+  useEffect(() => {
+    loadData(weekOffset)
+  }, [weekOffset, loadData])
+
+  const handleGoalChange = async (minutes) => {
+    const res = await learningRequest('/learning/goal', {
+      onLogout,
+      method: 'PUT',
+      body: { dailyLearningGoalMinutes: minutes },
+    })
+    if (res?.dailyLearningGoalMinutes) {
+      setTodaySummary((prev) => prev ? {
+        ...prev,
+        dailyLearningGoalMinutes: res.dailyLearningGoalMinutes,
+        goalProgressPercentage: Math.min(100, Math.round((prev.totalMinutes / res.dailyLearningGoalMinutes) * 100)),
+      } : prev)
+      setOverview((prev) => prev ? {
+        ...prev,
+        dailyLearningGoalMinutes: res.dailyLearningGoalMinutes,
+      } : prev)
+    }
+  }
+
+  return (
+    <StudentRoutePage eyebrow="YOUR LEARNING ACTIVITY" title="Learning Streak">
+      <LearningActivitySection
+        overview={overview}
+        todaySummary={todaySummary}
+        weeklyData={weeklyData}
+        weekOffset={weekOffset}
+        onWeekChange={setWeekOffset}
+        onGoalChange={handleGoalChange}
+        loading={loading}
+        error={error}
+      />
+    </StudentRoutePage>
+  )
+}
+
+
+
+
+
+function StudentDashboard({
+  user,
+  loading = false,
+  error = '',
   onRetry,
   onLogout,
-  isDark,
+  isDark = false,
   onToggleTheme,
-  themePreference,
+  themePreference = 'light',
   onSetTheme,
   onAccountUpdated,
 }) {
   const [sidebarOpen, setSidebarOpen] = useState(false)
+
+  const handleToggleTheme = () => {
+    if (typeof onToggleTheme === 'function') {
+      onToggleTheme()
+    } else if (typeof onSetTheme === 'function') {
+      onSetTheme(isDark ? 'light' : 'dark')
+    } else {
+      const nextTheme = isDark ? 'light' : 'dark'
+      document.documentElement.dataset.theme = nextTheme
+      try {
+        localStorage.setItem('lms.theme', nextTheme)
+      } catch (_) {}
+    }
+  }
+  const [selectedCategory, setSelectedCategory] = useState('')
   const [profileMenuOpen, setProfileMenuOpen] = useState(false)
   const profileMenuRef = useRef(null)
   const [publishedCourseCategories, setPublishedCourseCategories] = useState([])
@@ -4818,34 +7474,52 @@ function StudentDashboard({
   const [learningSummary, setLearningSummary] = useState(emptyLearningSummary)
   const [learningSummaryLoading, setLearningSummaryLoading] = useState(true)
   const [learningSummaryError, setLearningSummaryError] = useState('')
-  const [learningSummaryRefresh, setLearningSummaryRefresh] = useState(0)
+  const [dashboardRefreshKey, setDashboardRefreshKey] = useState(0)
+
+  const [learningOverview, setLearningOverview] = useState(null)
+  const [todaySummary, setTodaySummary] = useState(null)
+  const [weeklyData, setWeeklyData] = useState(null)
+  const [weekOffset, setWeekOffset] = useState(0)
+  const [learningLoading, setLearningLoading] = useState(true)
+  const [learningError, setLearningError] = useState('')
+
   const location = useLocation()
   const navigate = useNavigate()
+  const navigateTo = navigate
+  const isCourseLearning = /^\/student\/course\/[^/]+\/learn$/.test(location.pathname) || (location.pathname.startsWith('/student/course/') && location.pathname.endsWith('/learn'))
+  const isCourseLearningPage = isCourseLearning
+  const isResultsPage = location.pathname.startsWith('/student/results')
+  const isHelpPage = location.pathname.startsWith('/student/help')
   const visibleNavigation = user?.studentType === 'independent'
     ? navigation
     : navigation.filter((item) => item.path !== '/student/referrals')
   const currentPage = visibleNavigation.find((item) => item.path === location.pathname)
-  const isCourseLearningPage = /^\/student\/course\/[^/]+\/learn$/.test(location.pathname)
-  const isResultsPage = location.pathname === '/student/results'
-  const isHelpPage = location.pathname.startsWith('/student/help')
   const secondaryPage = secondaryPages[location.pathname]
-  const pageTitle = currentPage?.label || (isHelpPage ? 'Help Center' : secondaryPage?.label || 'Dashboard')
-  const pageIcon = currentPage
-    ? {
-      Dashboard: 'layoutDashboard',
-      'My Courses': 'bookOpen',
-      Assignments: 'clipboardCheck',
-      'Grades & Results': 'chartNoAxesCombined',
-      'Learning Resources': 'folderOpen',
-      Messages: 'messageCircle',
-      Certificates: 'award',
-      'My Referrals': 'users',
-      'My Profile': 'userRound',
-      Settings: 'settings',
-      'Help Center': 'circleHelp',
-    }[currentPage.label]
-    : isHelpPage ? 'circleHelp' : secondaryPage?.icon || 'layoutDashboard'
+  const pageTitle = isCourseLearning
+    ? (courseLearningTitle || 'Course learning')
+    : currentPage?.label || (isHelpPage ? 'Help Center' : secondaryPage?.label || 'Dashboard')
+  const pageIcon = isCourseLearning
+    ? 'book'
+    : currentPage
+      ? {
+        Dashboard: 'layoutDashboard',
+        'My Courses': 'bookOpen',
+        Assignments: 'clipboardCheck',
+        'Grades & Results': 'chartNoAxesCombined',
+        'Learning Resources': 'folderOpen',
+        Messages: 'messageCircle',
+        Certificates: 'award',
+        'My Referrals': 'users',
+        'My Profile': 'userRound',
+        Settings: 'settings',
+        'Help Center': 'circleHelp',
+      }[currentPage.label] || 'grid'
+      : isHelpPage ? 'circleHelp' : secondaryPage?.icon || 'layoutDashboard'
   const firstName = user?.fullName?.trim().split(/\s+/)[0] || 'Student'
+  const initials = user?.fullName
+    ? user.fullName.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase()
+    : 'S'
+  const completionPercentage = learningSummary.completionPercentage || 0
   const exploreCategories = [
     ...categories,
     ...publishedCourseCategories
@@ -4854,10 +7528,6 @@ function StudentDashboard({
       )))
       .map((label) => ({ label, icon: 'book' })),
   ]
-  const initials = user?.fullName
-    ? user.fullName.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase()
-    : 'S'
-  const completionPercentage = learningSummary.completionPercentage
 
   useEffect(() => {
     if (!profileMenuOpen) return undefined
@@ -4881,43 +7551,85 @@ function StudentDashboard({
     setProfileMenuOpen(false)
   }, [location.pathname])
 
-  useEffect(() => {
-    if (loading) return undefined
-    const controller = new AbortController()
+  const refreshLearningSummary = useCallback(() => {
+    if (typeof invalidateStudentLearningPageCaches === 'function') {
+      try { invalidateStudentLearningPageCaches() } catch (_) {}
+    }
     setLearningSummaryLoading(true)
-    fetchStudentLearningSummary(onLogout, controller.signal)
+    fetchStudentLearningSummary(onLogout)
       .then((summary) => {
-        if (!controller.signal.aborted) {
-          setLearningSummary(summary)
-          setLearningSummaryError('')
-        }
+        setLearningSummary(summary)
+        setLearningSummaryError('')
       })
       .catch((summaryError) => {
-        if (!controller.signal.aborted) {
-          setLearningSummary(emptyLearningSummary)
-          setLearningSummaryError(summaryError instanceof Error
-            ? summaryError.message
-            : 'Learning statistics could not be loaded.')
-        }
+        setLearningSummary(emptyLearningSummary)
+        setLearningSummaryError(summaryError instanceof Error ? summaryError.message : 'Learning statistics could not be loaded.')
       })
       .finally(() => {
-        if (!controller.signal.aborted) setLearningSummaryLoading(false)
+        setLearningSummaryLoading(false)
       })
-    return () => controller.abort()
-  }, [loading, user?.id, onLogout, learningSummaryRefresh])
+    setDashboardRefreshKey((current) => current + 1)
+  }, [onLogout])
+
+  const loadLearningMetrics = useCallback(async (offset = weekOffset) => {
+    setLearningLoading(true)
+    setLearningError('')
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+    try {
+      const [ovRes, tdRes, wkRes] = await Promise.all([
+        learningRequest(`/learning/overview?timezone=${encodeURIComponent(tz)}`, { onLogout }),
+        learningRequest(`/learning/summary/today?timezone=${encodeURIComponent(tz)}`, { onLogout }),
+        learningRequest(`/learning/activity/weekly?weekOffset=${offset}&timezone=${encodeURIComponent(tz)}`, { onLogout }),
+      ])
+      setLearningOverview(ovRes)
+      setTodaySummary(tdRes)
+      setWeeklyData(wkRes)
+    } catch (err) {
+      if (err?.message !== 'Your session has ended. Please sign in again.') {
+        setLearningError(err instanceof Error ? err.message : 'Learning activity could not be loaded.')
+      }
+    } finally {
+      setLearningLoading(false)
+    }
+  }, [onLogout, weekOffset])
+
+  const handleGoalChange = useCallback(async (minutes) => {
+    try {
+      const res = await learningRequest('/learning/goal', {
+        onLogout,
+        method: 'PUT',
+        body: { dailyLearningGoalMinutes: minutes },
+      })
+      if (res?.dailyLearningGoalMinutes) {
+        setTodaySummary((prev) => (prev ? { ...prev, dailyLearningGoalMinutes: res.dailyLearningGoalMinutes } : prev))
+        setLearningOverview((prev) => (prev ? { ...prev, dailyLearningGoalMinutes: res.dailyLearningGoalMinutes } : prev))
+      }
+    } catch {
+      // preserve
+    }
+  }, [onLogout])
 
   useEffect(() => {
+    refreshLearningSummary()
+  }, [refreshLearningSummary])
+
+  useEffect(() => {
+    loadLearningMetrics(weekOffset)
+  }, [loadLearningMetrics, weekOffset, dashboardRefreshKey])
+
+  useEffect(() => {
+    setSidebarOpen(false)
     window.scrollTo(0, 0)
     document.querySelector('.student-main')?.scrollTo(0, 0)
   }, [location.pathname])
 
   useEffect(() => {
-    if (!isCourseLearningPage) {
+    if (!isCourseLearning) {
       setCourseLearningTitle('')
       setCourseContentSearch('')
       setCourseBookmarked(false)
     }
-  }, [isCourseLearningPage])
+  }, [isCourseLearning])
 
   useEffect(() => {
     if (!sidebarOpen) return undefined
@@ -4928,297 +7640,365 @@ function StudentDashboard({
     return () => window.removeEventListener('keydown', closeOnEscape)
   }, [sidebarOpen])
 
-  function navigateTo(path) {
-    navigate(path)
-  }
-
-  function refreshLearningSummary() {
-    invalidateStudentLearningPageCaches()
-    setLearningSummaryRefresh((refresh) => refresh + 1)
-  }
-
   return (
-    <div className={`student-dashboard${sidebarOpen ? ' is-sidebar-open' : ''}${isCourseLearningPage ? ' is-course-learning' : ''}${isResultsPage ? ' is-results-page' : ''}`}>
+    <div
+      className={`student-dashboard${isDark ? ' is-dark' : ''}${sidebarOpen ? ' is-sidebar-open' : ''}${isCourseLearning ? ' is-course-learning' : ''}${isResultsPage ? ' is-results-page' : ''}`}
+      data-theme={isDark ? 'dark' : 'light'}
+    >
       <aside
         id="student-navigation"
         className={`student-sidebar${sidebarOpen ? ' is-open' : ''}`}
-        aria-label="Student navigation"
-        aria-hidden={!sidebarOpen}
-        inert={!sidebarOpen}
+        aria-label="Student primary navigation"
       >
-        <a className="student-sidebar__brand" href="/" aria-label="Morrow Learning home">
-          <img src="/logo.png" alt="Morrow Learning" />
-          <span>LEARN. GROW. BECOME.</span>
-        </a>
-        <p className="student-sidebar__label">LEARNING SPACE</p>
-        <nav className="student-sidebar__nav">
-          {visibleNavigation.map((item) => (
-            <Link
-              key={item.label}
-              to={item.path}
-              className={`student-sidebar__link${item.path === location.pathname ? ' is-active' : ''}`}
-              aria-current={item.path === location.pathname ? 'page' : undefined}
-            >
-              <Icon name={item.icon} size={18} />
-              <span>{item.label}</span>
-              {item.label === 'Messages' && <span className="student-sidebar__soon">Soon</span>}
-            </Link>
-          ))}
+        <div className="student-sidebar__brand">
+          <div className="student-brand-mark">
+            <span className="student-brand-dot" />
+            aiHustle
+          </div>
+          <span className="student-brand-tag">Student</span>
+        </div>
+
+        <nav className="student-sidebar__nav student-nav" aria-label="Student navigation links">
+          {visibleNavigation.map((item) => {
+            const active = item.path === location.pathname
+              || (item.path === '/student/courses' && location.pathname.startsWith('/student/course/'))
+              || (item.path === '/student/help' && location.pathname.startsWith('/student/help'))
+            return (
+              <Link
+                key={item.path}
+                className={`student-sidebar__link student-nav__item${active ? ' is-active' : ''}`}
+                to={item.path}
+                onClick={() => setSidebarOpen(false)}
+              >
+                <span className="student-nav__icon"><Icon name={item.icon} size={18} /></span>
+                <span>{item.label}</span>
+                {item.label === 'Messages' && <span className="student-sidebar__soon">Soon</span>}
+              </Link>
+            )
+          })}
         </nav>
-        <div className="student-sidebar__bottom">
+
+        <div className="student-sidebar__bottom student-sidebar__footer">
+          <div className="student-sidebar__profile student-user-card">
+            <span className="student-avatar student-user-avatar">{initials}</span>
+            <div className="student-sidebar__identity student-user-meta">
+              <strong>{user?.fullName || 'Student'}</strong>
+              <small>{user?.studentType === 'college' ? (user?.collegeName || 'College Student') : 'Independent'}</small>
+            </div>
+          </div>
           <button className="student-sidebar__logout" type="button" onClick={onLogout}>
-            <Icon name="logout" size={17} /> Logout
+            <Icon name="logout" size={17} />
+            <span>Sign Out</span>
           </button>
         </div>
       </aside>
 
+      <div className={`student-backdrop${sidebarOpen ? ' is-open' : ''}`} onClick={() => setSidebarOpen(false)} />
+
       <main className="student-main" id="student-overview">
         <header className="student-topbar">
-          {(!isCourseLearningPage || sidebarOpen) && <button
-            className="student-icon-button student-menu-toggle"
-            type="button"
-            aria-label={sidebarOpen ? 'Close navigation' : 'Open navigation'}
-            aria-expanded={sidebarOpen}
-            aria-controls="student-navigation"
-            onClick={() => setSidebarOpen((open) => !open)}
-          >
-            <Icon name="menu" />
-          </button>}
-          <div className={`student-breadcrumb student-page-heading${isCourseLearningPage ? ' student-course-learning-topbar__identity' : ''}`}>
-            {isCourseLearningPage ? (
-              <>
-                <Link to="/student/courses">← Back to My Courses</Link>
-                <span aria-hidden="true" />
-                <strong>{courseLearningTitle || 'Course learning'}</strong>
-              </>
-            ) : isResultsPage ? null : (
-              <>
-                <Icon name={pageIcon} size={19} />
-                <strong>{pageTitle}</strong>
-              </>
-            )}
-          </div>
-          {isCourseLearningPage ? (
-            <label className="student-search student-course-learning-topbar__search">
-              <Icon name="search" size={17} />
-              <input
-                type="search"
-                value={courseContentSearch}
-                onChange={(event) => setCourseContentSearch(event.target.value)}
-                placeholder="Search here..."
-                aria-label="Search course content"
-              />
-            </label>
-          ) : <StudentSearch onLogout={onLogout} navigateTo={navigateTo} />}
-          {isCourseLearningPage && (
-            <button
-              className={`student-course-learning__bookmark student-course-learning-topbar__bookmark${courseBookmarked ? ' is-active' : ''}`}
-              type="button"
-              aria-label={courseBookmarked ? 'Remove course bookmark' : 'Bookmark course'}
-              aria-pressed={courseBookmarked}
-              onClick={() => setCourseBookmarked((saved) => !saved)}
-            >
-              <Icon name="book" size={17} />
-            </button>
-          )}
-          <div className="student-topbar__actions">
-            <ThemeToggle isDark={isDark} onToggle={onToggleTheme} className="student-theme-toggle" />
-            <StudentNotificationBell onLogout={onLogout} />
-            <div className={`student-profile-menu${profileMenuOpen ? ' is-open' : ''}`} ref={profileMenuRef}>
+          <div className="student-topbar__left">
+            {(!isCourseLearning || sidebarOpen) && (
               <button
-                className="student-profile-trigger"
+                className="student-icon-button student-menu-toggle"
                 type="button"
-                aria-haspopup="menu"
-                aria-expanded={profileMenuOpen}
-                aria-controls="student-profile-dropdown"
-                onClick={() => setProfileMenuOpen((isOpen) => !isOpen)}
+                aria-label={sidebarOpen ? 'Close navigation' : 'Open navigation'}
+                aria-expanded={sidebarOpen}
+                aria-controls="student-navigation"
+                onClick={() => setSidebarOpen((current) => !current)}
               >
-                <span className="student-avatar">{initials}</span>
-                <span className="student-profile-trigger__copy">
-                  <strong>{user?.fullName || 'Student'}</strong><small>Student</small>
-                </span>
+                <Icon name="menu" size={20} />
               </button>
-              {profileMenuOpen && (
-                <div className="student-profile-dropdown" id="student-profile-dropdown" role="menu">
-                  <button
-                    className="student-profile-dropdown__logout"
-                    type="button"
-                    role="menuitem"
-                    onClick={onLogout}
-                  >
-                    <Icon name="logout" size={16} /> Logout
-                  </button>
-                </div>
+            )}
+            <div className={`student-breadcrumb student-page-heading${isCourseLearning ? ' student-course-learning-topbar__identity' : ''}`}>
+              {isCourseLearning ? (
+                <>
+                  <Link to="/student/courses">← Back to My Courses</Link>
+                  <span aria-hidden="true" />
+                  <strong>{courseLearningTitle || 'Course learning'}</strong>
+                </>
+              ) : isResultsPage ? null : (
+                <>
+                  <Icon name={pageIcon} size={19} />
+                  <strong>{pageTitle}</strong>
+                </>
               )}
+            </div>
+          </div>
+          <div className="student-topbar__right">
+            {isCourseLearningPage ? (
+              <label className="student-search student-course-learning-topbar__search">
+                <Icon name="search" size={17} />
+                <input
+                  type="search"
+                  value={courseContentSearch}
+                  onChange={(event) => setCourseContentSearch(event.target.value)}
+                  placeholder="Search here..."
+                  aria-label="Search course content"
+                />
+              </label>
+            ) : <StudentSearch onLogout={onLogout} navigateTo={navigateTo} />}
+            {isCourseLearningPage && (
+              <button
+                className={`student-course-learning__bookmark student-course-learning-topbar__bookmark${courseBookmarked ? ' is-active' : ''}`}
+                type="button"
+                aria-label={courseBookmarked ? 'Remove course bookmark' : 'Bookmark course'}
+                aria-pressed={courseBookmarked}
+                onClick={() => setCourseBookmarked((saved) => !saved)}
+              >
+                <Icon name="book" size={17} />
+              </button>
+            )}
+            <div className="student-topbar__actions">
+              <ThemeToggle isDark={isDark} onToggle={handleToggleTheme} onToggleTheme={handleToggleTheme} className="student-theme-toggle" />
+              <StudentNotificationBell onLogout={onLogout} />
+              <div className={`student-profile-menu${profileMenuOpen ? ' is-open' : ''}`} ref={profileMenuRef}>
+                <button
+                  className="student-profile-trigger"
+                  type="button"
+                  aria-haspopup="menu"
+                  aria-expanded={profileMenuOpen}
+                  aria-controls="student-profile-dropdown"
+                  onClick={() => setProfileMenuOpen((isOpen) => !isOpen)}
+                >
+                  <span className="student-avatar">{initials}</span>
+                  <span className="student-profile-trigger__copy">
+                    <strong>{user?.fullName || 'Student'}</strong>
+                    <small>{user?.studentType === 'college' ? (user?.collegeName || 'College Student') : 'Independent'}</small>
+                  </span>
+                </button>
+                {profileMenuOpen && (
+                  <div className="student-profile-dropdown" id="student-profile-dropdown" role="menu">
+                    <button
+                      className="student-profile-dropdown__logout"
+                      type="button"
+                      role="menuitem"
+                      onClick={onLogout}
+                    >
+                      <Icon name="logout" size={16} /> Logout
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </header>
 
-        <div className="student-content">
-          {loading ? (
-            <section className="student-state-card" aria-live="polite">
-              <span className="student-loader" />
-              <h1>Preparing your learning space</h1>
-              <p>Verifying your student account...</p>
-            </section>
-          ) : error ? (
-            <section className="student-state-card student-state-card--error" role="alert">
-              <span className="student-state-card__icon"><Icon name="lock" size={22} /></span>
-              <h1>We couldn’t verify your session</h1>
+        <div className="student-content student-body">
+          {error ? (
+            <div className="student-panel student-state-panel is-error">
+              <Icon name="alertCircle" size={28} />
+              <h2>Something went wrong</h2>
               <p>{error}</p>
-              <div><button className="student-button" type="button" onClick={onRetry}>Try again</button>
-                <button className="student-button student-button--quiet" type="button" onClick={onLogout}>Return to login</button></div>
-            </section>
+              {onRetry && (
+                <button className="student-button" type="button" onClick={onRetry}>
+                  Try again
+                </button>
+              )}
+            </div>
+          ) : loading ? (
+            <div className="student-panel student-state-panel is-loading">
+              <Icon name="spark" size={28} />
+              <p>Loading your dashboard…</p>
+            </div>
           ) : (
             <Routes>
               <Route path="/student/dashboard" element={
                 <>
-              <section className="student-welcome">
-                <div className="student-welcome__copy">
-                  <span className="student-eyebrow"><span /> YOUR LEARNING SPACE</span>
-                  <h1>Welcome back, {firstName}!</h1>
-                  <p>Continue learning, achieve your goals and track your progress.</p>
-                  <span className="student-welcome__today"><Icon name="spark" size={16} /> A little progress adds up.</span>
-                </div>
-                <LearningIllustration />
-              </section>
+                  <section className="student-welcome">
+                    <div className="student-welcome__copy">
+                      <span className="student-eyebrow"><span /> YOUR LEARNING SPACE</span>
+                      <h1>Welcome back, {firstName}!</h1>
+                      <p>Continue learning, achieve your goals and track your progress.</p>
+                      <span className="student-welcome__today"><Icon name="spark" size={16} /> A little progress adds up.</span>
+                    </div>
+                    <LearningIllustration />
+                  </section>
 
-              {learningSummaryError && (
-                <p className="student-courses__message is-error" role="alert">{learningSummaryError}</p>
-              )}
-              <section className="student-stats" aria-label="Student statistics">
-                {stats.map((stat) => (
-                  <article className="student-stat" key={stat.label}>
-                    <span className={`student-stat__icon is-${stat.tone}`}><Icon name={stat.icon} size={19} /></span>
-                    <span className="student-stat__label">{stat.label}</span>
-                    <strong className="student-stat__value" aria-label={`${learningSummary[stat.value]} ${stat.label.toLowerCase()}`}>
-                      {learningSummary[stat.value]}
-                    </strong>
-                    <small>{learningSummaryLoading ? 'Updating your learning data…' : stat.caption}</small>
-                  </article>
-                ))}
-              </section>
+                  {learningSummaryError && (
+                    <p className="student-courses__message is-error" role="alert">{learningSummaryError}</p>
+                  )}
+                  <section className="student-stats student-stats-grid" aria-label="Student statistics">
+                    {stats.map((stat) => {
+                      const count = learningSummary[stat.value] ?? 0
+                      return (
+                        <article key={stat.label} className={`student-stat student-stat-card is-${stat.tone} student-stat-card--${stat.tone}`}>
+                          <span className={`student-stat__icon student-stat-card__icon is-${stat.tone}`}><Icon name={stat.icon} size={19} /></span>
+                          <span className="student-stat__label">{stat.label}</span>
+                          <strong className="student-stat__value" aria-label={`${count} ${stat.label.toLowerCase()}`}>
+                            {count}
+                          </strong>
+                          <small>{learningSummaryLoading ? 'Updating your learning data…' : stat.caption}</small>
+                        </article>
+                      )
+                    })}
+                  </section>
 
-              <section className="student-panel student-progress-panel" aria-labelledby="student-progress-title">
-                <div className="student-section-heading">
-                  <div><span className="student-eyebrow">YOUR JOURNEY</span><h2 id="student-progress-title">My learning progress</h2></div>
-                  <span className="student-data-note">
-                    {learningSummaryLoading ? 'Updating progress…' : `${learningSummary.totalLessons} lessons across enrolled courses`}
-                  </span>
-                </div>
-                <div className="student-progress-layout">
-                  <div
-                    className="student-donut"
-                    role="img"
-                    aria-label={`Overall learning completion ${completionPercentage}%`}
-                    style={{ background: `conic-gradient(#5d9a83 ${completionPercentage}%, #dedfd5 ${completionPercentage}% 100%)` }}
-                  >
-                    <div><strong>{completionPercentage}%</strong><span>OVERALL</span></div>
-                  </div>
-                  <div className="student-lesson-counts">
-                    {[
-                      ['Completed lessons', 'completedLessons', 'mint'],
-                      ['Lessons in progress', 'inProgressLessons', 'gold'],
-                      ['Lessons not started', 'notStartedLessons', 'gray'],
-                    ].map(([label, value, tone]) => (
-                      <div className="student-lesson-count" key={label}>
-                        <span className={`student-lesson-count__dot is-${tone}`} />
-                        <span>{label}</span>
-                        <strong>{learningSummary[value]}</strong>
-                      </div>
-                    ))}
-                    <p>Counts update as you start and complete lessons.</p>
-                  </div>
-                </div>
-              </section>
+                  <LearningActivitySection
+                    overview={learningOverview}
+                    todaySummary={todaySummary}
+                    weeklyData={weeklyData}
+                    weekOffset={weekOffset}
+                    onWeekChange={setWeekOffset}
+                    onGoalChange={handleGoalChange}
+                    loading={learningLoading}
+                    error={learningError}
+                  />
 
-              <section className="student-categories" aria-labelledby="student-categories-title">
-                <h2 id="student-categories-title">Explore categories</h2>
-                <div className="student-categories__list">
-                  {exploreCategories.map((category) => (
-                    <button
-                      className={`student-category student-category-link${selectedCourseCategory === category.label ? ' is-selected' : ''}`}
-                      key={category.label}
-                      type="button"
-                      aria-pressed={selectedCourseCategory === category.label}
-                      onClick={() => setSelectedCourseCategory((current) => (
-                        current === category.label ? '' : category.label
-                      ))}
-                    >
-                      <Icon name={category.icon} size={19} />
-                      {category.label}
-                    </button>
-                  ))}
-                </div>
-              </section>
-
-              <section className="student-panel" aria-labelledby="student-courses-title">
-                <div className="student-section-heading">
-                  <div><span className="student-eyebrow">PICK UP WHERE YOU LEFT OFF</span><h2 id="student-courses-title">My Courses</h2></div>
-                  <div className="student-dashboard-courses__actions">
-                    {selectedCourseCategory && (
-                      <button
-                        className="student-section-link"
-                        type="button"
-                        onClick={() => setSelectedCourseCategory('')}
-                      >
-                        Clear filter
-                      </button>
-                    )}
-                    <Link className="student-section-link" to="/student/courses">View all</Link>
-                  </div>
-                </div>
-                <StudentDashboardCourses
-                  onLogout={onLogout}
-                  selectedCategory={selectedCourseCategory}
-                />
-              </section>
-
-              <StudentAvailableCourses
-                user={user}
-                onLogout={onLogout}
-                onLearningDataChanged={refreshLearningSummary}
-                onCategoriesLoaded={setPublishedCourseCategories}
-                selectedCategory={selectedCourseCategory}
-              />
-
-              <div className="student-two-column">
-                <section className="student-panel" aria-labelledby="student-assignments-title">
-                  <div className="student-section-heading">
-                    <div><span className="student-eyebrow">STAY ON TRACK</span><h2 id="student-assignments-title">Upcoming assignments</h2></div>
-                    <Link className="student-section-link student-section-link--muted" to="/student/assignments">View all</Link>
-                  </div>
-                  <StudentDashboardUpcomingAssignments onLogout={onLogout} />
-                </section>
-                <section className="student-panel student-announcements" aria-labelledby="student-announcements-title">
-                  <div className="student-section-heading">
-                    <div><span className="student-eyebrow">FROM YOUR LEARNING COMMUNITY</span><h2 id="student-announcements-title">Announcements</h2></div>
-                    <Link className="student-section-link student-section-link--muted" to="/student/announcements">
-                      Updates <Icon name="arrow" size={15} />
-                    </Link>
-                  </div>
-                  <NotificationFeed role="student" onLogout={onLogout} />
-                </section>
-              </div>
-
-              <section className="student-tools" aria-labelledby="student-tools-title">
-                <div className="student-section-heading">
-                  <div><span className="student-eyebrow">MORE FOR YOUR JOURNEY</span><h2 id="student-tools-title">Student tools</h2></div>
-                </div>
-                <div className="student-tools-grid">
-                  {tools.map((tool) => (
-                    <Link className="student-tool-card" id={tool.id} key={tool.id} to={tool.path}>
-                      <span className="student-tool-card__icon"><Icon name={tool.icon} size={19} /></span>
-                      <span className="student-tool-card__copy">
-                        <h3>{tool.title}</h3>
-                        <p>{tool.description}</p>
+                  <section className="student-panel student-progress-panel" aria-labelledby="student-progress-title">
+                    <div className="student-section-heading">
+                      <div><span className="student-eyebrow">YOUR JOURNEY</span><h2 id="student-progress-title">My learning progress</h2></div>
+                      <span className="student-data-note">
+                        {learningSummaryLoading ? 'Updating progress…' : `${learningSummary.totalLessons} lessons across enrolled courses`}
                       </span>
-                      <span className="student-tool-card__arrow" aria-hidden="true"><Icon name="arrow" size={18} /></span>
-                    </Link>
-                  ))}
-                </div>
-              </section>
-              <footer className="student-footer"><span>Made for curious minds</span><span>Keep going, one lesson at a time.</span></footer>
+                    </div>
+                    <div className="student-progress-layout">
+                      <div
+                        className="student-donut"
+                        role="img"
+                        aria-label={`Overall learning completion ${completionPercentage}%`}
+                        style={{ background: `conic-gradient(#5d9a83 ${completionPercentage}%, #dedfd5 ${completionPercentage}% 100%)` }}
+                      >
+                        <div><strong>{completionPercentage}%</strong><span>OVERALL</span></div>
+                      </div>
+                      <div className="student-lesson-counts">
+                        {[
+                          ['Completed lessons', 'completedLessons', 'mint'],
+                          ['Lessons in progress', 'inProgressLessons', 'gold'],
+                          ['Lessons not started', 'notStartedLessons', 'gray'],
+                        ].map(([label, value, tone]) => (
+                          <div className="student-lesson-count" key={label}>
+                            <span className={`student-lesson-count__dot is-${tone}`} />
+                            <span>{label}</span>
+                            <strong>{learningSummary[value]}</strong>
+                          </div>
+                        ))}
+                        <p>Counts update as you start and complete lessons.</p>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section className="student-categories" aria-labelledby="student-categories-title">
+                    <h2 id="student-categories-title">Explore categories</h2>
+                    <div className="student-categories__list">
+                      <button
+                        className={`student-category student-category-link${!selectedCourseCategory && !selectedCategory ? ' is-selected is-active' : ''}`}
+                        type="button"
+                        onClick={() => {
+                          setSelectedCategory('')
+                          setSelectedCourseCategory('')
+                        }}
+                      >
+                        <Icon name="grid" size={16} />
+                        <span>All Courses</span>
+                      </button>
+                      {exploreCategories.map((category) => (
+                        <button
+                          className={`student-category student-category-link${(selectedCourseCategory === category.label || selectedCategory === category.label) ? ' is-selected is-active' : ''}`}
+                          key={category.label}
+                          type="button"
+                          aria-pressed={selectedCourseCategory === category.label || selectedCategory === category.label}
+                          onClick={() => {
+                            const next = (selectedCourseCategory === category.label || selectedCategory === category.label) ? '' : category.label
+                            setSelectedCategory(next)
+                            setSelectedCourseCategory(next)
+                          }}
+                        >
+                          <Icon name={category.icon || 'book'} size={16} />
+                          <span>{category.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+
+                  <section className="student-panel" aria-labelledby="student-courses-title">
+                    <div className="student-section-heading">
+                      <div><span className="student-eyebrow">PICK UP WHERE YOU LEFT OFF</span><h2 id="student-courses-title">My Courses</h2></div>
+                      <div className="student-dashboard-courses__actions">
+                        {(selectedCategory || selectedCourseCategory) && (
+                          <button
+                            className="student-section-link"
+                            type="button"
+                            onClick={() => {
+                              setSelectedCategory('')
+                              setSelectedCourseCategory('')
+                            }}
+                          >
+                            Clear filter
+                          </button>
+                        )}
+                        <Link className="student-section-link" to="/student/courses">View all</Link>
+                      </div>
+                    </div>
+                    <StudentDashboardCourses
+                      onLogout={onLogout}
+                      selectedCategory={selectedCourseCategory || selectedCategory}
+                      refreshKey={dashboardRefreshKey}
+                    />
+                  </section>
+
+                  <StudentAvailableCourses
+                    user={user}
+                    onLogout={onLogout}
+                    onLearningDataChanged={refreshLearningSummary}
+                    onCategoriesLoaded={setPublishedCourseCategories}
+                    selectedCategory={selectedCourseCategory || selectedCategory}
+                  />
+
+                  <div className="student-two-column">
+                    <section className="student-panel" aria-labelledby="student-assignments-title">
+                      <div className="student-section-heading">
+                        <div><span className="student-eyebrow">STAY ON TRACK</span><h2 id="student-assignments-title">Upcoming assignments</h2></div>
+                        <Link className="student-section-link student-section-link--muted" to="/student/assignments">View all</Link>
+                      </div>
+                      <StudentDashboardUpcomingAssignments onLogout={onLogout} />
+                    </section>
+                    <section className="student-panel student-announcements" aria-labelledby="student-announcements-title">
+                      <div className="student-section-heading">
+                        <div><span className="student-eyebrow">FROM YOUR LEARNING COMMUNITY</span><h2 id="student-announcements-title">Announcements</h2></div>
+                        <Link className="student-section-link student-section-link--muted" to="/student/announcements">
+                          Updates <Icon name="arrow" size={15} />
+                        </Link>
+                      </div>
+                      <NotificationFeed role="student" onLogout={onLogout} />
+                    </section>
+                  </div>
+
+                  <div className="student-two-column student-lower-grid">
+                    <section className="student-panel student-weekly-goal" aria-labelledby="student-goal-title">
+                      <span className="student-eyebrow">A STEADY RHYTHM</span>
+                      <h2 id="student-goal-title">Weekly learning goal</h2>
+                      <div className="student-goal-values"><strong>— <small>hrs</small></strong><span>of — hrs this week</span></div>
+                      <div className="student-progress-track"><span /></div>
+                      <p>Learning time and weekly goal tracking aren’t connected yet.</p>
+                    </section>
+                    <section className="student-panel student-ai-card" aria-labelledby="student-ai-title">
+                      <span className="student-ai-card__icon"><Icon name="spark" size={20} /></span>
+                      <span className="student-eyebrow">A HELPFUL STUDY SPACE</span>
+                      <h2 id="student-ai-title">AI Study Companion</h2>
+                      <p>Topic explanations, lesson summaries and practice questions are planned for a future release.</p>
+                      <span className="student-ai-card__status">Not connected to an AI service</span>
+                    </section>
+                  </div>
+
+                  <section className="student-tools" aria-labelledby="student-tools-title">
+                    <div className="student-section-heading">
+                      <div><span className="student-eyebrow">MORE FOR YOUR JOURNEY</span><h2 id="student-tools-title">Student tools</h2></div>
+                    </div>
+                    <div className="student-tools-grid">
+                      {tools.map((tool) => (
+                        <Link className="student-tool-card" id={tool.id} key={tool.id} to={tool.path}>
+                          <span className="student-tool-card__icon"><Icon name={tool.icon} size={19} /></span>
+                          <span className="student-tool-card__copy">
+                            <h3>{tool.title}</h3>
+                            <p>{tool.description}</p>
+                          </span>
+                          <span className="student-tool-card__arrow" aria-hidden="true"><Icon name="arrow" size={18} /></span>
+                        </Link>
+                      ))}
+                    </div>
+                  </section>
+                  <footer className="student-footer"><span>Made for curious minds</span><span>Keep going, one lesson at a time.</span></footer>
                 </>
               } />
               <Route path="/student/course/:courseId/learn" element={
@@ -5229,20 +8009,25 @@ function StudentDashboard({
                   contentSearch={courseContentSearch}
                 />
               } />
+              <Route path="/student/course/:courseId/details" element={
+                <StudentCourseDetailsPage user={user} onLogout={onLogout} onLearningDataChanged={refreshLearningSummary} />
+              } />
               <Route path="/student/course/:courseId" element={
                 <StudentCourseDetailsPage user={user} onLogout={onLogout} onLearningDataChanged={refreshLearningSummary} />
               } />
+              <Route path="/student/learning" element={<StudentLearningActivity onLogout={onLogout} />} />
               <Route path="/student/courses" element={<StudentCourses user={user} onLogout={onLogout} />} />
               <Route path="/student/assignments" element={
                 <StudentAssignmentsPage onLogout={onLogout} onLearningDataChanged={refreshLearningSummary} />
+              } />
+              <Route path="/student/quizzes-assignments" element={
+                <StudentQuizzesAndAssignments user={user} onLogout={onLogout} />
               } />
               <Route path="/student/results" element={
                 <StudentResultsPage onLogout={onLogout} />
               } />
               <Route path="/student/resources" element={
-                <StudentRoutePage eyebrow="KEEP EXPLORING" title="Learning Resources">
-                  <EmptyState icon="folder" title="Learning resources are not connected yet" description="Curated learning resources will appear here when the LMS content catalog is connected." />
-                </StudentRoutePage>
+                <StudentLearningResourcesPage user={user} onLogout={onLogout} />
               } />
               <Route path="/student/messages" element={
                 <StudentRoutePage eyebrow="YOUR LEARNING COMMUNITY" title="Messages">
@@ -5250,7 +8035,7 @@ function StudentDashboard({
                 </StudentRoutePage>
               } />
               <Route path="/student/certificates" element={
-                <StudentCertificatesPage onLogout={onLogout} />
+                <StudentCertificatesPage user={user} onLogout={onLogout} />
               } />
               <Route
                 path="/student/referrals"
@@ -5260,7 +8045,7 @@ function StudentDashboard({
               />
               <Route path="/student/profile" element={<StudentProfile user={user} onLogout={onLogout} />} />
               <Route path="/student/purchases" element={<StudentPurchases />} />
-              <Route path="/student/achievements" element={<StudentAchievements onLogout={onLogout} />} />
+              <Route path="/student/achievements" element={<StudentAchievements user={user} onLogout={onLogout} />} />
               <Route path="/student/learning-activity" element={<StudentLearningActivity onLogout={onLogout} />} />
               <Route path="/student/updates" element={<StudentUpdates />} />
               <Route path="/student/settings" element={
@@ -5270,16 +8055,17 @@ function StudentDashboard({
                     onAccountUpdated={onAccountUpdated}
                     themePreference={themePreference}
                     onSetTheme={onSetTheme}
+                    onLogout={onLogout}
                   />
                 </StudentRoutePage>
               } />
               <Route path="/student/help" element={<HelpCenterHome />} />
-              <Route path="/student/help/email" element={<EmailSupportPage user={user} />} />
+              <Route path="/student/help/email" element={<EmailSupportPage user={user} onLogout={onLogout} />} />
               <Route path="/student/help/complaint" element={<SubmitComplaintPage />} />
-              <Route path="/student/help/submit-ticket" element={<SubmitSupportTicketPage />} />
+              <Route path="/student/help/submit-ticket" element={<SubmitSupportTicketPage user={user} onLogout={onLogout} />} />
               <Route path="/student/help/faqs" element={<SupportFaqPage />} />
-              <Route path="/student/help/requests" element={<SupportRequestsPage />} />
-              <Route path="/student/help/requests/:ticketId" element={<SupportTicketDetailPage />} />
+              <Route path="/student/help/requests" element={<SupportRequestsPage user={user} onLogout={onLogout} />} />
+              <Route path="/student/help/requests/:ticketId" element={<SupportTicketDetailPage user={user} onLogout={onLogout} />} />
               <Route path="/student/announcements" element={
                 <StudentNotificationsPage onLogout={onLogout} />
               } />
@@ -5299,5 +8085,18 @@ function StudentDashboard({
 
 
 
+export {
+  StudentQuizzesAndAssignments,
+  fetchStudentActivities,
+  formatActivityDueDate,
+  getActivityStatusDetails,
+  getActivityActionLabel,
+  StudentCourseDetailsPage,
+  StudentCertificatesPage,
+  fetchCourseDetails,
+  enrollInCourse,
+  unenrollFromCourse,
+  fetchStudentCertificates,
+}
 
 export default StudentDashboard

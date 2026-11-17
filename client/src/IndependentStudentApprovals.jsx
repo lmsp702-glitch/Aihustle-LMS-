@@ -362,6 +362,16 @@ export default function IndependentStudentApprovals({
                         <dt>Rejection Reason</dt><dd>{selectedStudent.rejectionReason}</dd>
                       </div>
                     )}
+                    <div>
+                      <dt>How they heard about us</dt>
+                      <dd>
+                        {selectedStudent.hearAboutUs
+                          ? selectedStudent.hearAboutUs === 'Other' && selectedStudent.hearAboutUsOther
+                            ? `Other (${selectedStudent.hearAboutUsOther})`
+                            : selectedStudent.hearAboutUs
+                          : 'Not specified'}
+                      </dd>
+                    </div>
                   </dl>
                 </section>
                 {selectedStudent.approvalStatus === 'pending' && (

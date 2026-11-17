@@ -5,6 +5,7 @@ import { connectToDatabase } from './config/db.js'
 import cloudinary from './config/cloudinary.js'
 import authRouter from './routes/auth.js'
 import adminRouter from './routes/admin.js'
+import collegeRouter from './routes/college.js'
 import learningRouter from './routes/learning.js'
 import supportRouter from './routes/support.js'
 import feedbackRouter from './routes/feedback.js'
@@ -33,6 +34,7 @@ app.use(
 app.use(express.json({ limit: '8mb' }))
 app.use('/api/auth', authRouter)
 app.use('/api/admin', adminRouter)
+app.use('/api/college', collegeRouter)
 app.use('/api', learningRouter)
 app.use('/api/support', supportRouter)
 app.use('/api/feedback', feedbackRouter)

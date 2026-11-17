@@ -4,6 +4,18 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem('lms.theme');
+          if (saved === 'dark') {
+            document.documentElement.dataset.theme = 'dark';
+          } else {
+            document.documentElement.dataset.theme = 'light';
+          }
+        } catch (_) {}
+      })();
+    </script>
     <meta
       name="description"
       content="Sign in to LMS or create an account to start your next learning chapter."
