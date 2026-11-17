@@ -1990,7 +1990,7 @@ function AdminDashboard({
             <>
               <section className="admin-page-heading admin-page-heading--overview">
                 <div className="admin-page-heading__copy">
-                  <p className="admin-eyebrow">OVERVIEW</p>
+                  <p className="admin-eyebrow">WORKSPACE</p>
                   <h1>Administrator</h1>
                 </div>
                 <img
@@ -2111,7 +2111,7 @@ function AdminDashboard({
             <div className="admin-students-page">
               <section className="admin-page-heading admin-page-heading--overview admin-page-heading--students">
                 <div className="admin-page-heading__copy">
-                  <p className="admin-eyebrow">STUDENT MANAGEMENT</p>
+                  <p className="admin-eyebrow">USER MANAGEMENT</p>
                   <h1>{viewTitles[activeView]}</h1>
                   <p>Independent and college students registered in the LMS.</p>
                 </div>
@@ -2604,7 +2604,17 @@ function AdminDashboard({
           {['reports', 'notifications', 'settings'].includes(activeView) && (
             <div className="admin-data-page">
               <section className="admin-page-heading admin-page-heading--compact">
-                <div><p className="admin-eyebrow">WORKSPACE</p><h1>{viewTitles[activeView]}</h1><p>Manage your LMS {viewTitles[activeView].toLowerCase()}.</p></div>
+                <div>
+                  <p className="admin-eyebrow">
+                    {activeView === 'reports'
+                      ? 'COURSE MANAGEMENT'
+                      : activeView === 'notifications'
+                        ? 'COMMUNICATION & SUPPORT'
+                        : 'SYSTEM'}
+                  </p>
+                  <h1>{viewTitles[activeView]}</h1>
+                  <p>Manage your LMS {viewTitles[activeView].toLowerCase()}.</p>
+                </div>
               </section>
               {activeView === 'settings'
                 ? <SettingsPage user={user} onAccountUpdated={onAccountUpdated} themePreference={themePreference} onSetTheme={onSetTheme} />

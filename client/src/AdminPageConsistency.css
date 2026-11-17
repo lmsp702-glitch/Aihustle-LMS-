@@ -420,13 +420,6 @@
   letter-spacing: 0.14em;
 }
 
-.admin-app.is-main-admin .admin-content .admin-page-heading .admin-eyebrow,
-.admin-app.is-main-admin .independent-approvals__heading .admin-eyebrow,
-.admin-app.is-main-admin .ac-page-heading .ac-eyebrow,
-.admin-app.is-main-admin .ac-category-picker__heading .ac-eyebrow {
-  display: none !important;
-}
-
 .admin-app.is-main-admin .admin-page-heading--overview .admin-page-heading__illustration {
   width: 210px;
   height: 132px;
@@ -438,6 +431,11 @@
 
 .admin-app.is-main-admin[data-active-view="courses"] .ac-page-heading::before,
 .admin-app.is-main-admin[data-active-view="courses"] .ac-page-heading::after {
+  right: 270px;
+}
+
+.admin-app.is-main-admin[data-active-view="complaints"] .admin-content .admin-page-heading::before,
+.admin-app.is-main-admin[data-active-view="complaints"] .admin-content .admin-page-heading::after {
   right: 270px;
 }
 
@@ -469,6 +467,13 @@
   font-family: inherit;
   font-size: 12px;
   font-weight: 680;
+}
+
+.admin-app.is-main-admin[data-active-view="complaints"] .admin-page-heading__actions {
+  position: absolute;
+  z-index: 2;
+  right: 34px;
+  bottom: 28px;
 }
 
 .admin-app.is-main-admin[data-active-view="overview"] .admin-content .admin-page-heading--overview {
@@ -515,8 +520,18 @@
     bottom: 23px;
   }
 
+  .admin-app.is-main-admin[data-active-view="complaints"] .admin-page-heading__actions {
+    right: 23px;
+    bottom: 23px;
+  }
+
   .admin-app.is-main-admin[data-active-view="courses"] .ac-page-heading::before,
   .admin-app.is-main-admin[data-active-view="courses"] .ac-page-heading::after {
+    right: 220px;
+  }
+
+  .admin-app.is-main-admin[data-active-view="complaints"] .admin-content .admin-page-heading::before,
+  .admin-app.is-main-admin[data-active-view="complaints"] .admin-content .admin-page-heading::after {
     right: 220px;
   }
 
@@ -571,10 +586,20 @@
     right: 120px;
   }
 
+  .admin-app.is-main-admin[data-active-view="complaints"] .admin-content .admin-page-heading::before,
+  .admin-app.is-main-admin[data-active-view="complaints"] .admin-content .admin-page-heading::after {
+    right: 230px;
+  }
+
   .admin-app.is-main-admin[data-active-view="courses"] .ac-page-heading__actions {
     top: 12px;
     right: 12px;
     bottom: 12px;
+  }
+
+  .admin-app.is-main-admin[data-active-view="complaints"] .admin-page-heading__actions {
+    right: 18px;
+    bottom: 18px;
   }
 
   .admin-app.is-main-admin[data-active-view="courses"] .ac-page-heading__actions .ac-cloudinary-status {

@@ -228,7 +228,7 @@ export function CollegesManagement({ onLogout }) {
     <AdminDataPanel
       eyebrow="COLLEGE MANAGEMENT"
       title="Colleges & College Accounts"
-      description="Create and manage colleges, monitor student enrollment, configure login credentials, and manage account statuses."
+      description="Create and manage colleges and college accounts, monitor enrollment, configure sub-admin credentials, and manage account statuses."
     >
       <div className="admin-data-grid">
         <form className="admin-data-form" onSubmit={submitCollege}>
