@@ -228,7 +228,7 @@ export function CollegesManagement({ onLogout }) {
 
   return (
     <AdminDataPanel
-      eyebrow="COLLEGE MANAGEMENT"
+      eyebrow="USER MANAGEMENT"
       title="Colleges"
       description="Manage colleges, enrollment counts, and college sub-admins."
     >

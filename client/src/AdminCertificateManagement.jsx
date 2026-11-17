@@ -128,7 +128,7 @@ export default function AdminCertificateManagement({ onBack, onLogout }) {
             <h1>Assignment reviews</h1>
             <p>Review required assignment submissions that affect certificate eligibility.</p>
           </div>
-          <button type="button" className="ac-button ac-button--outline" onClick={onBack}>← Course management</button>
+          <button type="button" className="ac-button ac-button--gold" onClick={onBack}>← Course management</button>
         </div>
         {notice && <p className="ac-success" role="status">{notice}</p>}
         {error && <p className="ac-inline-error" role="alert">{error}</p>}

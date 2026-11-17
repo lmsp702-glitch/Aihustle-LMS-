@@ -1,5 +1,6 @@
 .admin-certificate-management { display: grid; gap: 20px; }
-.admin-certificate-management > .ac-page-heading { align-items: flex-start; }
+.admin-certificate-management > .ac-page-heading { position: relative; align-items: flex-start; }
+.admin-app.is-main-admin .admin-certificate-management > .ac-page-heading > .ac-button { position: absolute; right: 34px; bottom: 28px; z-index: 2; }
 .ac-certificate-panel { display: grid; gap: 24px; padding: 22px; border: 1px solid var(--ac-line); border-radius: 12px; background: var(--ac-paper); }
 .ac-certificate-panel h2 { margin: 0 0 8px; font-size: 17px; }
 .ac-certificate-panel p:not(.ac-eyebrow) { max-width: 700px; margin: 0 0 10px; color: var(--ac-muted); font-size: 12px; line-height: 1.55; }
@@ -16,6 +17,8 @@
 .ac-certificate-submission .ac-field textarea { min-height: 56px; }
 
 @media (max-width: 760px) {
+  .admin-app.is-main-admin .admin-certificate-management > .ac-page-heading { height: auto; min-height: 0; align-items: flex-start; flex-direction: column; padding: 20px; }
+  .admin-app.is-main-admin .admin-certificate-management > .ac-page-heading > .ac-button { position: static; align-self: flex-end; }
   .ac-certificate-submission { grid-template-columns: 1fr; }
   .ac-certificate-submission__actions { justify-content: flex-end; }
 }
