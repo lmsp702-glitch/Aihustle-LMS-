@@ -8,6 +8,8 @@ import adminRouter from './routes/admin.js'
 import collegeRouter from './routes/college.js'
 import learningRouter from './routes/learning.js'
 import supportRouter from './routes/support.js'
+import feedbackRouter from './routes/feedback.js'
+import complaintsRouter from './routes/complaints.js'
 import settingsRouter from './routes/settings.js'
 import referralsRouter from './routes/referrals.js'
 import notificationsRouter from './routes/notifications.js'
@@ -35,6 +37,8 @@ app.use('/api/admin', adminRouter)
 app.use('/api/college', collegeRouter)
 app.use('/api', learningRouter)
 app.use('/api/support', supportRouter)
+app.use('/api/feedback', feedbackRouter)
+app.use('/api/complaints', complaintsRouter)
 app.use('/api/settings', settingsRouter)
 app.use('/api/referrals', referralsRouter)
 app.use('/api/notifications', notificationsRouter)

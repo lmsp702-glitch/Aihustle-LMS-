@@ -4,6 +4,7 @@ import AssignmentSubmission from '../models/AssignmentSubmission.js'
 import Certificate from '../models/Certificate.js'
 import CertificateTemplate from '../models/CertificateTemplate.js'
 import QuizAttempt from '../models/QuizAttempt.js'
+import { createStudentNotification } from './student-notifications.js'
 
 function documentId(value) {
   const id = value?._id ?? value
@@ -16,17 +17,19 @@ function requiredActivity(activity, type) {
   return id && title ? { id, title, type } : null
 }
 
-function collectModuleActivities(module) {
+function collectModuleActivities(module, includeOptional = false) {
   const items = Array.isArray(module?.contentItems) ? module.contentItems : []
   const videos = items.filter((item) => item.type === 'video-lesson')
   const quizzes = items.filter((item) => item.type === 'quiz')
   const assignments = items.filter((item) => item.type === 'assignment')
 
   const lessonActivities = (videos.length ? videos : module?.lessons || [])
-    .filter((item) => item.requiredForCertificate !== false)
+    .filter((item) => includeOptional || item.requiredForCertificate !== false)
     .map((item) => requiredActivity(item, 'video'))
   const quizActivities = (quizzes.length ? quizzes : module?.quiz ? [module.quiz] : [])
-    .filter((item) => item.requiredForCertificate !== false && item.quiz?.requiredForCertificate !== false)
+    .filter((item) => includeOptional || (
+      item.requiredForCertificate !== false && item.quiz?.requiredForCertificate !== false
+    ))
     .filter((item) => (item.quiz || item).questions?.length > 0)
     .map((item) => requiredActivity({
       ...(item.quiz || item),
@@ -34,7 +37,7 @@ function collectModuleActivities(module) {
       title: item.title || item.quiz?.title,
     }, 'quiz'))
   const assignmentActivities = assignments
-    .filter((item) => item.requiredForCertificate !== false)
+    .filter((item) => includeOptional || item.requiredForCertificate !== false)
     .map((item) => requiredActivity(item, 'assignment'))
 
   return {
@@ -44,7 +47,7 @@ function collectModuleActivities(module) {
   }
 }
 
-export function getRequiredCertificateActivities(course) {
+function collectCourseActivities(course, includeOptional) {
   const collected = { videos: [], quizzes: [], assignments: [] }
   const seen = new Set()
   function add(type, activity) {
@@ -57,20 +60,28 @@ export function getRequiredCertificateActivities(course) {
   }
 
   for (const module of course?.modules || []) {
-    const activities = collectModuleActivities(module)
+    const activities = collectModuleActivities(module, includeOptional)
     for (const activity of activities.videos) add('video', activity)
     for (const activity of activities.quizzes) add('quiz', activity)
     for (const activity of activities.assignments) add('assignment', activity)
   }
   for (const quiz of course?.quizzes || []) {
-    if (quiz.requiredForCertificate === false || !quiz.questions?.length) continue
+    if ((!includeOptional && quiz.requiredForCertificate === false) || !quiz.questions?.length) continue
     add('quiz', requiredActivity(quiz, 'quiz'))
   }
   for (const assignment of course?.assignments || []) {
-    if (assignment.requiredForCertificate === false) continue
+    if (!includeOptional && assignment.requiredForCertificate === false) continue
     add('assignment', requiredActivity(assignment, 'assignment'))
   }
   return collected
+}
+
+export function getCourseActivities(course) {
+  return collectCourseActivities(course, true)
+}
+
+export function getRequiredCertificateActivities(course) {
+  return collectCourseActivities(course, false)
 }
 
 export async function evaluateCertificateEligibility({ course, enrollment }) {
@@ -154,7 +165,18 @@ export async function getActiveCertificateTemplateId() {
 export async function issueCertificateIfEligible({ userId, studentName, enrollment, course, eligibility: providedEligibility }) {
   if (course?.generateCertificate === false) return null
   const existing = await Certificate.findOne({ userId, courseId: course._id }).lean()
-  if (existing) return existing
+  if (existing) {
+    await createStudentNotification({
+      recipientId: userId,
+      eventKey: `certificate-available:${userId}:${course._id}`,
+      type: 'certificate_available',
+      title: 'Certificate available',
+      message: `Your certificate for ${existing.courseName || course.title || 'this course'} is ready.`,
+      link: '/student/certificates',
+      metadata: { courseId: String(course._id), certificateId: String(existing._id) },
+    })
+    return existing
+  }
   const normalizedStudentName = typeof studentName === 'string' ? studentName.trim() : ''
   if (!normalizedStudentName) return null
 
@@ -177,7 +199,7 @@ export async function issueCertificateIfEligible({ userId, studentName, enrollme
     courseId: course._id,
   }
   try {
-    return await Certificate.findOneAndUpdate(
+    const certificate = await Certificate.findOneAndUpdate(
       { userId, courseId: course._id },
       {
         $setOnInsert: {
@@ -199,6 +221,17 @@ export async function issueCertificateIfEligible({ userId, studentName, enrollme
       },
       { upsert: true, new: true, setDefaultsOnInsert: true },
     ).lean()
+    if (!certificate) throw new Error('The certificate could not be issued.')
+    await createStudentNotification({
+      recipientId: userId,
+      eventKey: `certificate-available:${userId}:${course._id}`,
+      type: 'certificate_available',
+      title: 'Certificate available',
+      message: `Your certificate for ${certificate.courseName || course.title || 'this course'} is ready.`,
+      link: '/student/certificates',
+      metadata: { courseId: String(course._id), certificateId: String(certificate._id) },
+    })
+    return certificate
   } catch (error) {
     if (error?.code !== 11000) throw error
     const concurrentCertificate = await Certificate.findOne({
@@ -207,7 +240,18 @@ export async function issueCertificateIfEligible({ userId, studentName, enrollme
         { studentType: certificateIdentity.studentType, studentId: userId, courseId: course._id },
       ],
     }).lean()
-    if (concurrentCertificate) return concurrentCertificate
+    if (concurrentCertificate) {
+      await createStudentNotification({
+        recipientId: userId,
+        eventKey: `certificate-available:${userId}:${course._id}`,
+        type: 'certificate_available',
+        title: 'Certificate available',
+        message: `Your certificate for ${concurrentCertificate.courseName || course.title || 'this course'} is ready.`,
+        link: '/student/certificates',
+        metadata: { courseId: String(course._id), certificateId: String(concurrentCertificate._id) },
+      })
+      return concurrentCertificate
+    }
     throw error
   }
 }

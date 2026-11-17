@@ -12,7 +12,10 @@ import Enrollment from '../models/Enrollment.js'
 import ReferralCode from '../models/ReferralCode.js'
 import ReferralCodeDailyLimit from '../models/ReferralCodeDailyLimit.js'
 import RegistrationEmailVerification from '../models/RegistrationEmailVerification.js'
+import Feedback from '../models/Feedback.js'
+import Complaint from '../models/Complaint.js'
 import Certificate from '../models/Certificate.js'
+import Notification from '../models/Notification.js'
 import { createAdminAccount } from './seed-admin.js'
 
 const databaseName = 'LMS'
@@ -23,8 +26,11 @@ const expectedCollections = [
   'clg_students',
   'certificates',
   'colleges',
+  'complaints',
   'courses',
   'enrollment',
+  'feedback',
+  'notifications',
   'referralCodeDailyLimits',
   'referralCodes',
   'registrationemailverifications',
@@ -43,7 +49,10 @@ const models = [
   ReferralCode,
   ReferralCodeDailyLimit,
   RegistrationEmailVerification,
+  Feedback,
+  Complaint,
   Certificate,
+  Notification,
 ]
 const BSON = mongoose.mongo.BSON
 

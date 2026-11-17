@@ -14,12 +14,11 @@ const registrationFieldDefaults = {
   referralCode: '',
   username: '',
   educationQualification: '',
-  customQualification: '',
   userExpectations: '',
   location: '',
   livingWithWhom: '',
-  customLivingArrangement: '',
 }
+const hiddenRegistrationFields = new Set(['customQualification', 'customLivingArrangement'])
 
 function registrationFieldLabel(field) {
   return field
@@ -53,13 +52,18 @@ async function readResponse(response) {
   return result
 }
 
-export default function IndependentStudentApprovals({ onLogout }) {
+export default function IndependentStudentApprovals({
+  onLogout,
+  studentIdToOpen = '',
+  onStudentDetailsOpened,
+}) {
   const [status, setStatus] = useState('pending')
   const [students, setStudents] = useState([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const loadMoreRef = useRef(null)
   const loadingMoreRef = useRef(false)
+  const handledStudentIdRef = useRef('')
   const [pendingCount, setPendingCount] = useState(0)
   const [selectedStudent, setSelectedStudent] = useState(null)
   const [detailsLoading, setDetailsLoading] = useState(false)
@@ -71,7 +75,10 @@ export default function IndependentStudentApprovals({ onLogout }) {
   const [message, setMessage] = useState('')
   const [retry, setRetry] = useState(0)
   const registrationDetails = selectedStudent
-    ? { ...registrationFieldDefaults, ...(selectedStudent.registrationDetails || {}) }
+    ? Object.fromEntries(
+      Object.entries({ ...registrationFieldDefaults, ...(selectedStudent.registrationDetails || {}) })
+        .filter(([field]) => !hiddenRegistrationFields.has(field)),
+    )
     : {}
 
   const loadStudents = useCallback(async (signal) => {
@@ -159,7 +166,7 @@ export default function IndependentStudentApprovals({ onLogout }) {
     return () => observer.disconnect()
   }, [error, loading, students.length, total])
 
-  async function getAuthorization() {
+  const getAuthorization = useCallback(async () => {
     const savedAuth = sessionStorage.getItem('lms.auth')
     const auth = savedAuth ? JSON.parse(savedAuth) : null
     if (auth?.user?.role !== 'main_admin' || typeof auth.token !== 'string') {
@@ -167,9 +174,9 @@ export default function IndependentStudentApprovals({ onLogout }) {
       return null
     }
     return auth
-  }
+  }, [onLogout])
 
-  async function reviewStudent(student) {
+  const reviewStudent = useCallback(async (student) => {
     setSelectedStudent(student)
     setRejectionReason('')
     setRejecting(false)
@@ -194,7 +201,14 @@ export default function IndependentStudentApprovals({ onLogout }) {
     } finally {
       setDetailsLoading(false)
     }
-  }
+  }, [getAuthorization, onLogout])
+
+  useEffect(() => {
+    if (!studentIdToOpen || handledStudentIdRef.current === studentIdToOpen) return
+    handledStudentIdRef.current = studentIdToOpen
+    reviewStudent({ _id: studentIdToOpen })
+    onStudentDetailsOpened?.()
+  }, [onStudentDetailsOpened, reviewStudent, studentIdToOpen])
 
   async function decide(student, decision, reason = '') {
     if (decision === 'approve' && !window.confirm(`Approve ${student.fullName || student.email}'s account?`)) return

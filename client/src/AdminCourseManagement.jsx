@@ -107,15 +107,23 @@ function emptyContentItem(type) {
     }
   }
   return {
+    ...(type === 'video-lesson' ? { _id: newMongoId() } : {}),
     type,
     title: type === 'video-lesson' ? 'New lesson' : type === 'assignment' ? 'New assignment' : 'New note',
     description: '',
     content: '',
     videoUrl: '',
     videoPublicId: '',
+    videoFileName: '',
     videoFormat: '',
     videoBytes: 0,
     durationSeconds: 0,
+    transcriptUrl: '',
+    transcriptPublicId: '',
+    transcriptFileName: '',
+    transcriptFormat: '',
+    transcriptBytes: 0,
+    transcriptCues: [],
     requiredForCertificate: true,
     resources: [],
     ...(type === 'video-lesson' ? { attentionCheck: emptyAttentionCheck() } : {}),
@@ -125,7 +133,7 @@ function emptyContentItem(type) {
 }
 
 function emptyLesson() {
-  return { title: '', description: '', content: '', videoUrl: '', videoPublicId: '', durationSeconds: 0, resources: [], attentionCheck: emptyAttentionCheck() }
+  return { title: '', description: '', content: '', videoUrl: '', videoPublicId: '', durationSeconds: 0, transcriptCues: [], resources: [], attentionCheck: emptyAttentionCheck() }
 }
 
 function emptyQuestion() {
@@ -204,7 +212,12 @@ function courseFromServer(course) {
           ...item,
           _localId: item._id || localKey(),
           requiredForCertificate: item.requiredForCertificate !== false && item.quiz?.requiredForCertificate !== false,
-          ...(item.type === 'video-lesson' ? { attentionCheck: attentionCheckDraft(item.attentionCheck) } : {}),
+          ...(item.type === 'video-lesson' ? {
+            attentionCheck: attentionCheckDraft(item.attentionCheck),
+            transcriptCues: [...(item.transcriptCues || [])],
+            videoStored: Boolean(item.videoUrl && item.videoPublicId),
+            transcriptStored: Boolean(item.transcriptUrl && item.transcriptPublicId),
+          } : {}),
           resources: (item.resources || []).map((resource) => ({ ...resource, _localId: resource._id || localKey() })),
           quiz: item.quiz ? {
             ...item.quiz,
@@ -269,9 +282,20 @@ function serializeCourse(course, status = course.status) {
         content: lesson.content,
         videoUrl: lesson.videoUrl,
         videoPublicId: lesson.videoPublicId,
+        videoFileName: lesson.videoFileName || '',
         videoFormat: lesson.videoFormat,
         videoBytes: Number(lesson.videoBytes) || 0,
         durationSeconds: Number(lesson.durationSeconds) || 0,
+        transcriptUrl: lesson.transcriptUrl || '',
+        transcriptPublicId: lesson.transcriptPublicId || '',
+        transcriptFileName: lesson.transcriptFileName || '',
+        transcriptFormat: lesson.transcriptFormat || '',
+        transcriptBytes: Number(lesson.transcriptBytes) || 0,
+        transcriptCues: (lesson.transcriptCues || []).map((cue) => ({
+          startTimeMs: cue.startTimeMs,
+          endTimeMs: cue.endTimeMs,
+          text: cue.text,
+        })),
         requiredForCertificate: lesson.requiredForCertificate !== false,
         attentionCheck: serializeAttentionCheck(lesson.attentionCheck || emptyAttentionCheck()),
         resources: lesson.resources.map((resource) => ({
@@ -298,6 +322,7 @@ function serializeCourse(course, status = course.status) {
         content: item.content || '',
         videoUrl: item.videoUrl || '',
         videoPublicId: item.videoPublicId || '',
+        videoFileName: item.videoFileName || '',
         videoFormat: item.videoFormat || '',
         videoBytes: Number(item.videoBytes) || 0,
         durationSeconds: Number(item.durationSeconds) || 0,
@@ -314,6 +339,16 @@ function serializeCourse(course, status = course.status) {
         dueDate: apiDateValue(item.dueDate),
         points: Number(item.points) || 0,
         ...(item.type === 'video-lesson' ? {
+          transcriptUrl: item.transcriptUrl || '',
+          transcriptPublicId: item.transcriptPublicId || '',
+          transcriptFileName: item.transcriptFileName || '',
+          transcriptFormat: item.transcriptFormat || '',
+          transcriptBytes: Number(item.transcriptBytes) || 0,
+          transcriptCues: (item.transcriptCues || []).map((cue) => ({
+            startTimeMs: cue.startTimeMs,
+            endTimeMs: cue.endTimeMs,
+            text: cue.text,
+          })),
           attentionCheck: serializeAttentionCheck(item.attentionCheck || emptyAttentionCheck()),
         } : {}),
         ...(item.quiz ? { quiz: serializeModuleQuiz(item.quiz, item.requiredForCertificate !== false) } : {}),
@@ -388,7 +423,7 @@ function adminToken(onLogout) {
   return auth.token
 }
 
-function uploadWithProgress(path, file, onLogout, onProgress) {
+function uploadWithProgress(path, file, onLogout, onProgress, fields = {}) {
   return new Promise((resolve, reject) => {
     let token
     try {
@@ -399,6 +434,7 @@ function uploadWithProgress(path, file, onLogout, onProgress) {
     }
     const formData = new FormData()
     formData.append('file', file)
+    for (const [name, value] of Object.entries(fields)) formData.append(name, value)
     const request = new XMLHttpRequest()
     request.open('POST', `${API_BASE_URL}${path}`)
     request.setRequestHeader('Authorization', `Bearer ${token}`)
@@ -410,18 +446,20 @@ function uploadWithProgress(path, file, onLogout, onProgress) {
       try {
         result = request.responseText ? JSON.parse(request.responseText) : {}
       } catch {
-        reject(new Error('The server returned an invalid upload response.'))
+        reject(new Error(`The server returned an invalid upload response (HTTP ${request.status || 'unknown'}).`))
         return
       }
       if (isInvalidSessionResponse({ status: request.status }, result)) onLogout()
       if (request.status < 200 || request.status >= 300) {
-        reject(new Error(result.message || 'The file upload failed.'))
+        reject(new Error(result.message || `The upload failed (HTTP ${request.status || 'unknown'}).`))
         return
       }
       resolve(result)
     })
     request.addEventListener('error', () => reject(new Error('The upload connection failed. Check your connection and try again.')))
     request.addEventListener('abort', () => reject(new Error('The upload was cancelled.')))
+    request.addEventListener('timeout', () => reject(new Error('The upload timed out before the server confirmed it. Retry the upload.')))
+    request.timeout = 10 * 60 * 1000
     request.send(formData)
   })
 }
@@ -435,6 +473,7 @@ function collectCourseAssets(course) {
     ]
     for (const item of items) {
       if (item.videoPublicId) assets.push({ publicId: item.videoPublicId, resourceType: 'video' })
+      if (item.transcriptPublicId) assets.push({ publicId: item.transcriptPublicId, resourceType: 'raw' })
       for (const resource of item.resources || []) {
         if (resource.publicId) assets.push({ publicId: resource.publicId, resourceType: resource.resourceType || 'raw' })
       }
@@ -779,6 +818,7 @@ export default function AdminCourseManagement({ onLogout }) {
   const [aiLessonContent, setAiLessonContent] = useState('')
   const [isGeneratingQuiz, setIsGeneratingQuiz] = useState(false)
   const [panelError, setPanelError] = useState('')
+  const [transcriptUploadError, setTranscriptUploadError] = useState('')
   const [reorderEnabled, setReorderEnabled] = useState(false)
   const [draggedModuleIndex, setDraggedModuleIndex] = useState(null)
   const [collapsedModules, setCollapsedModules] = useState({})
@@ -1120,6 +1160,7 @@ export default function AdminCourseManagement({ onLogout }) {
     setAiQuestionCount(5)
     setAiDifficulty('intermediate')
     setAiQuestionTypes(['multiple-choice'])
+    setTranscriptUploadError('')
     setPanelError('')
   }
 
@@ -1313,12 +1354,113 @@ export default function AdminCourseManagement({ onLogout }) {
     setPanelError('')
     try {
       const result = await uploadCourseMedia(file, 'video', course.modules[activeContentEditor.moduleIndex])
-      setContentDraft((current) => ({ ...current, videoUrl: result.url, videoPublicId: result.publicId, videoFormat: result.format, videoBytes: result.bytes, durationSeconds: result.duration ? Math.round(result.duration) : current.durationSeconds }))
+      setContentDraft((current) => ({
+        ...current,
+        videoUrl: result.url,
+        videoPublicId: result.publicId,
+        videoFileName: result.originalName || file.name,
+        videoFormat: result.format,
+        videoBytes: result.bytes,
+        durationSeconds: result.duration ? Math.round(result.duration) : current.durationSeconds,
+        videoStored: false,
+      }))
     } catch (uploadError) {
       setPanelError(uploadError instanceof Error ? uploadError.message : 'The video could not be uploaded.')
     } finally {
       setIsUploading('')
       setUploadProgress(0)
+    }
+  }
+
+  async function uploadContentTranscript(event) {
+    const file = event.currentTarget.files?.[0]
+    event.currentTarget.value = ''
+    if (!file || !activeContentEditor || contentDraft?.type !== 'video-lesson') return
+    setTranscriptUploadError('')
+    if (!file.name.toLowerCase().endsWith('.srt')) {
+      setTranscriptUploadError('Choose a file with the .srt extension.')
+      return
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      setTranscriptUploadError('The SRT file exceeds the 2 MB upload limit.')
+      return
+    }
+    const module = course.modules[activeContentEditor.moduleIndex]
+    if (!editingId || !module?._id || !contentDraft._id) {
+      setTranscriptUploadError('Save the course details and add a module before uploading a transcript.')
+      return
+    }
+    if (!contentDraft.videoUrl || !contentDraft.videoPublicId) {
+      setTranscriptUploadError('Upload a video before attaching its transcript.')
+      return
+    }
+
+    setIsUploading('transcript')
+    setUploadProgress(0)
+    setPanelError('')
+    try {
+      const result = await uploadWithProgress(
+        `/admin/courses/${encodeURIComponent(editingId)}/modules/${encodeURIComponent(module._id)}/lessons/${encodeURIComponent(contentDraft._id)}/media/transcript`,
+        file,
+        onLogout,
+        setUploadProgress,
+        {
+          lesson: JSON.stringify(contentDraft),
+          moduleTitle: module.title,
+        },
+      )
+      if (result.saved !== true || !result.transcriptUrl || !result.transcriptPublicId || !Array.isArray(result.transcriptCues)) {
+        throw new Error('The server did not confirm that the transcript and lesson were saved. Retry the upload.')
+      }
+      pendingAssets.current.push({ publicId: result.transcriptPublicId, resourceType: 'raw' })
+      setContentDraft((current) => ({
+        ...current,
+        transcriptUrl: result.transcriptUrl,
+        transcriptPublicId: result.transcriptPublicId,
+        transcriptFileName: result.transcriptFileName,
+        transcriptFormat: result.transcriptFormat,
+        transcriptBytes: result.transcriptBytes,
+        transcriptCues: result.transcriptCues,
+        transcriptStored: true,
+        videoStored: true,
+      }))
+      if (result.cleanupWarning) setTranscriptUploadError('Transcript saved, but the previous SRT file could not be removed from Cloudinary.')
+    } catch (transcriptError) {
+      setTranscriptUploadError(transcriptError instanceof Error ? transcriptError.message : 'The transcript could not be uploaded.')
+    } finally {
+      setIsUploading('')
+      setUploadProgress(0)
+    }
+  }
+
+  async function removeContentTranscript() {
+    if (!activeContentEditor || !contentDraft) return
+    const module = course.modules[activeContentEditor.moduleIndex]
+    setIsUploading('transcript')
+    setTranscriptUploadError('')
+    try {
+      if (editingId && module?._id && contentDraft._id) {
+        const result = await adminCourseRequest(
+          `/admin/courses/${encodeURIComponent(editingId)}/modules/${encodeURIComponent(module._id)}/lessons/${encodeURIComponent(contentDraft._id)}/media/transcript`,
+          onLogout,
+          { method: 'DELETE', body: { lesson: contentDraft } },
+        )
+        if (result.cleanupWarning) setTranscriptUploadError('Transcript removed, but the SRT file could not be removed from Cloudinary.')
+      }
+      setContentDraft((current) => ({
+        ...current,
+        transcriptUrl: '',
+        transcriptPublicId: '',
+        transcriptFileName: '',
+        transcriptFormat: '',
+        transcriptBytes: 0,
+        transcriptCues: [],
+        transcriptStored: false,
+      }))
+    } catch (transcriptError) {
+      setTranscriptUploadError(transcriptError instanceof Error ? transcriptError.message : 'The transcript could not be removed.')
+    } finally {
+      setIsUploading('')
     }
   }
 
@@ -1564,7 +1706,7 @@ export default function AdminCourseManagement({ onLogout }) {
     return (
       <div className="ac-library">
         <div className="ac-page-heading">
-          <div><p className="ac-eyebrow">PLATFORM CONTENT</p><h1>Course management</h1><p>Build, organize, and publish courses for the LMS.</p></div>
+          <div><p className="ac-eyebrow">PLATFORM CONTENT</p><h1>Courses</h1><p>Build, organize, and publish courses for the LMS.</p></div>
           <div className="ac-page-heading__actions">
             <div className={`ac-cloudinary-status ac-cloudinary-status--${cloudinaryHealth}`} role="status">
               <span aria-hidden="true" />Cloudinary {cloudinaryHealth === 'checking' ? 'checking' : cloudinaryHealth}
@@ -1835,7 +1977,41 @@ export default function AdminCourseManagement({ onLogout }) {
                         <label className="ac-field"><span>Lesson content</span><textarea rows="4" maxLength="20000" value={contentDraft.content || ''} onChange={(event) => updateDraft('content', event.target.value)} placeholder="Add the lesson text used to teach or explain this video." /></label>
                         <label className="ac-resource-add ac-content-upload"><span aria-hidden="true">↑</span>{isUploading === 'video' ? `Uploading video · ${uploadProgress}%` : contentDraft.videoPublicId ? 'Replace uploaded video' : 'Upload video'}<input type="file" accept="video/mp4,video/quicktime,video/webm,video/x-msvideo,video/x-matroska,video/ogg,.m4v,.mkv,.avi,.ogv" onChange={uploadContentVideo} disabled={Boolean(isUploading)} /></label>
                         {isUploading === 'video' && <><progress className="ac-content-progress" max="100" value={uploadProgress} aria-label={`Video upload ${uploadProgress}%`} /><small className="ac-content-uploaded">{uploadProgress >= 100 ? 'Finishing upload to Cloudinary…' : `Uploading to server · ${uploadProgress}%`}</small></>}
-                        {contentDraft.videoPublicId && <small className="ac-content-uploaded">Video uploaded successfully.</small>}
+                        <small className="ac-content-uploaded">
+                          Video: {contentDraft.videoStored ? 'Uploaded' : contentDraft.videoPublicId ? 'Pending course save' : 'Not uploaded'}
+                          {contentDraft.videoFileName ? ` · ${contentDraft.videoFileName}` : ''}
+                        </small>
+                        <label className="ac-resource-add ac-content-upload">
+                          <span aria-hidden="true">↑</span>
+                          {isUploading === 'transcript'
+                            ? `Uploading transcript · ${uploadProgress}%`
+                            : contentDraft.transcriptStored || contentDraft.transcriptCues?.length ? 'Replace SRT transcript' : 'Upload SRT transcript'}
+                          <input
+                            type="file"
+                            accept=".srt"
+                            onChange={uploadContentTranscript}
+                            disabled={Boolean(isUploading)}
+                          />
+                        </label>
+                        {isUploading === 'transcript' && <><progress className="ac-content-progress" max="100" value={uploadProgress} aria-label={`Transcript upload ${uploadProgress}%`} /><small className="ac-content-uploaded">{uploadProgress >= 100 ? 'Saving transcript to the lesson…' : `Uploading to server · ${uploadProgress}%`}</small></>}
+                        {transcriptUploadError && <p className="ac-inline-error" role="alert">{transcriptUploadError}</p>}
+                        {contentDraft.transcriptStored || contentDraft.transcriptCues?.length > 0 ? (
+                          <div className="ac-resource-heading">
+                            <small className="ac-content-uploaded">
+                              SRT transcript: {contentDraft.transcriptStored ? 'Uploaded' : 'Not uploaded'}
+                              {contentDraft.transcriptFileName ? ` · ${contentDraft.transcriptFileName}` : ''}
+                              {contentDraft.transcriptCues?.length ? ` · ${contentDraft.transcriptCues.length} cues` : ''}
+                            </small>
+                            <button
+                              type="button"
+                              className="ac-text-button ac-text-button--danger"
+                              disabled={Boolean(isUploading)}
+                              onClick={removeContentTranscript}
+                            >
+                              Remove transcript
+                            </button>
+                          </div>
+                        ) : <small className="ac-content-uploaded">SRT transcript: Not uploaded</small>}
                         <section className="ac-ai-quiz" aria-labelledby="ac-attention-check-title">
                           <h5 id="ac-attention-check-title">Video Attention Check</h5>
                           <p className="ac-manual-quiz-help">Optionally pause this video at random intervals and ask one of these questions.</p>

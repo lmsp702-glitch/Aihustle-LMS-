@@ -1,3 +1,5 @@
+import bcrypt from 'bcryptjs'
+import crypto, { randomBytes } from 'node:crypto'
 import mongoose from 'mongoose'
 import multer from 'multer'
 import path from 'node:path'
@@ -22,7 +24,6 @@ import {
 } from '../utils/college-student-capacity.js'
 import { toMongoBuffer } from '../utils/mongo-binary.js'
 
-import bcrypt from 'bcryptjs'
 import AccountIdentity from '../models/AccountIdentity.js'
 import College from '../models/College.js'
 import Course from '../models/Course.js'
@@ -32,7 +33,6 @@ import LearningActivity from '../models/LearningActivity.js'
 import Certificate from '../models/Certificate.js'
 import StudentNote from '../models/StudentNote.js'
 import Resource from '../models/Resource.js'
-import crypto from 'node:crypto'
 import AssignmentSubmission from '../models/AssignmentSubmission.js'
 import QuizAttempt from '../models/QuizAttempt.js'
 import { CollegeAdmin, CollegeStudent, Student, accountModelsByCollection } from '../models/account-models.js'
@@ -48,11 +48,22 @@ import {
   getSignedResourceDeliveryUrls,
   fetchResourcePdfBuffer,
 } from '../utils/resource-delivery.js'
+import { createStudentNotification } from '../utils/student-notifications.js'
 
 const router = Router()
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const usernamePattern = /^[a-zA-Z0-9._-]{3,30}$/
+const maxAssignmentSubmissionBytes = 10 * 1024 * 1024
+const maxCertificateTemplateBytes = 4 * 1024 * 1024
+const quizAttemptLimit = 3
+const quizAttemptCooldownMs = 24 * 60 * 60 * 1000
+const attentionCheckResponseTimeoutMs = 10 * 1000
+const loggedInvalidAttentionConfigurations = new Set()
+
+function isValidObjectId(value) {
+  return typeof value === 'string' && mongoose.isValidObjectId(value)
+}
 
 async function getAssignedCollegeAdmin(req) {
   const collegeId = req.auth.user.collegeId
@@ -74,8 +85,7 @@ async function accountIdentifierExists(field, value) {
 }
 
 function makeImportUsername(studentId) {
-  const digest = crypto.createHash('sha256').update(studentId.toLowerCase()).digest('hex').slice(0, 20)
-  return `college-${digest}`
+  return String(studentId ?? '').trim().toLowerCase()
 }
 
 function isDuplicateStudentId(studentId, model, session) {
@@ -84,6 +94,37 @@ function isDuplicateStudentId(studentId, model, session) {
     .select('_id')
   if (session) query = query.session(session)
   return query.lean()
+}
+
+function getLessonPlaybackPositions(enrollment) {
+  const positions = enrollment?.lessonPlaybackPositions
+  if (positions instanceof Map) return Object.fromEntries(positions)
+  return positions && typeof positions === 'object' ? { ...positions } : {}
+}
+
+function getMapValue(values, key) {
+  if (values instanceof Map) return values.get(key)
+  return values && typeof values === 'object' ? values[key] : undefined
+}
+
+function getCertificateCourseProgress(activities, pendingRequirements = [], earned = false) {
+  const totalActivities = Object.values(activities).reduce((total, items) => total + items.length, 0)
+  const incompleteActivities = pendingRequirements.filter((requirement) => (
+    ['video', 'quiz', 'assignment'].includes(requirement.type)
+  )).length
+  const completedActivities = earned ? totalActivities : Math.max(0, totalActivities - incompleteActivities)
+  return {
+    completedActivities,
+    totalActivities,
+    percentage: earned ? 100 : totalActivities ? Math.round((completedActivities / totalActivities) * 100) : 0,
+  }
+}
+
+function canonicalObjectId(value) {
+  const isBsonObjectId = value instanceof mongoose.Types.ObjectId
+    || (value?._bsontype === 'ObjectId' && typeof value.toHexString === 'function')
+  if ((!isValidObjectId(value) && !isBsonObjectId) || !mongoose.isValidObjectId(value)) return ''
+  return new mongoose.Types.ObjectId(value).toString()
 }
 
 async function issueCourseCertificate(req, enrollment) {
@@ -147,12 +188,6 @@ async function issueCourseCertificate(req, enrollment) {
   }
 }
 
-const maxCertificateTemplateBytes = 4 * 1024 * 1024
-const quizAttemptLimit = 3
-const quizAttemptCooldownMs = 24 * 60 * 60 * 1000
-const attentionCheckResponseTimeoutMs = 10 * 1000
-const loggedInvalidAttentionConfigurations = new Set()
-
 function certificateImageBuffer(imageData) {
   if (Buffer.isBuffer(imageData)) return imageData
   if (imageData instanceof Uint8Array) return Buffer.from(imageData)
@@ -192,7 +227,6 @@ async function loadCertificateTemplateImage(template) {
   }
   return imageData
 }
-
 function sanitizeStudentAttentionCheck(attentionCheck) {
   if (!attentionCheck) return attentionCheck
   return {
@@ -302,7 +336,6 @@ function isCorrectAttentionAnswer(selectedIndices, correctIndices) {
 
 const requireStudent = [authenticate, requireRoles('student')]
 const requireCollegeAdmin = [authenticate, requireRoles('college_admin')]
-const maxAssignmentSubmissionBytes = 10 * 1024 * 1024
 const assignmentFileTypes = new Map([
   ['.pdf', 'application/pdf'],
   ['.txt', 'text/plain'],
@@ -322,36 +355,6 @@ const assignmentUpload = multer({
     callback(null, true)
   },
 })
-
-function getLessonPlaybackPositions(enrollment) {
-  const positions = enrollment?.lessonPlaybackPositions
-  if (positions instanceof Map) return Object.fromEntries(positions)
-  return positions && typeof positions === 'object' ? { ...positions } : {}
-}
-
-function getCertificateCourseProgress(activities, pendingRequirements = [], earned = false) {
-  const totalActivities = Object.values(activities).reduce((total, items) => total + items.length, 0)
-  const incompleteActivities = pendingRequirements.filter((requirement) => (
-    ['video', 'quiz', 'assignment'].includes(requirement.type)
-  )).length
-  const completedActivities = earned ? totalActivities : Math.max(0, totalActivities - incompleteActivities)
-  return {
-    completedActivities,
-    totalActivities,
-    percentage: earned ? 100 : totalActivities ? Math.round((completedActivities / totalActivities) * 100) : 0,
-  }
-}
-
-function isValidObjectId(value) {
-  return typeof value === 'string' && mongoose.isValidObjectId(value)
-}
-
-function canonicalObjectId(value) {
-  const isBsonObjectId = value instanceof mongoose.Types.ObjectId
-    || (value?._bsontype === 'ObjectId' && typeof value.toHexString === 'function')
-  if ((!isValidObjectId(value) && !isBsonObjectId) || !mongoose.isValidObjectId(value)) return ''
-  return new mongoose.Types.ObjectId(value).toString()
-}
 
 function hideQuizAnswers(course) {
   if (!course) return course
@@ -376,16 +379,33 @@ function hideQuizAnswers(course) {
         },
       } : {}),
       ...(contentItems ? {
-        contentItems: contentItems.map(({ quiz: itemQuiz, attentionCheck, ...item }) => ({
-          ...item,
-          ...(attentionCheck ? { attentionCheck: sanitizeStudentAttentionCheck(attentionCheck) } : {}),
-          ...(itemQuiz ? {
-            quiz: {
-              ...itemQuiz,
-              questions: itemQuiz.questions?.map(({ correctOptionIndices, ...question }) => question),
-            },
-          } : {}),
-        })),
+        contentItems: contentItems.map(({ quiz: itemQuiz, attentionCheck, ...item }) => {
+          let legacyTranscriptCues
+          if (item.type === 'video-lesson') {
+            const matchingLegacyLesson = item._id
+              ? lessons?.find((lesson) => String(lesson._id) === String(item._id))
+              : null
+            const titleAndVideoMatches = !matchingLegacyLesson && item.videoUrl
+              ? (lessons || []).filter((lesson) => lesson.title === item.title && lesson.videoUrl === item.videoUrl)
+              : []
+            const transcriptLesson = matchingLegacyLesson
+              || (titleAndVideoMatches.length === 1 ? titleAndVideoMatches[0] : null)
+            legacyTranscriptCues = transcriptLesson?.transcriptCues
+          }
+          return {
+            ...item,
+            ...(item.type === 'video-lesson' && !item.transcriptCues?.length && legacyTranscriptCues?.length
+              ? { transcriptCues: legacyTranscriptCues }
+              : {}),
+            ...(attentionCheck ? { attentionCheck: sanitizeStudentAttentionCheck(attentionCheck) } : {}),
+            ...(itemQuiz ? {
+              quiz: {
+                ...itemQuiz,
+                questions: itemQuiz.questions?.map(({ correctOptionIndices, ...question }) => question),
+              },
+            } : {}),
+          }
+        }),
       } : {}),
     })),
   }
@@ -819,6 +839,221 @@ function receiveAssignmentSubmission(req, res, next) {
     return next(error)
   })
 }
+
+router.post('/college/students', ...requireCollegeAdmin, async (req, res, next) => {
+  try {
+    const subAdmin = await getAssignedCollegeAdmin(req)
+    if (!subAdmin) {
+      return res.status(403).json({ message: 'Your Sub-Admin account is not assigned to a valid college.' })
+    }
+
+    const { fullName, email, password, studentId, department, batch } = req.body ?? {}
+    if (typeof fullName !== 'string' || !fullName.trim() || fullName.trim().length > 120) {
+      return res.status(400).json({ message: 'Enter a student name between 1 and 120 characters.' })
+    }
+    if (typeof email !== 'string' || email.trim().length > 254 || !emailPattern.test(email.trim())) {
+      return res.status(400).json({ message: 'Enter a valid email address.' })
+    }
+    if (typeof password !== 'string' || password.length < 8 || Buffer.byteLength(password, 'utf8') > 72) {
+      return res.status(400).json({ message: 'Use a password of at least 8 characters.' })
+    }
+    if (typeof studentId !== 'string' || !studentId.trim() || studentId.trim().length > 100) {
+      return res.status(400).json({ message: 'Enter a student ID of up to 100 characters.' })
+    }
+    if (department !== undefined && (typeof department !== 'string' || department.trim().length > 120)) {
+      return res.status(400).json({ message: 'Department must be 120 characters or fewer.' })
+    }
+    if (batch !== undefined && (typeof batch !== 'string' || batch.trim().length > 80)) {
+      return res.status(400).json({ message: 'Batch must be 80 characters or fewer.' })
+    }
+
+    const normalizedEmail = email.trim().toLowerCase()
+    const normalizedStudentId = studentId.trim()
+    const normalizedUsername = normalizedStudentId.toLowerCase()
+    const [existingEmail, existingUsername, existingStudentId] = await Promise.all([
+      accountIdentifierExists('email', normalizedEmail),
+      accountIdentifierExists('username', normalizedUsername),
+      Promise.all([
+        isDuplicateStudentId(normalizedStudentId, Student),
+        isDuplicateStudentId(normalizedStudentId, CollegeStudent),
+      ]).then((matches) => matches.some(Boolean)),
+    ])
+    if (existingEmail) return res.status(409).json({ message: 'An account with this email already exists.' })
+    if (existingUsername) return res.status(409).json({ message: 'This username is already taken.' })
+    if (existingStudentId) return res.status(409).json({ message: 'This student ID already exists.' })
+
+    const accountId = new mongoose.Types.ObjectId()
+    const passwordHash = await bcrypt.hash(password, 12)
+    const session = await mongoose.startSession()
+    let student
+    try {
+      await session.withTransaction(async () => {
+        await assertCollegeStudentCapacity(subAdmin.collegeId, session)
+        const duplicate = await AccountIdentity.findOne({
+          $or: [{ email: normalizedEmail }, { username: normalizedUsername }],
+        }).session(session)
+        if (duplicate) {
+          const error = new Error('Email or username already belongs to an LMS account.')
+          error.statusCode = 409
+          throw error
+        }
+        if ((await Promise.all([
+          isDuplicateStudentId(normalizedStudentId, Student, session),
+          isDuplicateStudentId(normalizedStudentId, CollegeStudent, session),
+        ])).some(Boolean)) {
+          const error = new Error('This student ID already exists.')
+          error.statusCode = 409
+          throw error
+        }
+        await AccountIdentity.create([{
+          email: normalizedEmail,
+          username: normalizedUsername,
+          accountCollection: CollegeStudent.collection.name,
+          accountId,
+        }], { session })
+        ;[student] = await CollegeStudent.create([{
+          _id: accountId,
+          fullName: fullName.trim(),
+          email: normalizedEmail,
+          username: normalizedUsername,
+          studentId: normalizedStudentId,
+          department: department?.trim() || undefined,
+          batch: batch?.trim() || undefined,
+          passwordHash,
+          role: 'student',
+          studentType: 'college',
+          collegeId: subAdmin.collegeId,
+          status: 'active',
+          isActive: true,
+          permissions: [],
+        }], { session })
+      })
+    } finally {
+      await session.endSession()
+    }
+    return res.status(201).json({
+      message: 'College student created.',
+      student: {
+        id: String(student._id),
+        fullName: student.fullName,
+        email: student.email,
+        studentId: student.studentId,
+        department: student.department || '',
+        batch: student.batch || '',
+      },
+    })
+  } catch (error) {
+    if (error?.statusCode === 409) {
+      return res.status(409).json({ message: error.message })
+    }
+    return next(error)
+  }
+})
+
+router.post('/college/students/import', ...requireCollegeAdmin, async (req, res, next) => {
+  try {
+    const subAdmin = await getAssignedCollegeAdmin(req)
+    if (!subAdmin) {
+      return res.status(403).json({ message: 'Your Sub-Admin account is not assigned to a valid college.' })
+    }
+    let rows
+    try {
+      rows = parseStudentCsv(req.body?.csvText)
+    } catch (error) {
+      return res.status(400).json({ message: error.message })
+    }
+    if (rows.length > 500) {
+      return res.status(400).json({ message: 'Import is limited to 500 students per CSV.' })
+    }
+
+    const imported = []
+    const failures = []
+    const seenEmails = new Set()
+    const seenStudentIds = new Set()
+    for (const row of rows) {
+      if (row.error) {
+        failures.push({ row: row.rowNumber, reason: row.error })
+        continue
+      }
+
+      const { fullName, studentId, email, department, batch } = row
+      const username = makeImportUsername(studentId)
+      const normalizedStudentId = String(studentId ?? '').trim().toLowerCase()
+      const errors = []
+      if (!fullName || fullName.length > 120) errors.push('Full Name is required and must be 120 characters or fewer.')
+      if (!studentId?.trim() || studentId.trim().length > 100) errors.push('Student ID is required and must be 100 characters or fewer.')
+      if (!emailPattern.test(email) || email.length > 254) errors.push('Enter a valid email address.')
+      if (!department || department.length > 120) errors.push('Department is required and must be 120 characters or fewer.')
+      if (!batch || batch.length > 80) errors.push('Batch is required and must be 80 characters or fewer.')
+      if (seenEmails.has(email)) errors.push('Email is duplicated in this CSV.')
+      if (seenStudentIds.has(normalizedStudentId)) errors.push('Student ID is duplicated in this CSV.')
+      seenEmails.add(email)
+      seenStudentIds.add(normalizedStudentId)
+      if (!errors.length) {
+        const [existingEmail, existingStudentId, existingUsername] = await Promise.all([
+          accountIdentifierExists('email', email),
+          isDuplicateStudentId(studentId.trim(), CollegeStudent),
+          accountIdentifierExists('username', username),
+        ])
+        if (existingEmail) errors.push('Email already belongs to an LMS account.')
+        if (existingStudentId) errors.push('Student ID already exists.')
+        if (existingUsername) errors.push('Username (Student ID) conflicts with an LMS account.')
+      }
+      if (errors.length) {
+        failures.push({ row: row.rowNumber, email, studentId, reason: errors.join(' ') })
+        continue
+      }
+
+      const accountId = new mongoose.Types.ObjectId()
+      const passwordHash = await bcrypt.hash(randomBytes(48).toString('base64url'), 12)
+      const session = await mongoose.startSession()
+      try {
+        await session.withTransaction(async () => {
+          await assertCollegeStudentCapacity(subAdmin.collegeId, session)
+          await AccountIdentity.create([{
+            email,
+            username,
+            accountCollection: CollegeStudent.collection.name,
+            accountId,
+          }], { session })
+          await CollegeStudent.create([{
+            _id: accountId,
+            fullName,
+            email,
+            username,
+            studentId: studentId.trim(),
+            department,
+            batch,
+            passwordHash,
+            role: 'student',
+            studentType: 'college',
+            collegeId: subAdmin.collegeId,
+            status: 'active',
+            isActive: true,
+            permissions: [],
+          }], { session })
+        })
+        imported.push({ row: row.rowNumber, email, studentId: studentId.trim() })
+      } catch (error) {
+        if (error?.statusCode === 409 || error?.code === 11000) {
+          failures.push({ row: row.rowNumber, email, studentId, reason: error.message || 'Email, username, or Student ID already exists.' })
+        } else {
+          throw error
+        }
+      } finally {
+        await session.endSession()
+      }
+    }
+    return res.json({
+      message: 'College student import completed. No invitation emails were sent.',
+      summary: { total: rows.length, imported: imported.length, failed: failures.length },
+      imported,
+      failures,
+    })
+  } catch (error) {
+    return next(error)
+  }
+})
 
 router.get('/courses', ...requireStudent, async (req, res, next) => {
   try {
@@ -1731,7 +1966,7 @@ router.get('/courses/:courseId/learning-content', ...requireStudent, async (req,
       (mongoose.connection.readyState === 0 && AssignmentSubmission.find === mongoose.Model.find
         ? Promise.resolve([])
         : AssignmentSubmission.find({ userId: req.auth.id, enrollmentId: enrollment._id })
-            .select('_id assignmentId fileName contentType fileSize submittedAt reviewStatus')
+            .select('_id assignmentId fileName contentType fileSize submittedAt reviewStatus reviewedAt reviewComment marksObtained evaluationStatus correctness feedback evaluatedAt')
             .sort({ submittedAt: -1, _id: -1 })
             .lean()),
       (mongoose.connection.readyState === 0 && QuizAttempt.find === mongoose.Model.find
@@ -2086,6 +2321,22 @@ router.post('/courses/:courseId/quizzes/:quizId/attempts/:attemptId/submit', ...
     if (!updatedState) throw new Error('Quiz attempt state could not be updated after submission.')
     const quizStatus = getQuizAttemptStatus(updatedState, submittedAt)
 
+    await createStudentNotification({
+      recipientId: req.auth.id,
+      eventKey: `quiz-result:${req.auth.id}:${submittedAttempt._id}`,
+      type: 'quiz_result',
+      title: `${quiz?.title || 'Quiz'} result available`,
+      message: `${course.title || 'Your course'} · Score: ${scorePercentage}% · ${passed ? 'Passed' : 'Not passed'}.`,
+      link: `/student/course/${encodeURIComponent(courseId)}/learn?activity=${encodeURIComponent(quizId)}&activityType=quiz`,
+      metadata: {
+        courseId,
+        quizId,
+        attemptId: String(submittedAttempt._id),
+        scorePercentage,
+        passed,
+      },
+    })
+
     if (submittedAttempt.passed) {
       await issueCertificateIfEligible({
         userId: req.auth.id,
@@ -2239,7 +2490,6 @@ router.post(
         fileSize: req.file.size,
         fileData: req.file.buffer,
       })
-
       // Synchronize with Progress and Enrollment models
       let courseProgress = null
       try {
@@ -2292,6 +2542,16 @@ router.post(
         // Safe fallback
       }
 
+      const assignment = findAssignment(course, assignmentId)
+      await createStudentNotification({
+        recipientId: req.auth.id,
+        eventKey: `assignment-submitted:${req.auth.id}:${submission._id}`,
+        type: 'assignment_submitted',
+        title: 'Assignment submitted',
+        message: `${assignment.title || 'Your assignment'} is awaiting review.`,
+        link: '/student/assignments',
+        metadata: { courseId, assignmentId, submissionId: String(submission._id) },
+      })
       return res.status(201).json({
         submission: {
           _id: submission._id,
@@ -2501,9 +2761,30 @@ router.patch('/enrollments/:enrollmentId/progress', ...requireStudent, async (re
         ...update.$set,
         [`lessonPlaybackPositions.${lessonId}`]: positionSeconds,
       }
+      const previousPositionValue = getMapValue(enrollment.lessonPlaybackPositions, lessonId)
+      const previousPositionQuery = previousPositionValue === undefined
+        ? { $exists: false }
+        : previousPositionValue
+      enrollmentQuery[`lessonPlaybackPositions.${lessonId}`] = previousPositionQuery
     }
     const result = await Enrollment.updateOne(enrollmentQuery, update)
-    if (!result.matchedCount) return res.status(404).json({ message: 'The enrollment was not found.' })
+    if (!result.matchedCount) {
+      if (!hasPositionSeconds) return res.status(404).json({ message: 'The enrollment was not found.' })
+      const latestEnrollment = await Enrollment.findOne({
+        _id: enrollmentId,
+        userId: req.auth.id,
+        ...scope,
+        status: { $ne: 'cancelled' },
+      })
+        .select('completedLessonIds startedLessonIds lessonPlaybackPositions')
+        .lean()
+      if (!latestEnrollment) return res.status(404).json({ message: 'The enrollment was not found.' })
+      return res.json({
+        completedLessonIds: (latestEnrollment.completedLessonIds || []).map(String),
+        startedLessonIds: (latestEnrollment.startedLessonIds || []).map(String),
+        lessonPlaybackPositions: getLessonPlaybackPositions(latestEnrollment),
+      })
+    }
 
     const completedLessonIds = new Set((enrollment.completedLessonIds || []).map(String))
     const startedLessonIds = new Set((enrollment.startedLessonIds || []).map(String))
@@ -2679,6 +2960,31 @@ router.get('/certificates', ...requireStudent, async (req, res, next) => {
   }
 })
 
+router.get('/certificates/:certificateId/pdf', ...requireStudent, async (req, res, next) => {
+  try {
+    const { certificateId } = req.params
+    if (!isValidObjectId(certificateId)) return res.status(404).json({ message: 'The certificate was not found.' })
+    const activeTemplateId = await getActiveCertificateTemplateId()
+    const certificate = await Certificate.findOne({ _id: certificateId, userId: req.auth.id }).lean()
+    if (!certificate) return res.status(404).json({ message: 'The certificate was not found.' })
+    const templateId = certificate.templateId || activeTemplateId
+    const template = templateId === 'builtin'
+      ? null
+      : await CertificateTemplate.findById(templateId).select('+imageData secureUrl').lean()
+    if (templateId !== 'builtin' && !template) {
+      throw new Error('The certificate background used for this certificate is unavailable.')
+    }
+    const templateImage = templateId === 'builtin' ? undefined : await loadCertificateTemplateImage(template)
+    const pdf = await generateCertificatePdf(certificate, templateImage)
+    const download = req.query.download === 'true'
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `${download ? 'attachment' : 'inline'}; filename="aiHustle-certificate-${certificate.certificateId}.pdf"`)
+    res.setHeader('Cache-Control', 'private, no-store')
+    return res.send(pdf)
+  } catch (error) {
+    return next(error)
+  }
+})
 router.post('/enrollments', ...requireStudent, async (req, res, next) => {
   try {
     const { courseId } = req.body ?? {}
@@ -2695,7 +3001,7 @@ router.post('/enrollments', ...requireStudent, async (req, res, next) => {
       .lean()
     if (!student) return res.status(404).json({ message: 'The student account was not found.' })
 
-    const course = await Course.findOne({ _id: courseId, status: 'published' }).select('_id')
+    const course = await Course.findOne({ _id: courseId, status: 'published' }).select('_id title')
     if (!course) return res.status(404).json({ message: 'The published course was not found.' })
     const existing = await Enrollment.findOne({
       userId: student._id,
@@ -2710,6 +3016,15 @@ router.post('/enrollments', ...requireStudent, async (req, res, next) => {
       assignedBy: student._id,
       status: 'active',
     }])
+    await createStudentNotification({
+      recipientId: student._id,
+      eventKey: `course-assigned:${student._id}:${enrollment._id}`,
+      type: 'course_assigned',
+      title: 'New course added',
+      message: `You are now enrolled in ${course.title || 'a course'}.`,
+      link: `/student/course/${encodeURIComponent(String(course._id))}/learn`,
+      metadata: { courseId: String(course._id), enrollmentId: String(enrollment._id) },
+    })
     return res.status(201).json({ message: 'You are now enrolled in this course.', enrollment })
   } catch (error) {
     return next(error)
@@ -2999,7 +3314,7 @@ router.post('/college/enrollments', ...requireCollegeAdmin, async (req, res, nex
         studentType: 'college',
         collegeId,
       }).select('_id'),
-      Course.findOne({ _id: courseId, status: 'published' }).select('_id'),
+      Course.findOne({ _id: courseId, status: 'published' }).select('_id title'),
     ])
     if (!student) {
       return res.status(404).json({ message: 'The student was not found in your college.' })
@@ -3021,6 +3336,15 @@ router.post('/college/enrollments', ...requireCollegeAdmin, async (req, res, nex
       assignedBy: req.auth.id,
       status: 'active',
     }])
+    await createStudentNotification({
+      recipientId: student._id,
+      eventKey: `course-assigned:${student._id}:${enrollment._id}`,
+      type: 'course_assigned',
+      title: 'New course assigned',
+      message: `${course.title || 'A course'} has been added to your courses.`,
+      link: `/student/course/${encodeURIComponent(String(course._id))}/learn`,
+      metadata: { courseId: String(course._id), enrollmentId: String(enrollment._id) },
+    })
     return res.status(201).json({ message: 'Course assigned to the student.', enrollment })
   } catch (error) {
     return next(error)

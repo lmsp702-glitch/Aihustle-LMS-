@@ -136,9 +136,9 @@ async function findScopedTicket(scope, ticketId, select = '') {
 async function includeRequesterDetails(tickets) {
   const [independent, college] = await Promise.all([
     Student.find({ _id: { $in: tickets.filter((ticket) => ticket.userCollection === 'students').map((ticket) => ticket.userId) } })
-      .select('fullName email').lean(),
+      .select('fullName email studentId').lean(),
     CollegeStudent.find({ _id: { $in: tickets.filter((ticket) => ticket.userCollection === 'clg_students').map((ticket) => ticket.userId) } })
-      .select('fullName email').lean(),
+      .select('fullName email studentId').lean(),
   ])
   const usersByKey = new Map([
     ...independent.map((user) => [`students:${user._id}`, user]),
@@ -146,7 +146,12 @@ async function includeRequesterDetails(tickets) {
   ])
   return tickets.map((ticket) => {
     const requester = usersByKey.get(`${ticket.userCollection}:${ticket.userId}`)
-    return ticketJson(ticket, requester ? { fullName: requester.fullName, email: requester.email } : undefined)
+    return ticketJson(ticket, requester ? {
+      id: String(ticket.userId),
+      studentId: requester.studentId || String(ticket.userId),
+      fullName: requester.fullName,
+      email: requester.email,
+    } : undefined)
   })
 }
 
@@ -156,7 +161,7 @@ async function findRequester(ticket) {
     return null
   }
   const AccountModel = ticket.userCollection === 'clg_students' ? CollegeStudent : Student
-  return AccountModel.findById(ticket.userId).select('fullName email').lean()
+  return AccountModel.findById(ticket.userId).select('fullName email studentId').lean()
 }
 
 function validateTicketFilters(query) {
@@ -586,7 +591,12 @@ router.get('/admin/tickets/:ticketId', async (req, res, next) => {
     if (!ticket) return res.status(404).json({ message: 'Support request not found.' })
     const requester = await findRequester(ticket)
     return res.json({
-      ticket: ticketJson(ticket, requester ? { fullName: requester.fullName, email: requester.email } : undefined),
+      ticket: ticketJson(ticket, requester ? {
+        id: String(ticket.userId),
+        studentId: requester.studentId || String(ticket.userId),
+        fullName: requester.fullName,
+        email: requester.email,
+      } : undefined),
     })
   } catch (error) {
     return next(error)

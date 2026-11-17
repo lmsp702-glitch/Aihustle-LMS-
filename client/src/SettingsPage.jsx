@@ -64,6 +64,9 @@ function SettingsPage({
 }) {
   const hasCachedAccount = Boolean(user?.id && user?.username && user?.email)
   const [account, setAccount] = useState(() => hasCachedAccount ? user : null)
+  const isCollegeStudent = account?.accountType === 'College Student'
+    || account?.studentType === 'college'
+    || (!account && user?.studentType === 'college')
   const [name, setName] = useState(() => hasCachedAccount ? user.fullName || '' : '')
   const [username, setUsername] = useState(() => hasCachedAccount ? user.username : '')
   const [emailInput, setEmailInput] = useState(() => hasCachedAccount ? user.email : '')
@@ -146,9 +149,12 @@ function SettingsPage({
       .then((response) => response.json())
       .then(({ account: result }) => {
         if (active) {
-          setAccount(result)
-          setName(result.fullName)
-          setUsername(result.username)
+          const settingsAccount = result.accountType === 'College Student' && result.studentId
+            ? { ...result, username: result.studentId.trim().toLowerCase() }
+            : result
+          setAccount(settingsAccount)
+          setName(settingsAccount.fullName)
+          setUsername(settingsAccount.username)
           setEmailInput(result.email)
           setPendingEmail(result.pendingEmail || '')
           setUsernameState('current')
@@ -178,6 +184,10 @@ function SettingsPage({
   useEffect(() => {
     if (!account || !username.trim()) {
       setUsernameState('idle')
+      return undefined
+    }
+    if (account.accountType === 'College Student' || account.studentType === 'college') {
+      setUsernameState('current')
       return undefined
     }
     const normalized = username.trim().toLowerCase()
@@ -219,13 +229,15 @@ function SettingsPage({
       setProfileError('Display name must be between 2 and 120 characters.')
       return
     }
-    if (!usernamePattern.test(username.trim())) {
-      setProfileError('Username must be 3–30 characters and use only letters, numbers, dots, underscores, or hyphens.')
-      return
-    }
-    if (!['available', 'current'].includes(usernameState)) {
-      setProfileError('Choose a username confirmed to be available before saving.')
-      return
+    if (!isCollegeStudent) {
+      if (!usernamePattern.test(username.trim())) {
+        setProfileError('Username must be 3–30 characters and use only letters, numbers, dots, underscores, or hyphens.')
+        return
+      }
+      if (!['available', 'current'].includes(usernameState)) {
+        setProfileError('Choose a username confirmed to be available before saving.')
+        return
+      }
     }
     setIsSavingProfile(true)
     try {
@@ -570,7 +582,9 @@ function SettingsPage({
           <SettingsSection
             title="Account Information"
             description={user?.role === 'student'
-              ? 'Update your display name and username. Email changes take effect after verification.'
+              ? isCollegeStudent
+                ? 'Update your display name. Your username is set from your Student ID. Email changes take effect after verification.'
+                : 'Update your display name and username. Email changes take effect after verification.'
               : 'Review and update your account details. Your email and account permissions are managed by the platform.'}
           >
             <form className="settings-form" onSubmit={saveProfile} noValidate>
@@ -587,9 +601,21 @@ function SettingsPage({
                   <input id="settings-display-name" value={name} onChange={(event) => { setName(event.currentTarget.value); setProfileNotice('') }} autoComplete="name" required minLength={2} maxLength={120} />
                 </div>
                 <div className="settings-field-group settings-account-field--username">
-                  <label htmlFor="settings-username">Username</label>
-                  <input id="settings-username" value={username} onChange={(event) => { setUsername(event.currentTarget.value); setUsernameState('idle'); setProfileNotice('') }} autoComplete="username" required minLength={3} maxLength={30} aria-describedby={usernameMessage ? 'settings-username-status' : undefined} />
-                  {usernameMessage && <small id="settings-username-status" className={`settings-field-status is-${usernameState}`} role="status">{usernameMessage}</small>}
+                  <label htmlFor="settings-username">{isCollegeStudent ? 'Username (Student ID)' : 'Username'}</label>
+                  <input
+                    id="settings-username"
+                    value={username}
+                    onChange={(event) => { setUsername(event.currentTarget.value); setUsernameState('idle'); setProfileNotice('') }}
+                    autoComplete="username"
+                    readOnly={isCollegeStudent}
+                    required={!isCollegeStudent}
+                    minLength={isCollegeStudent ? undefined : 3}
+                    maxLength={isCollegeStudent ? undefined : 30}
+                    aria-describedby={isCollegeStudent ? undefined : usernameMessage ? 'settings-username-status' : undefined}
+                  />
+                  {isCollegeStudent
+                    ? <small>Your username matches your Student ID.</small>
+                    : usernameMessage && <small id="settings-username-status" className={`settings-field-status is-${usernameState}`} role="status">{usernameMessage}</small>}
                 </div>
                 {user?.role === 'student' ? (
                   <div className="settings-field-group settings-account-field--email">
@@ -651,7 +677,7 @@ function SettingsPage({
               {profileNotice && <p className="settings-message is-success" role="status">{profileNotice}</p>}
               {emailError && <p className="settings-message is-error" role="alert">{emailError}</p>}
               {emailNotice && <p className="settings-message is-success" role="status">{emailNotice}</p>}
-              <button className="student-button" type="submit" disabled={isSavingProfile || isLoading || !['available', 'current'].includes(usernameState)}>
+              <button className="student-button" type="submit" disabled={isSavingProfile || isLoading || (!isCollegeStudent && !['available', 'current'].includes(usernameState))}>
                 {isSavingProfile ? 'Saving…' : 'Save account information'}
               </button>
             </form>

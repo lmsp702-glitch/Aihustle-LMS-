@@ -237,9 +237,7 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
   const [referralCodeMessage, setReferralCodeMessage] = useState('')
   const [isCheckingReferralCode, setIsCheckingReferralCode] = useState(false)
   const [educationQualification, setEducationQualification] = useState('')
-  const [customQualification, setCustomQualification] = useState('')
   const [livingWithWhom, setLivingWithWhom] = useState('')
-  const [customLivingArrangement, setCustomLivingArrangement] = useState('')
   const [usernameStatus, setUsernameStatus] = useState('idle')
   const [usernameSuggestions, setUsernameSuggestions] = useState([])
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -1245,9 +1243,7 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
                 name="educationQualification"
                 value={educationQualification}
                 onChange={(event) => {
-                  const value = event.currentTarget.value
-                  setEducationQualification(value)
-                  if (value !== 'Other') setCustomQualification('')
+                  setEducationQualification(event.currentTarget.value)
                 }}
               >
                 <option value="">Select your qualification</option>
@@ -1258,19 +1254,6 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
                 <option value="Postgraduate">Postgraduate</option>
                 <option value="Other">Other</option>
               </select>
-              {educationQualification === 'Other' && (
-                <>
-                  <label htmlFor="custom-qualification">Please specify your qualification</label>
-                  <input
-                    id="custom-qualification"
-                    name="customQualification"
-                    type="text"
-                    placeholder="Enter your qualification"
-                    value={customQualification}
-                    onChange={(event) => setCustomQualification(event.currentTarget.value)}
-                  />
-                </>
-              )}
             </div>
 
             <div className="field">
@@ -1301,9 +1284,7 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
                 name="livingWithWhom"
                 value={livingWithWhom}
                 onChange={(event) => {
-                  const value = event.currentTarget.value
-                  setLivingWithWhom(value)
-                  if (value !== 'Other') setCustomLivingArrangement('')
+                  setLivingWithWhom(event.currentTarget.value)
                 }}
               >
                 <option value="">Select an option</option>
@@ -1314,19 +1295,6 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
                 <option value="Hostel / PG">Hostel / PG</option>
                 <option value="Other">Other</option>
               </select>
-              {livingWithWhom === 'Other' && (
-                <>
-                  <label htmlFor="custom-living-arrangement">Please specify</label>
-                  <input
-                    id="custom-living-arrangement"
-                    name="customLivingArrangement"
-                    type="text"
-                    placeholder="Enter who you live with"
-                    value={customLivingArrangement}
-                    onChange={(event) => setCustomLivingArrangement(event.currentTarget.value)}
-                  />
-                </>
-              )}
             </div>
           </>
         )}

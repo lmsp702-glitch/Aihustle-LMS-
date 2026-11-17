@@ -74,10 +74,28 @@ async function supportRequest(path, options = {}, onLogout) {
   return result
 }
 
+async function complaintRequest(path, options = {}) {
+  const headers = new Headers(options.headers)
+  headers.set('Authorization', `Bearer ${getToken()}`)
+  if (options.body) headers.set('Content-Type', 'application/json')
+  const response = await fetch(`${API_BASE_URL}/complaints${path}`, { ...options, headers })
+  let result
+  try {
+    result = await response.json()
+  } catch {
+    throw new Error('The server returned an invalid response. Please try again.')
+  }
+  if (!response.ok) {
+    throw new Error(typeof result.message === 'string' ? result.message : 'The complaint request failed.')
+  }
+  return result
+}
+
 function Icon({ name }) {
   const paths = {
     email: <><rect x="3" y="5" width="18" height="14" rx="2" /><path d="m4 7 8 6 8-6" /></>,
     ticket: <><path d="M4 5h16v4a3 3 0 0 0 0 6v4H4v-4a3 3 0 0 0 0-6z" /><path d="M12 8v2m0 4v2" /></>,
+    message: <><path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5 8 8 0 0 1-3.5-.8L4 20l1.5-4A7.5 7.5 0 1 1 20 11.5Z" /><path d="M8 11h.01M12 11h.01M16 11h.01" /></>,
     faq: <><circle cx="12" cy="12" r="9" /><path d="M9.6 9a2.5 2.5 0 1 1 4.5 1.5c-.9 1.1-2.1 1.3-2.1 3m0 3h.01" /></>,
     list: <><path d="M9 6h11M9 12h11M9 18h11" /><path d="M4 6h.01M4 12h.01M4 18h.01" /></>,
     search: <><circle cx="10.8" cy="10.8" r="6.8" /><path d="m16 16 4.5 4.5" /></>,
@@ -142,6 +160,7 @@ export function HelpCenterHome() {
   const cards = [
     { title: 'Email Support', description: 'Send a support request to the LMS team.', icon: 'email', to: '/student/help/email' },
     { title: 'Submit a Support Ticket', description: 'Report an issue and track its status.', icon: 'ticket', to: '/student/help/submit-ticket' },
+    { title: 'Submit a Complaint', description: 'Send a complaint to the Main Admin for review.', icon: 'message', to: '/student/help/complaint' },
     { title: 'Browse FAQs', description: 'Find answers to common questions.', icon: 'faq', to: '/student/help/faqs' },
     { title: 'My Support Requests', description: 'View previous tickets and replies.', icon: 'list', to: '/student/help/requests' },
   ]
@@ -344,6 +363,97 @@ export function SubmitSupportTicketPage({ onLogout }) {
           </button>
         </form>
       )}
+    </SupportPage>
+  )
+}
+
+export function SubmitComplaintPage() {
+  const [profile, setProfile] = useState(null)
+  const [isLoadingProfile, setIsLoadingProfile] = useState(true)
+  const [profileError, setProfileError] = useState('')
+  const [values, setValues] = useState({ subject: '', category: '', description: '' })
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const [isSubmitting, setIsSubmitting] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    complaintRequest('/profile')
+      .then((result) => {
+        if (!result.student) throw new Error('Your student profile could not be loaded.')
+        if (active) setProfile(result.student)
+      })
+      .catch((requestError) => {
+        if (active) {
+          setProfileError(requestError instanceof Error
+            ? requestError.message
+            : 'Your student profile could not be loaded.')
+        }
+      })
+      .finally(() => {
+        if (active) setIsLoadingProfile(false)
+      })
+    return () => { active = false }
+  }, [])
+
+  function updateValue(event) {
+    const { name, value } = event.currentTarget
+    setValues((current) => ({ ...current, [name]: value }))
+    setError('')
+    setNotice('')
+  }
+
+  async function submitComplaint(event) {
+    event.preventDefault()
+    setIsSubmitting(true)
+    setError('')
+    setNotice('')
+    try {
+      const result = await complaintRequest('/', {
+        method: 'POST',
+        body: JSON.stringify(values),
+      })
+      setValues({ subject: '', category: '', description: '' })
+      setNotice(`Complaint ${result.complaint?.complaintId || ''} submitted successfully.`.trim())
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Your complaint could not be submitted.')
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  return (
+    <SupportPage eyebrow="STUDENT COMPLAINTS" title="Submit a Complaint">
+      <p className="support-page-intro">Your account details are securely added from your student profile.</p>
+      {isLoadingProfile ? <p className="support-loading" role="status">Loading your profile…</p> : profileError ? (
+        <div className="support-notice is-error" role="alert">{profileError}</div>
+      ) : profile ? (
+        <form className="support-form" onSubmit={submitComplaint}>
+          <div className="support-form__grid">
+            <label>Full name<input value={profile.fullName || 'Not available'} readOnly /></label>
+            <label>Email<input value={profile.email || 'Not available'} readOnly /></label>
+            {profile.studentType === 'college' && (
+              <>
+                <label>Student ID<input value={profile.studentId || 'Not available'} readOnly /></label>
+                <label>College ID<input value={profile.collegeId || 'Not available'} readOnly /></label>
+              </>
+            )}
+          </div>
+          <label>Subject<input name="subject" value={values.subject} onChange={updateValue} required minLength={3} maxLength={160} /></label>
+          <label>Category
+            <select name="category" value={values.category} onChange={updateValue} required>
+              <option value="">Choose a category</option>
+              {ticketCategories.map((category) => <option key={category} value={category}>{category}</option>)}
+            </select>
+          </label>
+          <label>Detailed description<textarea name="description" value={values.description} onChange={updateValue} required minLength={10} maxLength={10000} rows={7} /></label>
+          {error && <div className="support-notice is-error" role="alert">{error}</div>}
+          {notice && <div className="support-notice is-success" role="status">{notice}</div>}
+          <button className="student-button" type="submit" disabled={isSubmitting}>
+            {isSubmitting ? 'Submitting…' : 'Submit complaint'}
+          </button>
+        </form>
+      ) : null}
     </SupportPage>
   )
 }
