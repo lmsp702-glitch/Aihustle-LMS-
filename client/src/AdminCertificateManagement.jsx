@@ -43,10 +43,14 @@ async function adminCertificateRequest(path, onLogout, { method = 'GET', body } 
 
 export default function AdminCertificateManagement({ onBack, onLogout }) {
   const [submissions, setSubmissions] = useState([])
+  const [recentAssignments, setRecentAssignments] = useState([])
   const [reviewComments, setReviewComments] = useState({})
   const [isLoading, setIsLoading] = useState(true)
+  const [isLoadingRecentAssignments, setIsLoadingRecentAssignments] = useState(false)
+  const [showRecentAssignments, setShowRecentAssignments] = useState(false)
   const [activeReview, setActiveReview] = useState('')
   const [error, setError] = useState('')
+  const [recentAssignmentsError, setRecentAssignmentsError] = useState('')
   const [notice, setNotice] = useState('')
 
   async function loadManagement() {
@@ -63,6 +67,25 @@ export default function AdminCertificateManagement({ onBack, onLogout }) {
   }
 
   useEffect(() => { loadManagement() }, [])
+
+  async function toggleRecentAssignments() {
+    if (showRecentAssignments) {
+      setShowRecentAssignments(false)
+      return
+    }
+
+    setShowRecentAssignments(true)
+    setIsLoadingRecentAssignments(true)
+    setRecentAssignmentsError('')
+    try {
+      const result = await adminCertificateRequest('/admin/assignment-submissions?scope=all', onLogout)
+      setRecentAssignments(result.submissions || [])
+    } catch (loadError) {
+      setRecentAssignmentsError(loadError instanceof Error ? loadError.message : 'Recent assignments could not be loaded.')
+    } finally {
+      setIsLoadingRecentAssignments(false)
+    }
+  }
 
   async function downloadSubmission(submission) {
     setError('')
@@ -173,6 +196,45 @@ export default function AdminCertificateManagement({ onBack, onLogout }) {
                   </article>
                 ))}
               </div>}
+          {showRecentAssignments && (
+            <section className="ac-recent-assignments" aria-labelledby="ac-recent-assignments-title">
+              <div className="ac-recent-assignments__heading">
+                <div>
+                  <p className="ac-eyebrow">SUBMISSION HISTORY</p>
+                  <h3 id="ac-recent-assignments-title">All submitted assignments</h3>
+                </div>
+                {!isLoadingRecentAssignments && !recentAssignmentsError && (
+                  <span>{recentAssignments.length} submissions</span>
+                )}
+              </div>
+              {recentAssignmentsError
+                ? <p className="ac-inline-error" role="alert">{recentAssignmentsError}</p>
+                : isLoadingRecentAssignments
+                  ? <div className="ac-empty-state"><span className="ac-spinner" />Loading submitted assignments…</div>
+                  : recentAssignments.length
+                    ? (
+                      <div className="ac-recent-assignments__list">
+                        {recentAssignments.map((submission) => (
+                          <article className="ac-recent-assignment" key={submission.id}>
+                            <strong>{submission.assignmentName}</strong>
+                            <span>{submission.studentName}{submission.studentEmail ? ` · ${submission.studentEmail}` : ''}</span>
+                            <span>{submission.courseName}</span>
+                            <span>Submitted {new Date(submission.submittedAt).toLocaleString()}</span>
+                            <span className={`ac-recent-assignment__status is-${submission.reviewStatus || 'pending'}`}>
+                              {(submission.reviewStatus || 'pending').replace('_', ' ')}
+                            </span>
+                          </article>
+                        ))}
+                      </div>
+                    )
+                    : <p className="ac-recent-assignments__empty">No assignment submissions have been recorded.</p>}
+            </section>
+          )}
+          <div className="ac-recent-assignments__action">
+            <button type="button" className="ac-button ac-button--outline" onClick={toggleRecentAssignments}>
+              {showRecentAssignments ? 'Hide Recent Assignments' : 'Recent Assignments'}
+            </button>
+          </div>
         </section>
       </div>
     </div>

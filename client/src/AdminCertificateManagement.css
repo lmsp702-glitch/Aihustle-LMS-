@@ -15,10 +15,25 @@
 .ac-certificate-submission__actions { display: flex; flex-wrap: wrap; gap: 7px; }
 .ac-certificate-submission__actions .ac-button { min-height: 34px; padding-inline: 10px; }
 .ac-certificate-submission .ac-field textarea { min-height: 56px; }
+.ac-recent-assignments { display: grid; gap: 12px; padding-top: 20px; border-top: 1px solid var(--ac-line); }
+.ac-recent-assignments__heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.ac-recent-assignments__heading h3 { margin: 0; font-size: 15px; }
+.ac-recent-assignments__heading > span { color: var(--ac-muted); font-size: 11px; }
+.ac-recent-assignments__list { display: grid; gap: 8px; }
+.ac-recent-assignment { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.2fr) auto; align-items: center; gap: 12px; padding: 12px; border: 1px solid var(--ac-line); border-radius: 8px; background: #fffdfa; }
+.ac-recent-assignment > * { min-width: 0; overflow-wrap: anywhere; }
+.ac-recent-assignment strong { font-size: 11px; }
+.ac-recent-assignment > span { color: var(--ac-muted); font-size: 10px; }
+.ac-recent-assignment__status { justify-self: end; padding: 5px 8px; border-radius: 999px; background: #e8efeb; color: #34796e !important; font-weight: 700; text-transform: capitalize; }
+.ac-recent-assignment__status.is-rejected { background: #f7e9e4; color: #984f3c !important; }
+.ac-recent-assignments__empty { margin: 0; color: var(--ac-muted); font-size: 12px; }
+.ac-recent-assignments__action { display: flex; justify-content: flex-end; }
 
 @media (max-width: 760px) {
   .admin-app.is-main-admin .admin-certificate-management > .ac-page-heading { height: auto; min-height: 0; align-items: flex-start; flex-direction: column; padding: 20px; }
   .admin-app.is-main-admin .admin-certificate-management > .ac-page-heading > .ac-button { position: static; align-self: flex-end; }
   .ac-certificate-submission { grid-template-columns: 1fr; }
   .ac-certificate-submission__actions { justify-content: flex-end; }
+  .ac-recent-assignment { grid-template-columns: 1fr 1fr; }
+  .ac-recent-assignment__status { justify-self: start; }
 }

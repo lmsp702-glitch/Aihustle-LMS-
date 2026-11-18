@@ -3,7 +3,11 @@ import { test } from 'node:test'
 import mongoose from 'mongoose'
 import Course from '../models/Course.js'
 import Enrollment from '../models/Enrollment.js'
-import { calculateCourseProgress, recalculateEnrollmentsCourseProgress } from '../utils/course-progress.js'
+import {
+  calculateCourseActivityProgress,
+  calculateCourseProgress,
+  recalculateEnrollmentsCourseProgress,
+} from '../utils/course-progress.js'
 import AssignmentSubmission from '../models/AssignmentSubmission.js'
 import QuizAttempt from '../models/QuizAttempt.js'
 
@@ -83,6 +87,86 @@ test('course progress excludes optional activities and notes and never rounds in
     videos: { completed: 1, total: 1 },
     quizzes: { completed: 0, total: 1 },
     assignments: { completed: 0, total: 1 },
+  })
+})
+
+test('activity progress uses each course structure and counts submitted work once', () => {
+  const videoIds = Array.from({ length: 8 }, () => new mongoose.Types.ObjectId().toString())
+  const quizIds = Array.from({ length: 2 }, () => new mongoose.Types.ObjectId().toString())
+  const assignmentIds = Array.from({ length: 2 }, () => new mongoose.Types.ObjectId().toString())
+  const course = {
+    modules: [{
+      contentItems: [
+        ...videoIds.map((_id, index) => ({
+          _id,
+          type: 'video-lesson',
+          ...(index === 7 ? { requiredForCertificate: false } : {}),
+        })),
+        ...quizIds.map((_id) => ({ _id, type: 'quiz' })),
+        ...assignmentIds.map((_id) => ({ _id, type: 'assignment' })),
+      ],
+    }],
+    quizzes: [{ _id: quizIds[0] }],
+    assignments: [{ _id: assignmentIds[0] }],
+  }
+  const progress = calculateCourseActivityProgress(
+    course,
+    { completedLessonIds: [...videoIds.slice(0, 6), videoIds[0]] },
+    [
+      { quizId: quizIds[0], status: 'submitted', passed: false },
+      { quizId: quizIds[0], status: 'submitted', passed: false },
+      { quizId: quizIds[1], status: 'submitted' },
+    ],
+    [
+      { assignmentId: assignmentIds[0] },
+      { assignmentId: assignmentIds[0] },
+    ],
+  )
+
+  assert.deepEqual(progress, {
+    completedActivities: 9,
+    totalActivities: 12,
+    percentage: 75,
+    isComplete: false,
+    videos: { completed: 6, total: 8 },
+    quizzes: { completed: 2, total: 2 },
+    assignments: { completed: 1, total: 2 },
+  })
+
+  const otherCourse = {
+    modules: [{
+      contentItems: [
+        { _id: '68a000000000000000000101', type: 'video-lesson' },
+        { _id: '68a000000000000000000102', type: 'quiz' },
+        { _id: '68a000000000000000000103', type: 'quiz' },
+        { _id: '68a000000000000000000104', type: 'quiz' },
+      ],
+    }],
+  }
+  const otherProgress = calculateCourseActivityProgress(otherCourse, {
+    completedLessonIds: ['68a000000000000000000101'],
+  }, [
+    { quizId: '68a000000000000000000102', status: 'submitted' },
+  ])
+  assert.equal(otherProgress.totalActivities, 4)
+  assert.equal(otherProgress.completedActivities, 2)
+  assert.equal(otherProgress.percentage, 50)
+})
+
+test('activity progress for a course without videos, quizzes, or assignments is zero', () => {
+  const progress = calculateCourseActivityProgress(
+    { modules: [{ contentItems: [{ type: 'note', title: 'Notes' }] }] },
+    { completedLessonIds: [] },
+  )
+
+  assert.deepEqual(progress, {
+    completedActivities: 0,
+    totalActivities: 0,
+    percentage: 0,
+    isComplete: false,
+    videos: { completed: 0, total: 0 },
+    quizzes: { completed: 0, total: 0 },
+    assignments: { completed: 0, total: 0 },
   })
 })
 

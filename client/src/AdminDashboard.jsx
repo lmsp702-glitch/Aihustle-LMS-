@@ -24,7 +24,6 @@ const navigation = [
   { id: 'reports', label: 'Reports & Analytics', icon: '⌁' },
   { id: 'feedback', label: 'Feedback', group: 'COMMUNICATION & SUPPORT', icon: '☷' },
   { id: 'complaints', label: 'Complaints', icon: '▣' },
-  { id: 'notifications', label: 'Notifications', icon: '♧' },
   { id: 'settings', label: 'Settings', group: 'SYSTEM', icon: '⚙' },
 ]
 
@@ -362,45 +361,45 @@ function EngagementChart({ engagement, period }) {
 
 function CourseCompletionChart({ courseCompletion }) {
   const metrics = [
-    { label: 'Completed students', value: courseCompletion?.completedStudents, tone: 'completed' },
-    { label: 'In Progress students', value: courseCompletion?.inProgressStudents, tone: 'in-progress' },
-    { label: 'Not Started students', value: courseCompletion?.notStartedStudents, tone: 'not-started' },
+    { label: 'Completed activities', value: courseCompletion?.completedActivities, tone: 'completed' },
+    { label: 'In-progress activities', value: courseCompletion?.inProgressActivities, tone: 'in-progress' },
+    { label: 'Not-started activities', value: courseCompletion?.notStartedActivities, tone: 'not-started' },
   ].map((metric) => ({
     ...metric,
     value: Number.isSafeInteger(metric.value) && metric.value >= 0 ? metric.value : null,
   }))
   const hasCompleteData = metrics.every(({ value }) => value !== null)
-  const enrolledStudents = hasCompleteData
-    ? metrics.reduce((total, { value }) => total + value, 0)
-    : 0
-  const completionPercentage = hasCompleteData && enrolledStudents
-    ? (metrics[0].value / enrolledStudents) * 100
+  const totalActivities = Number.isSafeInteger(courseCompletion?.totalActivities)
+    ? courseCompletion.totalActivities
+    : hasCompleteData ? metrics.reduce((total, { value }) => total + value, 0) : 0
+  const completionPercentage = hasCompleteData && totalActivities
+    ? (metrics[0].value / totalActivities) * 100
     : hasCompleteData ? 0 : null
-  const completionAngle = enrolledStudents ? (metrics[0].value / enrolledStudents) * 360 : 0
-  const progressAngle = enrolledStudents
-    ? ((metrics[0].value + metrics[1].value) / enrolledStudents) * 360
+  const completionAngle = totalActivities ? (metrics[0].value / totalActivities) * 360 : 0
+  const progressAngle = totalActivities
+    ? ((metrics[0].value + metrics[1].value) / totalActivities) * 360
     : 0
   const formatPercentage = (value) => value === null ? '—' : `${Number(value.toFixed(1))}%`
 
   return (
-    <div className="admin-completion" role="group" aria-label="Student course progress">
+    <div className="admin-completion" role="group" aria-label="Course activity progress">
       <div
-        className={`admin-completion__donut${hasCompleteData && enrolledStudents ? '' : ' is-empty'}`}
-        style={hasCompleteData && enrolledStudents ? {
+        className={`admin-completion__donut${hasCompleteData && totalActivities ? '' : ' is-empty'}`}
+        style={hasCompleteData && totalActivities ? {
           '--completion-completed-angle': `${completionAngle}deg`,
           '--completion-progress-angle': `${progressAngle}deg`,
         } : undefined}
         role="img"
-        aria-label={`Overall completion ${formatPercentage(completionPercentage)}. ${metrics
+        aria-label={`Overall activity completion ${formatPercentage(completionPercentage)}. ${metrics
           .map(({ label, value }) => `${label}: ${value === null ? 'Unavailable' : value}`)
           .join(', ')}`}
       >
         <div className="admin-completion__center">
           <strong>{formatPercentage(completionPercentage)}</strong>
-          <span>complete</span>
+          <span>activities</span>
         </div>
       </div>
-      <ul className="admin-completion__legend" aria-label="Student progress breakdown">
+      <ul className="admin-completion__legend" aria-label="Activity progress breakdown">
         {metrics.map(({ label, value, tone }) => (
           <li className={`admin-completion__legend-item is-${tone}`} key={label}>
             <span className="admin-completion__swatch" aria-hidden="true" />
@@ -410,7 +409,7 @@ function CourseCompletionChart({ courseCompletion }) {
               {formatPercentage(
                 value === null || completionPercentage === null
                   ? null
-                  : enrolledStudents ? (value / enrolledStudents) * 100 : 0,
+                  : totalActivities ? (value / totalActivities) * 100 : 0,
               )}
             </span>
           </li>
@@ -623,9 +622,13 @@ function AdminDashboard({
   const [bulkDataAction, setBulkDataAction] = useState('')
   const [search, setSearch] = useState('')
   const [profileOpen, setProfileOpen] = useState(false)
+  const [notificationOpen, setNotificationOpen] = useState(false)
+  const [unreadNotificationCount, setUnreadNotificationCount] = useState(0)
+  const [notificationCountError, setNotificationCountError] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
   const [mobileSearchOpen, setMobileSearchOpen] = useState(false)
   const searchInputRef = useRef(null)
+  const notificationMenuRef = useRef(null)
   const studentDataActionsRef = useRef(null)
   const [colleges, setColleges] = useState([])
   const [reportColleges, setReportColleges] = useState([])
@@ -660,6 +663,55 @@ function AdminDashboard({
   const [isSavingBulkEdit, setIsSavingBulkEdit] = useState(false)
   const [isBulkDeleteConfirmOpen, setIsBulkDeleteConfirmOpen] = useState(false)
   const [isDeletingBulkStudents, setIsDeletingBulkStudents] = useState(false)
+
+  const refreshUnreadNotificationCount = useCallback(async (signal) => {
+    try {
+      const storedAuth = sessionStorage.getItem('lms.auth')
+      const auth = storedAuth ? JSON.parse(storedAuth) : null
+      if (auth?.user?.role !== 'main_admin' || typeof auth.token !== 'string') {
+        onLogout()
+        return
+      }
+      const response = await fetch(`${API_BASE_URL}/notifications/me`, {
+        headers: { Authorization: `Bearer ${auth.token}` },
+        signal,
+      })
+      const result = await readResponse(response, onLogout)
+      if (!Array.isArray(result.notifications)) {
+        throw new Error('The server returned invalid notifications.')
+      }
+      const unreadCount = Number.isSafeInteger(result.unreadCount) && result.unreadCount >= 0
+        ? result.unreadCount
+        : result.notifications.filter((notification) => notification.isRead !== true && !notification.readAt).length
+      setUnreadNotificationCount(unreadCount)
+      setNotificationCountError('')
+    } catch (error) {
+      if (error instanceof Error && error.name !== 'AbortError') {
+        setNotificationCountError(error.message)
+      }
+    }
+  }, [onLogout])
+  const handleUnreadCountChange = useCallback((count) => {
+    setUnreadNotificationCount((current) => (
+      typeof count === 'function' ? count(current) : count
+    ))
+    setNotificationCountError('')
+  }, [])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    const refresh = () => {
+      if (document.visibilityState === 'visible') void refreshUnreadNotificationCount()
+    }
+    void refreshUnreadNotificationCount(controller.signal)
+    const intervalId = window.setInterval(refresh, 60_000)
+    window.addEventListener('focus', refresh)
+    return () => {
+      controller.abort()
+      window.clearInterval(intervalId)
+      window.removeEventListener('focus', refresh)
+    }
+  }, [refreshUnreadNotificationCount])
 
   const loadOverview = useCallback(async (signal) => {
     setIsLoading(true)
@@ -714,6 +766,25 @@ function AdminDashboard({
       document.removeEventListener('keydown', closeMenusOnEscape)
     }
   }, [bulkDataMenuOpen, singleDataMenuOpen])
+
+  useEffect(() => {
+    if (!notificationOpen) return undefined
+
+    function closeOnOutsideClick(event) {
+      if (!notificationMenuRef.current?.contains(event.target)) setNotificationOpen(false)
+    }
+
+    function closeOnEscape(event) {
+      if (event.key === 'Escape') setNotificationOpen(false)
+    }
+
+    document.addEventListener('pointerdown', closeOnOutsideClick)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsideClick)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [notificationOpen])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -1779,19 +1850,15 @@ function AdminDashboard({
   return (
     <div className={`admin-app is-main-admin${sidebarCollapsed ? ' admin-app--sidebar-collapsed' : ''}`} data-theme={isDark ? 'dark' : 'light'} data-active-view={activeView}>
       {sidebarOpen && (
-        <button
+        <div
           className="admin-backdrop"
-          type="button"
-          aria-label="Close navigation"
-          onClick={() => {
-            setSidebarOpen(false)
-            setSidebarCollapsed(true)
-          }}
+          aria-hidden="true"
         />
       )}
       <aside className={`admin-sidebar${sidebarOpen ? ' admin-sidebar--open' : ''}`}>
         <a className="admin-brand" href="/admin/dashboard" onClick={(event) => { event.preventDefault(); selectView('overview') }}>
-          <img className="admin-brand__image" src="/logo.png" alt="LMS logo" />
+          <img className="admin-brand__image" src="/logo.png" alt="aiHustle" />
+          <span className="admin-brand__tagline">LEARN. GROW. BECOME.</span>
         </a>
         <nav className="admin-nav" aria-label="Admin navigation">
           {navigation.map((item) => (
@@ -1802,12 +1869,6 @@ function AdminDashboard({
                   className={`admin-nav__item${activeView === item.id ? ' is-active' : ''}`}
                   to={item.to}
                   aria-current={activeView === item.id ? 'page' : undefined}
-                  onClick={() => {
-                    if (isDrawerViewport) {
-                      setSidebarOpen(false)
-                      setSidebarCollapsed(true)
-                    }
-                  }}
                 >
                   <span className="admin-nav__icon"><AdminNavigationIcon name={item.id} /></span>
                   <span>{item.label}</span>
@@ -1826,9 +1887,6 @@ function AdminDashboard({
             </React.Fragment>
           ))}
         </nav>
-        <div className="admin-sidebar__bottom">
-          <div className="admin-sidebar__help"><span>✦</span><strong>Need a hand?</strong><small>Help center and support</small></div>
-        </div>
       </aside>
 
       <main className="admin-main">
@@ -1940,12 +1998,79 @@ function AdminDashboard({
                 </svg>
               )}
             </button>
-            <button type="button" className="admin-icon-button" aria-label="Notifications" onClick={() => selectView('notifications')}>
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" />
-              </svg>
-              <i />
-            </button>
+            <div className="admin-notification-menu" ref={notificationMenuRef}>
+              <button
+                type="button"
+                className="admin-icon-button"
+                aria-label={notificationCountError
+                  ? 'Notifications, unread count unavailable'
+                  : unreadNotificationCount
+                    ? `Notifications, ${unreadNotificationCount} unread`
+                    : 'Notifications'}
+                title={notificationCountError || undefined}
+                aria-haspopup="dialog"
+                aria-expanded={notificationOpen}
+                aria-controls="admin-notification-dropdown"
+                onClick={() => {
+                  setNotificationOpen((open) => !open)
+                  void refreshUnreadNotificationCount()
+                }}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" />
+                </svg>
+                {unreadNotificationCount > 0 && (
+                  <span className="admin-notification-count" aria-hidden="true">
+                    {unreadNotificationCount > 99 ? '99+' : unreadNotificationCount}
+                  </span>
+                )}
+              </button>
+              {notificationOpen && (
+                <section
+                  className="admin-notification-dropdown"
+                  id="admin-notification-dropdown"
+                  role="dialog"
+                  aria-label="Recent notifications"
+                >
+                  <header className="admin-notification-dropdown__header">
+                    <h2>Recent notifications</h2>
+                    <button
+                      type="button"
+                      aria-label="Close notifications"
+                      onClick={() => setNotificationOpen(false)}
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="m6 6 12 12M18 6 6 18" />
+                      </svg>
+                    </button>
+                  </header>
+                  <div className="admin-notification-dropdown__body">
+                    <NotificationFeed
+                      role="main_admin"
+                      onLogout={onLogout}
+                      limit={5}
+                      onUnreadCountChange={handleUnreadCountChange}
+                      onOpenApprovals={(studentId) => {
+                        setApprovalStudentIdToOpen(typeof studentId === 'string' ? studentId : '')
+                        setNotificationOpen(false)
+                        selectView('independent-approvals')
+                      }}
+                    />
+                  </div>
+                  <footer className="admin-notification-dropdown__footer">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setNotificationOpen(false)
+                        selectView('notifications')
+                      }}
+                    >
+                      View all notifications
+                    </button>
+                  </footer>
+                </section>
+              )}
+            </div>
             <div className="admin-profile-menu" onBlur={(event) => {
               if (!event.currentTarget.contains(event.relatedTarget)) setProfileOpen(false)
             }}>

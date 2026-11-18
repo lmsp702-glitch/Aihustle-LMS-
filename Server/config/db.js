@@ -19,6 +19,7 @@ import EmailOtpChallenge from '../models/EmailOtpChallenge.js'
 import RegistrationEmailVerification from '../models/RegistrationEmailVerification.js'
 import ReferralCode from '../models/ReferralCode.js'
 import ReferralCodeDailyLimit from '../models/ReferralCodeDailyLimit.js'
+import ReferralCodeUserLimit from '../models/ReferralCodeUserLimit.js'
 import RefreshSession from '../models/RefreshSession.js'
 
 const requiredModels = [
@@ -44,6 +45,7 @@ const requiredModels = [
   RegistrationEmailVerification,
   ReferralCode,
   ReferralCodeDailyLimit,
+  ReferralCodeUserLimit,
   RefreshSession,
 ]
 

@@ -44,7 +44,10 @@ import { generateQuizQuestions } from '../utils/quiz-question-generator.js'
 import { parseStudentCsv } from '../utils/student-csv.js'
 import { toMongoBuffer } from '../utils/mongo-binary.js'
 import { getActiveCertificateTemplateId, issueCertificateIfEligible } from '../utils/certificates.js'
-import { recalculateEnrollmentCourseProgress } from '../utils/course-progress.js'
+import {
+  calculateCourseActivityProgress,
+  recalculateEnrollmentCourseProgress,
+} from '../utils/course-progress.js'
 import { createStudentNotification } from '../utils/student-notifications.js'
 
 const router = Router()
@@ -341,13 +344,16 @@ router.post('/certificate-template', ...requireAdmin, receiveCertificateTemplate
   }
 })
 
-router.get('/assignment-submissions', ...requireAdmin, async (_req, res, next) => {
+router.get('/assignment-submissions', ...requireAdmin, async (req, res, next) => {
   try {
-    const submissions = await AssignmentSubmission.find({ reviewStatus: { $in: ['pending', null] } })
+    const includeReviewed = req.query.scope === 'all'
+    const submissionQuery = AssignmentSubmission.find(
+      includeReviewed ? {} : { reviewStatus: { $in: ['pending', null] } },
+    )
       .select('userId enrollmentId courseId assignmentId fileName contentType fileSize submittedAt reviewStatus')
       .sort({ submittedAt: -1 })
-      .limit(200)
-      .lean()
+    if (!includeReviewed) submissionQuery.limit(200)
+    const submissions = await submissionQuery.lean()
     const userIds = [...new Set(submissions.map((submission) => String(submission.userId)))]
     const courseIds = [...new Set(submissions.map((submission) => String(submission.courseId)))]
     const [independentStudents, collegeStudents, courses] = await Promise.all([
@@ -502,28 +508,27 @@ function getReportCourseLessons(course) {
   return lessons
 }
 
-function getReportCourseProgress(enrollment, course) {
+function getReportCourseProgress(enrollment, course, quizAttempts = [], submissions = []) {
   const lessons = getReportCourseLessons(course)
+  const activityProgress = calculateCourseActivityProgress(course, enrollment, quizAttempts, submissions)
   const completedIds = new Set((enrollment.completedLessonIds || []).map(String))
   const startedIds = new Set((enrollment.startedLessonIds || []).map(String))
   const completedLessons = lessons.filter(({ id }) => completedIds.has(id))
   const pendingLessons = lessons.filter(({ id }) => !completedIds.has(id))
-  const isComplete = enrollment.status === 'completed'
-    || (lessons.length > 0 && completedLessons.length === lessons.length)
-  const hasProgress = completedLessons.length > 0
+  const isComplete = activityProgress.totalActivities > 0
+    && activityProgress.completedActivities === activityProgress.totalActivities
+  const hasProgress = activityProgress.completedActivities > 0
+    || completedLessons.length > 0
     || lessons.some(({ id }) => startedIds.has(id))
+    || quizAttempts.some((attempt) => attempt.status === 'started')
   const status = isComplete ? 'completed' : hasProgress ? 'in_progress' : 'not_started'
-  const completionPercent = isComplete
-    ? 100
-    : lessons.length
-      ? Math.round((completedLessons.length / lessons.length) * 100)
-      : null
   return {
     lessons,
     completedLessons,
     pendingLessons,
     status,
-    completionPercent,
+    completionPercent: activityProgress.percentage,
+    ...activityProgress,
   }
 }
 
@@ -1899,7 +1904,17 @@ router.get('/enrollments', ...requireAdmin, async (req, res, next) => {
 
 router.get('/video-attention-responses', ...requireAdmin, async (req, res, next) => {
   try {
-    const responses = await VideoAttentionResponse.find({})
+    const { studentId, studentType } = req.query
+    const filter = {}
+    if (studentId !== undefined || studentType !== undefined) {
+      if (!mongoose.isValidObjectId(studentId) || !['independent', 'college'].includes(studentType)) {
+        return res.status(400).json({ message: 'Select a valid student.' })
+      }
+      filter.userId = new mongoose.Types.ObjectId(studentId)
+      filter.collegeId = studentType === 'college' ? { $exists: true, $ne: null } : null
+    }
+
+    const responses = await VideoAttentionResponse.find(filter)
       .select('userId collegeId enrollmentId courseId lessonId lessonTitle questionPrompt questionType options selectedOptionIndices videoPositionSeconds presentedAt answeredAt responseTimeMs isCorrect status')
       .populate('userId', 'fullName email username studentType')
       .populate('courseId', 'title')
@@ -2052,8 +2067,6 @@ router.get('/overview', ...requireAdmin, async (req, res, next) => {
       totalColleges,
       totalCourses,
       totalEnrollments,
-      completedEnrollments,
-      activeEnrollments,
       enrollmentProgressSummary,
       recentIndependentStudents,
       recentCollegeStudents,
@@ -2075,8 +2088,6 @@ router.get('/overview', ...requireAdmin, async (req, res, next) => {
         College.countDocuments(),
         Course.countDocuments(),
         Enrollment.countDocuments(),
-        Enrollment.countDocuments({ status: 'completed' }),
-        Enrollment.countDocuments({ status: 'active' }),
         Enrollment.aggregate([
           {
             $match: {
@@ -2096,41 +2107,196 @@ router.get('/overview', ...requireAdmin, async (req, res, next) => {
           {
             $addFields: {
               _courseLessonIds: {
-                $reduce: {
-                  input: { $ifNull: ['$course.modules', []] },
-                  initialValue: [],
-                  in: {
-                    $let: {
-                      vars: {
-                        videoItems: {
-                          $filter: {
-                            input: { $ifNull: ['$$this.contentItems', []] },
-                            as: 'item',
-                            cond: { $eq: ['$$item.type', 'video-lesson'] },
+                $setUnion: [
+                  {
+                    $reduce: {
+                      input: { $ifNull: ['$course.modules', []] },
+                      initialValue: [],
+                      in: {
+                        $let: {
+                          vars: {
+                            videoItems: {
+                              $filter: {
+                                input: { $ifNull: ['$$this.contentItems', []] },
+                                as: 'item',
+                                cond: { $eq: ['$$item.type', 'video-lesson'] },
+                              },
+                            },
+                          },
+                          in: {
+                            $concatArrays: [
+                              '$$value',
+                              {
+                                $map: {
+                                  input: {
+                                    $filter: {
+                                      input: {
+                                        $cond: [
+                                          { $gt: [{ $size: '$$videoItems' }, 0] },
+                                          '$$videoItems',
+                                          { $ifNull: ['$$this.lessons', []] },
+                                        ],
+                                      },
+                                      as: 'lesson',
+                                      cond: { $ne: ['$$lesson.requiredForCertificate', false] },
+                                    },
+                                  },
+                                  as: 'lesson',
+                                  in: '$$lesson._id',
+                                },
+                              },
+                            ],
                           },
                         },
                       },
+                    },
+                  },
+                  [],
+                ],
+              },
+              _courseQuizIds: {
+                $setUnion: [
+                  {
+                    $map: {
+                      input: {
+                        $filter: {
+                          input: { $ifNull: ['$course.quizzes', []] },
+                          as: 'quiz',
+                          cond: {
+                            $and: [
+                              { $ne: ['$$quiz.requiredForCertificate', false] },
+                              { $gt: [{ $size: { $ifNull: ['$$quiz.questions', []] } }, 0] },
+                            ],
+                          },
+                        },
+                      },
+                      as: 'quiz',
+                      in: '$$quiz._id',
+                    },
+                  },
+                  {
+                    $reduce: {
+                      input: { $ifNull: ['$course.modules', []] },
+                      initialValue: [],
+                      in: {
+                        $let: {
+                          vars: {
+                            moduleQuiz: {
+                              $cond: [
+                                {
+                                  $and: [
+                                    {
+                                      $eq: [
+                                        {
+                                          $size: {
+                                            $filter: {
+                                              input: { $ifNull: ['$$this.contentItems', []] },
+                                              as: 'item',
+                                              cond: { $eq: ['$$item.type', 'quiz'] },
+                                            },
+                                          },
+                                        },
+                                        0,
+                                      ],
+                                    },
+                                    { $ne: ['$$this.quiz.requiredForCertificate', false] },
+                                    { $gt: [{ $size: { $ifNull: ['$$this.quiz.questions', []] } }, 0] },
+                                  ],
+                                },
+                                ['$$this.quiz._id'],
+                                [],
+                              ],
+                            },
+                            contentQuizzes: {
+                              $filter: {
+                                input: { $ifNull: ['$$this.contentItems', []] },
+                                as: 'item',
+                                cond: {
+                                  $and: [
+                                    { $eq: ['$$item.type', 'quiz'] },
+                                    { $ne: ['$$item.requiredForCertificate', false] },
+                                    { $ne: ['$$item.quiz.requiredForCertificate', false] },
+                                    {
+                                      $gt: [
+                                        {
+                                          $size: {
+                                            $ifNull: ['$$item.quiz.questions', { $ifNull: ['$$item.questions', []] }],
+                                          },
+                                        },
+                                        0,
+                                      ],
+                                    },
+                                  ],
+                                },
+                              },
+                            },
+                          },
+                          in: {
+                            $concatArrays: [
+                              '$$value',
+                              '$$moduleQuiz',
+                              {
+                                $map: {
+                                  input: '$$contentQuizzes',
+                                  as: 'item',
+                                  in: { $ifNull: ['$$item.quiz._id', '$$item._id'] },
+                                },
+                              },
+                            ],
+                          },
+                        },
+                      },
+                    },
+                  },
+                  [],
+                ],
+              },
+              _courseAssignmentIds: {
+                $setUnion: [
+                  {
+                    $map: {
+                      input: {
+                        $filter: {
+                          input: { $ifNull: ['$course.assignments', []] },
+                          as: 'assignment',
+                          cond: { $ne: ['$$assignment.requiredForCertificate', false] },
+                        },
+                      },
+                      as: 'assignment',
+                      in: '$$assignment._id',
+                    },
+                  },
+                  {
+                    $reduce: {
+                      input: { $ifNull: ['$course.modules', []] },
+                      initialValue: [],
                       in: {
                         $concatArrays: [
                           '$$value',
                           {
                             $map: {
                               input: {
-                                $cond: [
-                                  { $gt: [{ $size: '$$videoItems' }, 0] },
-                                  '$$videoItems',
-                                  { $ifNull: ['$$this.lessons', []] },
-                                ],
+                                $filter: {
+                                  input: { $ifNull: ['$$this.contentItems', []] },
+                                  as: 'item',
+                                  cond: {
+                                    $and: [
+                                      { $eq: ['$$item.type', 'assignment'] },
+                                      { $ne: ['$$item.requiredForCertificate', false] },
+                                    ],
+                                  },
+                                },
                               },
-                              as: 'lesson',
-                              in: '$$lesson._id',
+                              as: 'item',
+                              in: '$$item._id',
                             },
                           },
                         ],
                       },
                     },
                   },
-                },
+                  [],
+                ],
               },
             },
           },
@@ -2156,79 +2322,218 @@ router.get('/overview', ...requireAdmin, async (req, res, next) => {
             },
           },
           {
+            $lookup: {
+              from: QuizAttempt.collection.name,
+              let: {
+                enrollmentId: '$_id',
+                userId: '$userId',
+                courseId: '$courseId',
+                quizIds: '$_courseQuizIds',
+              },
+              pipeline: [
+                {
+                  $match: {
+                    $expr: {
+                      $and: [
+                        { $eq: ['$enrollmentId', '$$enrollmentId'] },
+                        { $eq: ['$userId', '$$userId'] },
+                        { $eq: ['$courseId', '$$courseId'] },
+                        { $eq: ['$status', 'submitted'] },
+                        { $in: ['$quizId', '$$quizIds'] },
+                      ],
+                    },
+                  },
+                },
+                { $project: { _id: 0, quizId: 1 } },
+              ],
+              as: '_submittedQuizAttempts',
+            },
+          },
+          {
+            $lookup: {
+              from: QuizAttempt.collection.name,
+              let: {
+                enrollmentId: '$_id',
+                userId: '$userId',
+                courseId: '$courseId',
+                quizIds: '$_courseQuizIds',
+              },
+              pipeline: [
+                {
+                  $match: {
+                    $expr: {
+                      $and: [
+                        { $eq: ['$enrollmentId', '$$enrollmentId'] },
+                        { $eq: ['$userId', '$$userId'] },
+                        { $eq: ['$courseId', '$$courseId'] },
+                        { $eq: ['$status', 'started'] },
+                        { $in: ['$quizId', '$$quizIds'] },
+                      ],
+                    },
+                  },
+                },
+                { $limit: 1 },
+                { $project: { _id: 1 } },
+              ],
+              as: '_startedQuizAttempts',
+            },
+          },
+          {
+            $lookup: {
+              from: AssignmentSubmission.collection.name,
+              let: {
+                enrollmentId: '$_id',
+                userId: '$userId',
+                courseId: '$courseId',
+                assignmentIds: '$_courseAssignmentIds',
+              },
+              pipeline: [
+                {
+                  $match: {
+                    $expr: {
+                      $and: [
+                        { $eq: ['$enrollmentId', '$$enrollmentId'] },
+                        { $eq: ['$userId', '$$userId'] },
+                        { $eq: ['$courseId', '$$courseId'] },
+                        { $in: ['$assignmentId', '$$assignmentIds'] },
+                      ],
+                    },
+                  },
+                },
+                { $project: { _id: 0, assignmentId: 1 } },
+              ],
+              as: '_submittedAssignments',
+            },
+          },
+          {
+            $addFields: {
+              _completedQuizCount: {
+                $size: {
+                  $setIntersection: [
+                    { $map: { input: '$_submittedQuizAttempts', as: 'attempt', in: '$$attempt.quizId' } },
+                    '$_courseQuizIds',
+                  ],
+                },
+              },
+              _completedAssignmentCount: {
+                $size: {
+                  $setIntersection: [
+                    { $map: { input: '$_submittedAssignments', as: 'submission', in: '$$submission.assignmentId' } },
+                    '$_courseAssignmentIds',
+                  ],
+                },
+              },
+              _startedQuizCount: { $size: '$_startedQuizAttempts' },
+            },
+          },
+          {
+            $addFields: {
+              _totalActivityCount: {
+                $add: [
+                  '$_courseLessonCount',
+                  { $size: '$_courseQuizIds' },
+                  { $size: '$_courseAssignmentIds' },
+                ],
+              },
+              _completedActivityCount: {
+                $add: [
+                  '$_completedLessonCount',
+                  '$_completedQuizCount',
+                  '$_completedAssignmentCount',
+                ],
+              },
+            },
+          },
+          {
             $addFields: {
               _isCourseCompleted: {
-                $or: [
-                  { $eq: ['$status', 'completed'] },
-                  {
-                    $and: [
-                      { $gt: ['$_courseLessonCount', 0] },
-                      { $eq: ['$_completedLessonCount', '$_courseLessonCount'] },
-                    ],
-                  },
+                $and: [
+                  { $gt: ['$_totalActivityCount', 0] },
+                  { $eq: ['$_completedActivityCount', '$_totalActivityCount'] },
                 ],
               },
               _hasCourseProgress: {
                 $or: [
-                  { $eq: ['$status', 'completed'] },
-                  { $gt: ['$_completedLessonCount', 0] },
+                  { $gt: ['$_completedActivityCount', 0] },
                   { $gt: ['$_startedLessonCount', 0] },
+                  { $gt: ['$_startedQuizCount', 0] },
                 ],
               },
             },
           },
           {
-            $group: {
-              _id: {
-                userId: '$userId',
-                collegeId: { $ifNull: ['$collegeId', null] },
-              },
-              enrollmentCount: { $sum: 1 },
-              completedCount: {
-                $sum: { $cond: ['$_isCourseCompleted', 1, 0] },
-              },
-              progressCount: {
-                $sum: { $cond: ['$_hasCourseProgress', 1, 0] },
-              },
-            },
-          },
-          {
-            $group: {
-              _id: null,
-              enrolledStudents: { $sum: 1 },
-              completedStudents: {
-                $sum: {
-                  $cond: [{ $eq: ['$enrollmentCount', '$completedCount'] }, 1, 0],
-                },
-              },
-              inProgressStudents: {
-                $sum: {
-                  $cond: [
-                    {
-                      $and: [
-                        { $lt: ['$completedCount', '$enrollmentCount'] },
-                        { $gt: ['$progressCount', 0] },
-                      ],
+            $facet: {
+              studentSummary: [
+                {
+                  $group: {
+                    _id: {
+                      userId: '$userId',
+                      collegeId: { $ifNull: ['$collegeId', null] },
                     },
-                    1,
-                    0,
-                  ],
+                  },
                 },
-              },
-              notStartedStudents: {
-                $sum: {
-                  $cond: [
-                    {
-                      $and: [
-                        { $lt: ['$completedCount', '$enrollmentCount'] },
-                        { $eq: ['$progressCount', 0] },
-                      ],
+                {
+                  $group: {
+                    _id: null,
+                    enrolledStudents: { $sum: 1 },
+                  },
+                },
+              ],
+              enrollmentSummary: [
+                {
+                  $group: {
+                    _id: null,
+                    totalEnrollments: { $sum: 1 },
+                    totalActivities: { $sum: '$_totalActivityCount' },
+                    completedActivities: { $sum: '$_completedActivityCount' },
+                    inProgressActivities: {
+                      $sum: {
+                        $cond: [
+                          {
+                            $and: [
+                              { $eq: ['$_hasCourseProgress', true] },
+                              { $eq: ['$_isCourseCompleted', false] },
+                            ],
+                          },
+                          { $subtract: ['$_totalActivityCount', '$_completedActivityCount'] },
+                          0,
+                        ],
+                      },
                     },
-                    1,
-                    0,
-                  ],
+                    notStartedActivities: {
+                      $sum: {
+                        $cond: [
+                          { $eq: ['$_hasCourseProgress', false] },
+                          '$_totalActivityCount',
+                          0,
+                        ],
+                      },
+                    },
+                    completedEnrollments: {
+                      $sum: { $cond: ['$_isCourseCompleted', 1, 0] },
+                    },
+                    inProgressEnrollments: {
+                      $sum: {
+                        $cond: [
+                          {
+                            $and: [
+                              { $eq: ['$_isCourseCompleted', false] },
+                              '$_hasCourseProgress',
+                            ],
+                          },
+                          1,
+                          0,
+                        ],
+                      },
+                    },
+                    notStartedEnrollments: {
+                      $sum: {
+                        $cond: [{ $eq: ['$_hasCourseProgress', false] }, 1, 0],
+                      },
+                    },
+                  },
                 },
-              },
+              ],
             },
           },
         ]),
@@ -2251,6 +2556,9 @@ router.get('/overview', ...requireAdmin, async (req, res, next) => {
     const recentRegistrations = [...recentIndependentStudents, ...recentCollegeStudents]
       .sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt))
       .slice(0, 20)
+    const studentSummary = enrollmentProgressSummary[0]?.studentSummary[0]
+    const enrollmentSummary = enrollmentProgressSummary[0]?.enrollmentSummary[0]
+    const totalActivities = enrollmentSummary?.totalActivities || 0
 
     return res.json({
       stats: {
@@ -2259,22 +2567,30 @@ router.get('/overview', ...requireAdmin, async (req, res, next) => {
         totalColleges,
         totalCourses,
         totalEnrollments,
-        enrolledStudents: enrollmentProgressSummary[0]?.enrolledStudents || 0,
+        enrolledStudents: studentSummary?.enrolledStudents || 0,
       },
       recentRegistrations,
       recentCourses,
       courseCompletion: {
-        completed: completedEnrollments,
-        inProgress: activeEnrollments,
-        enrolledStudents: enrollmentProgressSummary[0]?.enrolledStudents || 0,
-        completedStudents: enrollmentProgressSummary[0]?.completedStudents || 0,
-        inProgressStudents: enrollmentProgressSummary[0]?.inProgressStudents || 0,
-        notStartedStudents: enrollmentProgressSummary[0]?.notStartedStudents || 0,
+        completed: enrollmentSummary?.completedEnrollments || 0,
+        inProgress: enrollmentSummary?.inProgressEnrollments || 0,
+        enrolledStudents: studentSummary?.enrolledStudents || 0,
+        totalEnrollments: enrollmentSummary?.totalEnrollments || 0,
+        completedEnrollments: enrollmentSummary?.completedEnrollments || 0,
+        inProgressEnrollments: enrollmentSummary?.inProgressEnrollments || 0,
+        notStartedEnrollments: enrollmentSummary?.notStartedEnrollments || 0,
+        completedActivities: enrollmentSummary?.completedActivities || 0,
+        inProgressActivities: enrollmentSummary?.inProgressActivities || 0,
+        notStartedActivities: enrollmentSummary?.notStartedActivities || 0,
+        totalActivities,
+        activityCompletionPercentage: totalActivities
+          ? Math.round((enrollmentSummary.completedActivities / totalActivities) * 100)
+          : 0,
       },
       dataAvailability: {
         courses: true,
         enrollmentActivity: Boolean(await Enrollment.exists({})),
-        courseCompletion: completedEnrollments + activeEnrollments > 0,
+        courseCompletion: (enrollmentSummary?.totalEnrollments || 0) > 0,
       },
     })
   } catch (error) {
@@ -3374,7 +3690,7 @@ router.get('/students/:studentId/details', ...requireAdmin, async (req, res, nex
     const [college, enrollmentRecords, ownedReferralCodes] = await Promise.all([
       studentType === 'college' ? College.findById(student.collegeId).select('name').lean() : null,
       Enrollment.find({ userId: student._id, status: { $ne: 'cancelled' } })
-        .select('courseId assignedBy status')
+        .select('_id courseId assignedBy status completedLessonIds startedLessonIds lessonCompletionDates collegeId createdAt')
         .sort({ createdAt: -1 })
         .lean(),
       studentType === 'independent'
@@ -3447,41 +3763,96 @@ router.get('/students/:studentId/details', ...requireAdmin, async (req, res, nex
     for (const enrollment of enrollmentRecords) {
       const courseId = String(enrollment.courseId)
       const existing = enrollmentByCourse.get(courseId)
-      const isCompleted = enrollment.status === 'completed'
       const isAssigned = String(enrollment.assignedBy) !== String(student._id)
       if (!existing) {
         enrollmentByCourse.set(courseId, {
           courseId,
-          status: enrollment.status,
+          enrollment,
           source: isAssigned ? 'assigned' : 'enrolled',
         })
         continue
       }
-      if (isCompleted) existing.status = 'completed'
       if (isAssigned) existing.source = 'assigned'
+      if (new Date(enrollment.createdAt || 0) > new Date(existing.enrollment.createdAt || 0)) {
+        existing.enrollment = enrollment
+      }
     }
 
     const courseIds = [...enrollmentByCourse.keys()]
-    const courses = courseIds.length
-      ? await Course.find({ _id: { $in: courseIds } })
-        .select('title status')
-        .lean()
-      : []
+    const enrollmentIds = [...enrollmentByCourse.values()].map(({ enrollment }) => enrollment._id)
+    const [courses, quizAttempts, assignmentSubmissions] = courseIds.length
+      ? await Promise.all([
+        Course.find({ _id: { $in: courseIds } })
+          .select([
+            'title',
+            'modules.lessons._id',
+            'modules.lessons.title',
+            'modules.lessons.requiredForCertificate',
+            'modules.contentItems._id',
+            'modules.contentItems.type',
+            'modules.contentItems.title',
+            'modules.contentItems.requiredForCertificate',
+            'modules.contentItems.quiz._id',
+            'modules.contentItems.quiz.title',
+            'modules.contentItems.quiz.requiredForCertificate',
+            'modules.contentItems.quiz.questions._id',
+            'modules.quiz._id',
+            'modules.quiz.title',
+            'modules.quiz.requiredForCertificate',
+            'modules.quiz.questions._id',
+            'quizzes._id',
+            'quizzes.title',
+            'quizzes.requiredForCertificate',
+            'quizzes.questions._id',
+            'assignments._id',
+            'assignments.title',
+            'assignments.requiredForCertificate',
+          ].join(' '))
+          .lean(),
+        QuizAttempt.find({
+          userId: student._id,
+          enrollmentId: { $in: enrollmentIds },
+        }).select('enrollmentId quizId status').lean(),
+        AssignmentSubmission.find({
+          userId: student._id,
+          enrollmentId: { $in: enrollmentIds },
+        }).select('enrollmentId assignmentId').lean(),
+      ])
+      : [[], [], []]
     const coursesById = new Map(courses.map((course) => [String(course._id), course]))
     const courseProgress = [...enrollmentByCourse.values()].map((enrollment) => {
       const course = coursesById.get(enrollment.courseId)
+      const attempts = quizAttempts.filter(
+        (attempt) => String(attempt.enrollmentId) === String(enrollment.enrollment._id),
+      )
+      const submissions = assignmentSubmissions.filter(
+        (submission) => String(submission.enrollmentId) === String(enrollment.enrollment._id),
+      )
+      const activityProgress = calculateCourseActivityProgress(course, enrollment.enrollment, attempts, submissions)
+      const status = activityProgress.totalActivities > 0
+        && activityProgress.completedActivities === activityProgress.totalActivities
+        ? 'completed'
+        : activityProgress.completedActivities > 0
+          || (enrollment.enrollment.startedLessonIds || []).length > 0
+          || attempts.some((attempt) => attempt.status === 'started')
+          ? 'in_progress'
+          : 'not_started'
       return {
         courseId: enrollment.courseId,
         title: course?.title || 'Course unavailable',
         source: enrollment.source,
-        status: enrollment.status,
-        progressPercent: enrollment.status === 'completed' ? 100 : null,
+        status,
+        progressPercent: activityProgress.percentage,
+        completedActivityCount: activityProgress.completedActivities,
+        totalActivityCount: activityProgress.totalActivities,
       }
     })
     const assignedCourses = courseProgress.filter(({ source }) => source === 'assigned')
     const enrolledCourses = courseProgress.filter(({ source }) => source === 'enrolled')
     const completedCourses = courseProgress.filter(({ status }) => status === 'completed')
     const totalCourses = courseProgress.length
+    const totalActivities = courseProgress.reduce((sum, course) => sum + course.totalActivityCount, 0)
+    const completedActivities = courseProgress.reduce((sum, course) => sum + course.completedActivityCount, 0)
 
     return res.json({
       student: {
@@ -3504,7 +3875,7 @@ router.get('/students/:studentId/details', ...requireAdmin, async (req, res, nex
         coursesEnrolled: enrolledCourses.length,
         coursesCompleted: completedCourses.length,
         overallCompletionPercentage: totalCourses
-          ? Math.round((completedCourses.length / totalCourses) * 100)
+          ? totalActivities ? Math.round((completedActivities / totalActivities) * 100) : 0
           : null,
         studentsReferred: referralDetails.referredStudents.length,
         successfulReferrals: successfulRegistrations,
@@ -3804,18 +4175,46 @@ router.get('/reports/progress/summary', ...requireAdmin, async (req, res, next) 
     }
     const currentEnrollments = [...latestByStudentCourse.values()]
     const courseIds = [...new Set(currentEnrollments.map(({ courseId }) => String(courseId)).filter(Boolean))]
-    const [courses, quizAttempts] = await Promise.all([
+    const [courses, quizAttempts, assignmentSubmissions] = await Promise.all([
       courseIds.length
         ? Course.find({ _id: { $in: courseIds } })
-          .select('title modules.lessons._id modules.contentItems._id modules.contentItems.type')
+          .select([
+            'title',
+            'modules.lessons._id',
+            'modules.lessons.title',
+            'modules.lessons.requiredForCertificate',
+            'modules.contentItems._id',
+            'modules.contentItems.type',
+            'modules.contentItems.title',
+            'modules.contentItems.requiredForCertificate',
+            'modules.contentItems.quiz._id',
+            'modules.contentItems.quiz.title',
+            'modules.contentItems.quiz.requiredForCertificate',
+            'modules.contentItems.quiz.questions._id',
+            'modules.quiz._id',
+            'modules.quiz.title',
+            'modules.quiz.requiredForCertificate',
+            'modules.quiz.questions._id',
+            'quizzes._id',
+            'quizzes.title',
+            'quizzes.requiredForCertificate',
+            'quizzes.questions._id',
+            'assignments._id',
+            'assignments.title',
+            'assignments.requiredForCertificate',
+          ].join(' '))
           .lean()
         : Promise.resolve([]),
       relatedEnrollments.length
         ? QuizAttempt.find({
           status: 'submitted',
-          submittedAt: { $gte: start, $lte: now },
           enrollmentId: { $in: relatedEnrollments.map(({ _id }) => _id) },
-        }).select('enrollmentId userId courseId submittedAt').lean()
+        }).select('enrollmentId userId courseId quizId status submittedAt').lean()
+        : Promise.resolve([]),
+      currentEnrollments.length
+        ? AssignmentSubmission.find({
+          enrollmentId: { $in: currentEnrollments.map(({ _id }) => _id) },
+        }).select('enrollmentId courseId assignmentId').lean()
         : Promise.resolve([]),
     ])
     const coursesById = new Map(courses.map((course) => [String(course._id), course]))
@@ -3848,7 +4247,17 @@ router.get('/reports/progress/summary', ...requireAdmin, async (req, res, next) 
         unavailableCourseRecords += 1
         continue
       }
-      const progress = getReportCourseProgress(enrollment, course)
+      const enrollmentQuizAttempts = quizAttempts.filter(
+        (attempt) => String(attempt.enrollmentId) === String(enrollment._id)
+          && String(attempt.userId) === String(enrollment.userId._id)
+          && String(attempt.courseId) === String(enrollment.courseId)
+          && attempt.status === 'submitted',
+      )
+      const enrollmentSubmissions = assignmentSubmissions.filter(
+        (submission) => String(submission.enrollmentId) === String(enrollment._id)
+          && String(submission.courseId) === String(enrollment.courseId),
+      )
+      const progress = getReportCourseProgress(enrollment, course, enrollmentQuizAttempts, enrollmentSubmissions)
       if (progress.completionPercent === null) {
         untrackedCourseRecords += 1
       } else {
@@ -3890,7 +4299,10 @@ router.get('/reports/progress/summary', ...requireAdmin, async (req, res, next) 
         String(attempt.userId) !== String(enrollment.userId._id) ||
         String(attempt.courseId) !== String(enrollment.courseId)
       ) continue
-      addActivity(attempt.submittedAt, 'quizSubmissions')
+      const activityDate = reportDateKey(attempt.submittedAt)
+      if (activityDate && activityDate >= reportDateKey(start) && activityDate <= reportDateKey(now)) {
+        addActivity(attempt.submittedAt, 'quizSubmissions')
+      }
     }
 
     return res.json({
@@ -4085,17 +4497,26 @@ router.get('/reports/progress/:studentType/:studentId', ...requireAdmin, async (
             'title',
             'modules.lessons._id',
             'modules.lessons.title',
+            'modules.lessons.requiredForCertificate',
             'modules.contentItems._id',
             'modules.contentItems.title',
             'modules.contentItems.type',
+            'modules.contentItems.requiredForCertificate',
             'modules.quiz._id',
             'modules.quiz.title',
+            'modules.quiz.requiredForCertificate',
+            'modules.quiz.questions._id',
             'modules.contentItems.quiz._id',
             'modules.contentItems.quiz.title',
+            'modules.contentItems.quiz.requiredForCertificate',
+            'modules.contentItems.quiz.questions._id',
             'quizzes._id',
             'quizzes.title',
+            'quizzes.requiredForCertificate',
+            'quizzes.questions._id',
             'assignments._id',
             'assignments.title',
+            'assignments.requiredForCertificate',
             'assignments.description',
             'assignments.points',
             'modules.contentItems._id',
@@ -4189,13 +4610,13 @@ router.get('/reports/progress/:studentType/:studentId', ...requireAdmin, async (
     const courseMarksByEnrollment = new Map()
     const courseProgress = latestEnrollments.map((enrollment) => {
       const course = coursesById.get(String(enrollment.courseId))
-      const progress = getReportCourseProgress(enrollment, course)
       const enrollmentQuizAttempts = relatedQuizAttempts.filter(
         (attempt) => String(attempt.enrollmentId) === String(enrollment._id),
       )
       const enrollmentSubmissions = relatedSubmissions.filter(
         (submission) => String(submission.enrollmentId) === String(enrollment._id),
       )
+      const progress = getReportCourseProgress(enrollment, course, enrollmentQuizAttempts, enrollmentSubmissions)
       const courseMarks = calculateCourseMarksSummary(enrollmentQuizAttempts, enrollmentSubmissions, course)
       courseMarksByEnrollment.set(String(enrollment._id), courseMarks)
       const completedIds = new Set((enrollment.completedLessonIds || []).map(String))
@@ -4251,6 +4672,14 @@ router.get('/reports/progress/:studentType/:studentId', ...requireAdmin, async (
         enrolledAt: enrollment.createdAt || null,
         status: progress.status,
         completionPercent: progress.completionPercent,
+        completedActivityCount: progress.completedActivities,
+        totalActivityCount: progress.totalActivities,
+        completedVideoCount: progress.completedVideos,
+        totalVideoCount: progress.totalVideos,
+        completedQuizCount: progress.completedQuizzes,
+        totalQuizCount: progress.totalQuizzes,
+        completedAssignmentCount: progress.completedAssignments,
+        totalAssignmentCount: progress.totalAssignments,
         completedLessonCount: progress.completedLessons.length,
         pendingLessonCount: progress.pendingLessons.length,
         totalLessonCount: progress.lessons.length,
@@ -4279,7 +4708,8 @@ router.get('/reports/progress/:studentType/:studentId', ...requireAdmin, async (
         marksSummary: courseMarks.summary,
       }
     })
-    const trackedCourses = courseProgress.filter(({ completionPercent }) => completionPercent !== null)
+    const totalTrackedActivities = courseProgress.reduce((sum, course) => sum + course.totalActivities, 0)
+    const completedTrackedActivities = courseProgress.reduce((sum, course) => sum + course.completedActivities, 0)
     const courseMarkCalculations = [...courseMarksByEnrollment.values()]
     const courseMarks = courseMarkCalculations.map(({ summary }) => summary).filter(Boolean)
     const performanceAmbiguous = courseMarkCalculations.some(({ ambiguous }) => ambiguous)
@@ -4382,8 +4812,10 @@ router.get('/reports/progress/:studentType/:studentId', ...requireAdmin, async (
         completedCourses: courseProgress.filter(({ status }) => status === 'completed').length,
         inProgressCourses: courseProgress.filter(({ status }) => status === 'in_progress').length,
         notStartedCourses: courseProgress.filter(({ status }) => status === 'not_started').length,
-        overallCompletionPercent: trackedCourses.length
-          ? Math.round(trackedCourses.reduce((sum, course) => sum + course.completionPercent, 0) / trackedCourses.length)
+        overallCompletionPercent: courseProgress.length
+          ? totalTrackedActivities
+            ? Math.round((completedTrackedActivities / totalTrackedActivities) * 100)
+            : 0
           : null,
       },
       overallPerformance,

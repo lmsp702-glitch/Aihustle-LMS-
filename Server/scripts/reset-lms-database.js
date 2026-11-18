@@ -11,6 +11,7 @@ import Course from '../models/Course.js'
 import Enrollment from '../models/Enrollment.js'
 import ReferralCode from '../models/ReferralCode.js'
 import ReferralCodeDailyLimit from '../models/ReferralCodeDailyLimit.js'
+import ReferralCodeUserLimit from '../models/ReferralCodeUserLimit.js'
 import RegistrationEmailVerification from '../models/RegistrationEmailVerification.js'
 import Feedback from '../models/Feedback.js'
 import Complaint from '../models/Complaint.js'
@@ -33,6 +34,7 @@ const expectedCollections = [
   'notifications',
   'referralCodeDailyLimits',
   'referralCodes',
+  'referralCodeUserLimits',
   'registrationemailverifications',
   'students',
   'sub_admins',
@@ -48,6 +50,7 @@ const models = [
   Enrollment,
   ReferralCode,
   ReferralCodeDailyLimit,
+  ReferralCodeUserLimit,
   RegistrationEmailVerification,
   Feedback,
   Complaint,

@@ -8,9 +8,9 @@ process.env.JWT_SECRET = 'test-only-referral-secret'
 
 const [
   { default: authRouter, createReferralRedemptionFilter },
-  { default: referralsRouter, dailyGenerationLimit, getUtcDayStart },
+  { default: referralsRouter, userGenerationLimit },
   { default: ReferralCode },
-  { default: ReferralCodeDailyLimit },
+  { default: ReferralCodeUserLimit },
   { default: Notification },
   { default: RegistrationEmailVerification },
   { Student, CollegeStudent, Admin, CollegeAdmin },
@@ -19,7 +19,7 @@ const [
   import('../routes/auth.js'),
   import('../routes/referrals.js'),
   import('../models/ReferralCode.js'),
-  import('../models/ReferralCodeDailyLimit.js'),
+  import('../models/ReferralCodeUserLimit.js'),
   import('../models/Notification.js'),
   import('../models/RegistrationEmailVerification.js'),
   import('../models/account-models.js'),
@@ -77,7 +77,7 @@ const collegeStudents = new Map([
   }],
 ])
 const referralCodes = []
-const dailyLimits = []
+const userLimits = []
 const savedAccounts = []
 const savedIdentities = []
 const emailVerifications = new Map()
@@ -168,16 +168,16 @@ stub(ReferralCode, 'updateOne', async (filter, update) => {
   Object.assign(document, update.$set || {})
   return { matchedCount: 1 }
 })
-stub(ReferralCodeDailyLimit, 'updateOne', async (filter, update) => {
-  let document = dailyLimits.find((limit) => matches(limit, filter))
+stub(ReferralCodeUserLimit, 'updateOne', async (filter, update) => {
+  let document = userLimits.find((limit) => matches(limit, filter))
   if (!document && update.$setOnInsert) {
     document = { ...update.$setOnInsert }
-    dailyLimits.push(document)
+    userLimits.push(document)
   }
   return { matchedCount: document ? 1 : 0 }
 })
-stub(ReferralCodeDailyLimit, 'findOneAndUpdate', (filter, update) => queryResult(() => {
-  const document = dailyLimits.find((limit) => matches(limit, filter))
+stub(ReferralCodeUserLimit, 'findOneAndUpdate', (filter, update) => queryResult(() => {
+  const document = userLimits.find((limit) => matches(limit, filter))
   if (!document) return null
   for (const [field, amount] of Object.entries(update.$inc || {})) document[field] += amount
   return document
@@ -256,7 +256,7 @@ after(async () => {
   await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
 })
 
-test('referral generation limits, UTC reset, redemption, history, and privacy', async () => {
+test('referral generation enforces a lifetime per-user limit, redemption, history, and privacy', async () => {
   globalThis.Date = ControlledDate
   const ownerToken = tokenFor(ownerId)
   const secondOwnerToken = tokenFor(secondOwnerId)
@@ -270,31 +270,27 @@ test('referral generation limits, UTC reset, redemption, history, and privacy', 
     keys.generatedBy === 1 && keys.requestId === 1 && options.unique,
   ))
   assert.ok(!ReferralCode.schema.indexes().some(([, options]) => options.expireAfterSeconds !== undefined))
-  assert.equal(ReferralCodeDailyLimit.collection.name, 'referralCodeDailyLimits')
-  assert.ok(ReferralCodeDailyLimit.schema.indexes().some(([keys, options]) =>
-    keys.generatedBy === 1 && keys.dayStart === 1 && options.unique,
+  assert.equal(ReferralCodeUserLimit.collection.name, 'referralCodeUserLimits')
+  assert.ok(ReferralCodeUserLimit.schema.indexes().some(([keys, options]) =>
+    keys.generatedBy === 1 && options.unique,
   ))
-  assert.equal(dailyGenerationLimit, 5)
-  assert.equal(
-    getUtcDayStart(new originalDate('2026-11-08T23:59:59.999Z')).toISOString(),
-    '2026-11-08T00:00:00.000Z',
-  )
+  assert.equal(userGenerationLimit, 20)
 
-  const generated = await Promise.all(Array.from({ length: 6 }, (_, index) =>
+  const generated = await Promise.all(Array.from({ length: 21 }, (_, index) =>
     request('/referrals/generate', {
       token: ownerToken,
       body: { requestId: `request-owner-${String(index).padStart(3, '0')}` },
     }),
   ))
   const successful = generated.filter(({ response }) => response.status === 201)
-  assert.equal(successful.length, 5)
+  assert.equal(successful.length, 20)
   assert.equal(generated.filter(({ response }) => response.status === 429).length, 1)
   const codes = successful.map(({ result }) => result.code)
-  assert.equal(new Set(codes.map(({ code }) => code)).size, 5)
+  assert.equal(new Set(codes.map(({ code }) => code)).size, 20)
   assert.ok(codes.every(({ code }) => /^LMS-[A-F0-9]{32}$/.test(code)))
   assert.equal(
     new originalDate(codes[0].expiresAt).getTime() - new originalDate(codes[0].createdAt).getTime(),
-    15 * 24 * 60 * 60 * 1000,
+    12 * 60 * 60 * 1000,
   )
 
   const firstSuccessfulIndex = generated.findIndex(({ response }) => response.status === 201)
@@ -304,26 +300,30 @@ test('referral generation limits, UTC reset, redemption, history, and privacy', 
   })
   assert.equal(repeated.response.status, 200)
   assert.equal(repeated.result.repeated, true)
-  assert.equal(referralCodes.filter((code) => String(code.generatedBy) === String(ownerId)).length, 5)
+  assert.equal(referralCodes.filter((code) => String(code.generatedBy) === String(ownerId)).length, 20)
 
   const unauthenticated = await request('/referrals/me')
   assert.equal(unauthenticated.response.status, 401)
   const collegeDenied = await request('/referrals/me', { token: collegeToken })
   assert.equal(collegeDenied.response.status, 403)
 
-  const midnightCode = await request('/referrals/generate', {
+  const overLimit = await request('/referrals/generate', {
     token: ownerToken,
-    body: { requestId: 'request-next-day-0001' },
+    body: { requestId: 'request-overall-limit-0001' },
   })
-  assert.equal(midnightCode.response.status, 429)
+  assert.equal(overLimit.response.status, 429)
   currentTime = originalDate.parse('2026-11-09T00:00:00.000Z')
-  const afterReset = await request('/referrals/generate', {
+  const nextDay = await request('/referrals/generate', {
     token: ownerToken,
     body: { requestId: 'request-next-day-0001' },
   })
-  assert.equal(afterReset.response.status, 201)
-  const resetStats = await request('/referrals/me', { token: ownerToken })
-  assert.equal(resetStats.result.stats.generatedToday, 1)
+  assert.equal(nextDay.response.status, 429)
+  const limitStats = await request('/referrals/me', { token: ownerToken })
+  assert.deepEqual({
+    totalGenerated: limitStats.result.stats.totalGenerated,
+    totalLimit: limitStats.result.stats.totalLimit,
+    remaining: limitStats.result.stats.remaining,
+  }, { totalGenerated: 20, totalLimit: 20, remaining: 0 })
 
   const codeToRedeem = codes[0].code
   const validation = await request('/referrals/validate', { body: { code: codeToRedeem.toLowerCase() } })
@@ -400,16 +400,28 @@ test('referral generation limits, UTC reset, redemption, history, and privacy', 
   assert.equal(history.result.codes.some((entry) => 'usedBy' in entry), false)
 
   const ownerHistory = await request('/referrals/me?userId=' + secondOwnerId, { token: ownerToken })
-  assert.equal(ownerHistory.result.codes.length, 6)
+  assert.equal(ownerHistory.result.codes.length, 20)
   const ownerCodes = new Set(referralCodes
     .filter((entry) => String(entry.generatedBy) === String(ownerId))
     .map((entry) => entry.code))
   assert.ok(ownerHistory.result.codes.every((entry) => ownerCodes.has(entry.code)))
+  referralCodes.push({
+    _id: new mongoose.Types.ObjectId(),
+    generatedBy: secondOwnerId,
+    requestId: 'legacy-existing-code',
+    code: `LMS-${'A'.repeat(32)}`,
+    createdAt: new ControlledDate(currentTime - 1000),
+    expiresAt: new ControlledDate(currentTime + 24 * 60 * 60 * 1000),
+    status: 'active',
+    usedBy: null,
+    usedAt: null,
+  })
   const secondOwnerCode = await request('/referrals/generate', {
     token: secondOwnerToken,
     body: { requestId: 'second-owner-request-01' },
   })
   assert.equal(secondOwnerCode.response.status, 201)
+  assert.equal(userLimits.find((limit) => String(limit.generatedBy) === String(secondOwnerId)).count, 2)
   const privateHistory = await request('/referrals/me', { token: ownerToken })
   assert.equal(privateHistory.result.codes.some((entry) => entry.code === secondOwnerCode.result.code.code), false)
 })

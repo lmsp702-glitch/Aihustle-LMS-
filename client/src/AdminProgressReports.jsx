@@ -305,9 +305,141 @@ function AssignmentSubmissionCard({ submission, saving, onSaveEvaluation, onOpen
   )
 }
 
+function groupVideoAttentionResponses(responses) {
+  const grouped = new Map()
+  responses.forEach((entry) => {
+    const courseId = String(entry.courseId?._id || entry.courseId || '')
+    const group = grouped.get(courseId) || {
+      courseId,
+      courseName: entry.courseId?.title || 'Unknown course',
+      responses: [],
+    }
+    group.responses.push(entry)
+    grouped.set(courseId, group)
+  })
+  return [...grouped.values()]
+}
+
+function VideoAttentionResponseList({ responses }) {
+  const [expandedResponseIds, setExpandedResponseIds] = useState(() => new Set())
+  const allExpanded = responses.length > 0 && responses.every((entry) => expandedResponseIds.has(String(entry._id)))
+
+  const toggleAllResponses = () => {
+    setExpandedResponseIds(
+      allExpanded
+        ? new Set()
+        : new Set(responses.map((entry) => String(entry._id))),
+    )
+  }
+
+  const toggleResponse = (responseId) => {
+    setExpandedResponseIds((current) => {
+      const next = new Set(current)
+      if (next.has(responseId)) next.delete(responseId)
+      else next.add(responseId)
+      return next
+    })
+  }
+
+  return (
+    <div className="admin-attention-responses">
+      <div className="admin-attention-responses__toolbar">
+        <button type="button" onClick={toggleAllResponses}>
+          {allExpanded ? 'Hide all' : 'View all'}
+        </button>
+      </div>
+      {responses.map((entry) => {
+        const responseId = String(entry._id)
+        const isExpanded = expandedResponseIds.has(responseId)
+        const answer = (entry.selectedOptionIndices || [])
+          .map((index) => entry.options?.[index])
+          .filter(Boolean)
+          .join(', ') || (entry.status === 'presented' ? 'Not answered' : 'No response')
+        const hasResponded = entry.status === 'answered'
+        const correctness = entry.isCorrect === true ? 'Correct' : 'Incorrect'
+        const presentedAt = entry.presentedAt ? new Date(entry.presentedAt) : null
+        const presentedLabel = presentedAt && !Number.isNaN(presentedAt.getTime())
+          ? presentedAt.toLocaleString()
+          : '—'
+
+        return (
+          <article className="admin-attention-response" key={responseId}>
+            <button
+              type="button"
+              className="admin-attention-response__toggle"
+              aria-expanded={isExpanded}
+              aria-controls={`attention-response-${responseId}`}
+              onClick={() => toggleResponse(responseId)}
+            >
+              <div className="admin-attention-response__course">
+                <strong>{entry.lessonTitle || 'Lesson not available'}</strong>
+              </div>
+              <div className="admin-attention-response__outcome">
+                <span className={`admin-attention-response__result ${hasResponded ? 'is-responded' : 'is-not-responded'}`}>
+                  {hasResponded ? 'Responded' : 'Not responded'}
+                </span>
+                {hasResponded && (
+                  <span className={`admin-attention-response__correctness is-${correctness.toLowerCase()}`}>
+                    {correctness}
+                  </span>
+                )}
+              </div>
+              <span className="admin-attention-response__chevron" aria-hidden="true" />
+            </button>
+            <div
+              className="admin-attention-response__content"
+              id={`attention-response-${responseId}`}
+              hidden={!isExpanded}
+            >
+              <div className="admin-attention-response__answers">
+                <section>
+                  <h4>Question</h4>
+                  <p>{entry.questionPrompt || 'Not available'}</p>
+                </section>
+                <section>
+                  <h4>Response</h4>
+                  <p>{answer}</p>
+                </section>
+              </div>
+              <dl className="admin-attention-response__details">
+                <div>
+                  <dt>Response time</dt>
+                  <dd>{Number.isFinite(entry.responseTimeMs) ? `${(entry.responseTimeMs / 1000).toFixed(1)} s` : '—'}</dd>
+                </div>
+                <div>
+                  <dt>Video position</dt>
+                  <dd>{Number.isFinite(entry.videoPositionSeconds) ? `${Math.floor(entry.videoPositionSeconds)} s` : '—'}</dd>
+                </div>
+                <div>
+                  <dt>Presented</dt>
+                  <dd>{presentedLabel}</dd>
+                </div>
+              </dl>
+            </div>
+          </article>
+        )
+      })}
+    </div>
+  )
+}
+
+function VideoAttentionResponseSection({ responses }) {
+  return (
+    <section className="admin-progress-course-section">
+      <h5>Video attention responses</h5>
+      {responses.length
+        ? <VideoAttentionResponseList responses={responses} />
+        : <p className="admin-progress-empty">No video attention responses are recorded for this course.</p>}
+    </section>
+  )
+}
+
 function StudentProgressDialog({
   student,
   report,
+  videoAttentionResponses,
+  videoAttentionLoading,
+  videoAttentionError,
   loading,
   error,
   onClose,
@@ -321,6 +453,14 @@ function StudentProgressDialog({
   const unassignedCertificates = report
     ? getUnassignedCertificates(report.certificates, report.courseProgress)
     : []
+  const groupedAttentionResponses = groupVideoAttentionResponses(videoAttentionResponses)
+  const attentionResponsesByCourseId = new Map(
+    groupedAttentionResponses.map((group) => [group.courseId, group.responses]),
+  )
+  const activeCourseIds = new Set((report?.courseProgress || []).map((course) => String(course.courseId || '')))
+  const otherCourseAttentionResponses = groupedAttentionResponses.filter(
+    (group) => !activeCourseIds.has(group.courseId),
+  )
 
   return (
     <div className="admin-progress-dialog-backdrop" role="presentation" onMouseDown={(event) => {
@@ -341,6 +481,8 @@ function StudentProgressDialog({
         {error && <p className="admin-progress-error" role="alert">{error}</p>}
         {!loading && report && (
           <div className="admin-progress-dialog__body">
+            {videoAttentionLoading && <p className="admin-progress-empty" role="status">Loading video attention responses…</p>}
+            {videoAttentionError && <p className="admin-progress-error" role="alert">{videoAttentionError}</p>}
             <section className="admin-progress-detail-summary" aria-label="Course progress summary">
               <div><span>Enrolled courses</span><strong>{report.summary.enrolledCourses}</strong></div>
               <div><span>Completed</span><strong>{report.summary.completedCourses}</strong></div>
@@ -356,6 +498,7 @@ function StudentProgressDialog({
                   {report.courseProgress.map((course) => {
                     const lessons = getCourseLessons(course)
                     const courseCertificates = getCourseCertificates(report.certificates, course.courseId)
+                    const courseAttentionResponses = attentionResponsesByCourseId.get(String(course.courseId || '')) || []
                     const completionPercent = Number.isFinite(course.completionPercent)
                       ? Math.min(100, Math.max(0, course.completionPercent))
                       : null
@@ -366,6 +509,13 @@ function StudentProgressDialog({
                           <div>
                             <h4>{course.courseName}</h4>
                             <span>Course ID: {course.courseId} · Enrolled {formatDate(course.enrolledAt)}</span>
+                            {!videoAttentionLoading && !videoAttentionError && (
+                              <span>
+                                {courseAttentionResponses.length
+                                  ? `${courseAttentionResponses.length} video attention response${courseAttentionResponses.length === 1 ? '' : 's'}`
+                                  : 'No video attention responses'}
+                              </span>
+                            )}
                           </div>
                           <span className="admin-progress-course__view">View Details</span>
                         </div>
@@ -394,7 +544,7 @@ function StudentProgressDialog({
                           <h5>Course overview</h5>
                           <div className="admin-progress-course__metrics">
                             <span>Progress <strong>{course.completionPercent === null ? 'Not tracked' : `${course.completionPercent}%`}</strong></span>
-                            <span>Lessons <strong>{course.completedLessonCount} completed · {course.pendingLessonCount} pending</strong></span>
+                            <span>Activities <strong>{course.completedActivityCount} of {course.totalActivityCount} completed</strong></span>
                             <span>Marks <strong>{formatMarkSummary(course.marksSummary)}</strong></span>
                             <span>Status <strong>{String(course.status || 'not_started').replace(/_/g, ' ')}</strong></span>
                             <span>Assignments <strong>{course.assignmentSummary
@@ -417,6 +567,12 @@ function StudentProgressDialog({
                             </ul>
                           ) : <p className="admin-progress-empty">No lesson progress is recorded.</p>}
                         </section>
+
+                        {!videoAttentionLoading && !videoAttentionError && (
+                          <VideoAttentionResponseSection
+                            responses={courseAttentionResponses}
+                          />
+                        )}
 
                         <section className="admin-progress-course-section">
                           <h5>Quizzes and marks</h5>
@@ -498,6 +654,32 @@ function StudentProgressDialog({
               ) : <p className="admin-progress-empty">No active course enrollments are recorded for this student.</p>}
             </section>
 
+            {!videoAttentionLoading && !videoAttentionError && otherCourseAttentionResponses.length > 0 && (
+              <section className="admin-progress-detail-section">
+                <h3>Video attention responses for other courses</h3>
+                <div className="admin-progress-course-list">
+                  {otherCourseAttentionResponses.map((group) => (
+                    <details className="admin-progress-course" key={group.courseId || group.courseName}>
+                      <summary className="admin-progress-course__summary">
+                        <div className="admin-progress-course__header">
+                          <div>
+                            <h4>{group.courseName}</h4>
+                            <span>
+                              {group.responses.length} video attention response{group.responses.length === 1 ? '' : 's'}
+                            </span>
+                          </div>
+                          <span className="admin-progress-course__view">View Details</span>
+                        </div>
+                      </summary>
+                      <div className="admin-progress-course__details">
+                        <VideoAttentionResponseSection responses={group.responses} />
+                      </div>
+                    </details>
+                  ))}
+                </div>
+              </section>
+            )}
+
             {report.certificateRecordsAvailable && unassignedCertificates.length > 0 && (
               <section className="admin-progress-detail-section">
                 <h3>Certificates from courses not currently enrolled</h3>
@@ -532,6 +714,9 @@ export default function AdminProgressReports({ onLogout }) {
   const [isLoadingSummary, setIsLoadingSummary] = useState(false)
   const [selectedStudent, setSelectedStudent] = useState(null)
   const [progressReport, setProgressReport] = useState(null)
+  const [videoAttentionResponses, setVideoAttentionResponses] = useState([])
+  const [videoAttentionError, setVideoAttentionError] = useState('')
+  const [isLoadingVideoAttention, setIsLoadingVideoAttention] = useState(false)
   const [progressError, setProgressError] = useState('')
   const [isLoadingProgress, setIsLoadingProgress] = useState(false)
   const [savingEvaluationIds, setSavingEvaluationIds] = useState({})
@@ -587,19 +772,41 @@ export default function AdminProgressReports({ onLogout }) {
   const openProgressReport = async (student) => {
     setSelectedStudent(student)
     setProgressReport(null)
+    setVideoAttentionResponses([])
     setProgressError('')
+    setVideoAttentionError('')
     setIsLoadingProgress(true)
-    try {
-      const report = await requestAdminJson(
-        `/admin/reports/progress/${encodeURIComponent(student.studentType)}/${encodeURIComponent(student._id)}`,
-        onLogout,
-      )
-      setProgressReport(report)
-    } catch (error) {
-      setProgressError(error instanceof Error ? error.message : 'Unable to load student progress.')
-    } finally {
-      setIsLoadingProgress(false)
-    }
+    setIsLoadingVideoAttention(true)
+    const reportRequest = requestAdminJson(
+      `/admin/reports/progress/${encodeURIComponent(student.studentType)}/${encodeURIComponent(student._id)}`,
+      onLogout,
+    )
+      .then(setProgressReport)
+      .catch((error) => {
+        setProgressError(error instanceof Error ? error.message : 'Unable to load student progress.')
+      })
+      .finally(() => setIsLoadingProgress(false))
+    const attentionParams = new URLSearchParams({
+      studentId: String(student._id),
+      studentType: String(student.studentType),
+    })
+    const attentionRequest = requestAdminJson(
+      `/admin/video-attention-responses?${attentionParams}`,
+      onLogout,
+    )
+      .then((result) => {
+        if (!Array.isArray(result.responses)) {
+          throw new Error('The server returned invalid video attention response data.')
+        }
+        setVideoAttentionResponses(result.responses)
+      })
+      .catch((error) => {
+        setVideoAttentionError(error instanceof Error
+          ? error.message
+          : 'Unable to load video attention responses.')
+      })
+      .finally(() => setIsLoadingVideoAttention(false))
+    await Promise.all([reportRequest, attentionRequest])
   }
 
   const openCertificate = async (certificate, action) => {
@@ -699,11 +906,7 @@ export default function AdminProgressReports({ onLogout }) {
 
   return (
     <div className="admin-progress-reports">
-      <div className="admin-progress-reports__toolbar">
-        <div>
-          <h2>Student progress</h2>
-          <p>Progress from independent and college student enrollment records.</p>
-        </div>
+      <div className="admin-progress-reports__toolbar admin-progress-reports__toolbar--actions-only">
         <button
           type="button"
           className="admin-button admin-button--secondary"
@@ -775,6 +978,9 @@ export default function AdminProgressReports({ onLogout }) {
         <StudentProgressDialog
           student={selectedStudent}
           report={progressReport}
+          videoAttentionResponses={videoAttentionResponses}
+          videoAttentionLoading={isLoadingVideoAttention}
+          videoAttentionError={videoAttentionError}
           loading={isLoadingProgress}
           error={progressError}
           savingEvaluationIds={savingEvaluationIds}
@@ -786,7 +992,9 @@ export default function AdminProgressReports({ onLogout }) {
           onClose={() => {
             setSelectedStudent(null)
             setProgressReport(null)
+            setVideoAttentionResponses([])
             setProgressError('')
+            setVideoAttentionError('')
           }}
         />
       )}

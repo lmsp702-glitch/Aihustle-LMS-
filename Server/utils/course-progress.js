@@ -8,11 +8,11 @@ function isRequired(activity, nestedActivity) {
     && nestedActivity?.requiredForCertificate !== false
 }
 
-function getCourseProgressActivities(course) {
+function getCourseProgressActivities(course, { includeOptional = false } = {}) {
   const activities = { videos: [], quizzes: [], assignments: [] }
   const seen = new Set()
   function add(type, activity, idSource = activity, nestedActivity = null) {
-    if (!activity || !isRequired(activity, nestedActivity)) return
+    if (!activity || (!includeOptional && !isRequired(activity, nestedActivity))) return
     const id = documentId(idSource)
     if (!id) return
     const key = `${type}:${id}`
@@ -96,6 +96,35 @@ export function calculateCourseProgress({
     percentage: isComplete ? 100 : totalActivities
       ? Math.min(99, Math.floor((completedActivities / totalActivities) * 100))
       : 0,
+    isComplete,
+    videos: { completed: completedVideos, total: activities.videos.length },
+    quizzes: { completed: completedQuizzes, total: activities.quizzes.length },
+    assignments: { completed: completedAssignments, total: activities.assignments.length },
+  }
+}
+
+export function calculateCourseActivityProgress(course, enrollment, quizAttempts = [], assignmentSubmissions = []) {
+  const activities = getCourseProgressActivities(course, { includeOptional: true })
+  const completedVideoIds = new Set((enrollment?.completedLessonIds || []).map(String))
+  const submittedQuizIds = new Set(quizAttempts
+    .filter((attempt) => attempt.status === 'submitted')
+    .map((attempt) => documentId(attempt.quizId))
+    .filter(Boolean))
+  const submittedAssignmentIds = new Set(assignmentSubmissions
+    .map((submission) => documentId(submission.assignmentId))
+    .filter(Boolean))
+
+  const completedVideos = activities.videos.filter(({ id }) => completedVideoIds.has(id)).length
+  const completedQuizzes = activities.quizzes.filter(({ id }) => submittedQuizIds.has(id)).length
+  const completedAssignments = activities.assignments.filter(({ id }) => submittedAssignmentIds.has(id)).length
+  const totalActivities = activities.videos.length + activities.quizzes.length + activities.assignments.length
+  const completedActivities = completedVideos + completedQuizzes + completedAssignments
+  const isComplete = totalActivities > 0 && completedActivities === totalActivities
+
+  return {
+    completedActivities,
+    totalActivities,
+    percentage: totalActivities ? Math.round((completedActivities / totalActivities) * 100) : 0,
     isComplete,
     videos: { completed: completedVideos, total: activities.videos.length },
     quizzes: { completed: completedQuizzes, total: activities.quizzes.length },

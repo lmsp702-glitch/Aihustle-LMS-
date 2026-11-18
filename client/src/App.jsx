@@ -1513,46 +1513,6 @@ function DashboardPage({ role, isDark, onToggleTheme, themePreference, onSetThem
     )
   }
 
-  if (role === 'main_admin' && user && location.pathname.startsWith('/admin/support')) {
-    return (
-      <AdminSupport
-        user={user}
-        onLogout={signOut}
-        isDark={isDark}
-        onToggleTheme={onToggleTheme}
-        dashboardPath="/admin/dashboard"
-        supportPath="/admin/support"
-        settingsPath="/admin/settings"
-        roleLabel={roleLabels[role]}
-      />
-    )
-  }
-  if (role === 'main_admin' && user && location.pathname.startsWith('/admin/settings')) {
-    return (
-      <>
-        <WorkspaceTopbar
-          title="Settings"
-          name={user.fullName}
-          email={user.email}
-          roleLabel={roleLabels[role]}
-          dashboardPath="/admin/dashboard"
-          helpPath="/admin/support"
-          settingsPath="/admin/settings"
-          isDark={isDark}
-          onToggleTheme={onToggleTheme}
-          onLogout={signOut}
-        />
-        <SettingsPage
-          user={user}
-          onAccountUpdated={updateAccount}
-          onLogout={signOut}
-          themePreference={themePreference}
-          onSetTheme={onSetTheme}
-          standalone
-        />
-      </>
-    )
-  }
   if (role === 'main_admin' && user) {
     return (
       <AdminDashboard
@@ -1598,7 +1558,6 @@ function DashboardPage({ role, isDark, onToggleTheme, themePreference, onSetThem
           roleLabel={roleLabels[role]}
           dashboardPath="/college-admin/dashboard"
           helpPath="/college-admin/support"
-          settingsPath="/college-admin/settings"
           isDark={isDark}
           onToggleTheme={onToggleTheme}
           onLogout={signOut}

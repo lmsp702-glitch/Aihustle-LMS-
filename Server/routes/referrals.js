@@ -4,11 +4,11 @@ import { Router } from 'express'
 import { authenticate, requireRoles } from '../middleware/auth.js'
 import { Student } from '../models/account-models.js'
 import ReferralCode from '../models/ReferralCode.js'
-import ReferralCodeDailyLimit from '../models/ReferralCodeDailyLimit.js'
+import ReferralCodeUserLimit from '../models/ReferralCodeUserLimit.js'
 
 const router = Router()
-const dailyGenerationLimit = 5
-const codeLifetimeMs = 15 * 24 * 60 * 60 * 1000
+const userGenerationLimit = 20
+const codeLifetimeMs = 12 * 60 * 60 * 1000
 const requireExternalUser = [
   authenticate,
   requireRoles('student'),
@@ -19,10 +19,6 @@ const requireExternalUser = [
     return next()
   },
 ]
-
-function getUtcDayStart(date) {
-  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()))
-}
 
 function createRequestError(statusCode, message) {
   const error = new Error(message)
@@ -103,12 +99,10 @@ router.get('/me', ...requireExternalUser, async (req, res, next) => {
       }
       return serializeCode(code, registrationStatus)
     }))
-    const dayStart = getUtcDayStart(now)
-    const generatedToday = codes.filter((code) => code.createdAt >= dayStart).length
     const stats = {
       totalGenerated: codes.length,
-      generatedToday,
-      dailyLimit: dailyGenerationLimit,
+      totalLimit: userGenerationLimit,
+      remaining: Math.max(0, userGenerationLimit - codes.length),
       successfullyUsed: codes.filter((code) => Boolean(code.usedBy)).length,
       active: serializedCodes.filter((code) => code.status === 'active').length,
       expired: serializedCodes.filter((code) => code.status === 'expired').length,
@@ -127,7 +121,6 @@ router.post('/generate', ...requireExternalUser, async (req, res, next) => {
 
   const generatedBy = new mongoose.Types.ObjectId(req.auth.id)
   const now = new Date()
-  const dayStart = getUtcDayStart(now)
   let session
 
   try {
@@ -135,9 +128,10 @@ router.post('/generate', ...requireExternalUser, async (req, res, next) => {
     if (existing) return res.status(200).json({ code: serializeCode(existing), repeated: true })
 
     try {
-      await ReferralCodeDailyLimit.updateOne(
-        { generatedBy, dayStart },
-        { $setOnInsert: { generatedBy, dayStart, count: 0 } },
+      const currentCodeCount = await ReferralCode.countDocuments({ generatedBy })
+      await ReferralCodeUserLimit.updateOne(
+        { generatedBy },
+        { $setOnInsert: { generatedBy, count: currentCodeCount } },
         { upsert: true },
       )
     } catch (error) {
@@ -153,13 +147,13 @@ router.post('/generate', ...requireExternalUser, async (req, res, next) => {
         return
       }
 
-      const limit = await ReferralCodeDailyLimit.findOneAndUpdate(
-        { generatedBy, dayStart, count: { $lt: dailyGenerationLimit } },
+      const limit = await ReferralCodeUserLimit.findOneAndUpdate(
+        { generatedBy, count: { $lt: userGenerationLimit } },
         { $inc: { count: 1 } },
         { new: true, session },
       )
       if (!limit) {
-        throw createRequestError(429, 'You have reached the daily limit of 5 referral codes. Try again after 00:00 UTC.')
+        throw createRequestError(429, 'You have reached the overall limit of 20 referral codes.')
       }
 
       const code = `LMS-${randomBytes(16).toString('hex').toUpperCase()}`
@@ -180,7 +174,7 @@ router.post('/generate', ...requireExternalUser, async (req, res, next) => {
     return res.status(201).json({ code: serializeCode(generated), repeated: false })
   } catch (error) {
     if (error?.statusCode === 429) {
-      return res.status(429).json({ message: error.message, dailyLimit: dailyGenerationLimit })
+      return res.status(429).json({ message: error.message, totalLimit: userGenerationLimit })
     }
     if (error?.code === 11000) {
       return res.status(409).json({ message: 'This generation request has already been processed.' })
@@ -191,5 +185,5 @@ router.post('/generate', ...requireExternalUser, async (req, res, next) => {
   }
 })
 
-export { dailyGenerationLimit, getUtcDayStart, registrationStatusForAccount }
+export { userGenerationLimit, registrationStatusForAccount }
 export default router

@@ -111,7 +111,7 @@ function NotificationIcon({ type }) {
   )
 }
 
-export default function NotificationFeed({ role, onLogout, onOpenApprovals }) {
+export default function NotificationFeed({ role, onLogout, onOpenApprovals, onUnreadCountChange, limit }) {
   const [notifications, setNotifications] = useState([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
@@ -148,6 +148,10 @@ export default function NotificationFeed({ role, onLogout, onOpenApprovals }) {
           throw new Error('The server returned invalid notifications.')
         }
         setNotifications(result.notifications)
+        const unreadCount = Number.isSafeInteger(result.unreadCount) && result.unreadCount >= 0
+          ? result.unreadCount
+          : result.notifications.filter((notification) => notification.isRead !== true && !notification.readAt).length
+        onUnreadCountChange?.(unreadCount)
       } catch (loadError) {
         if (loadError.name !== 'AbortError') {
           setError(loadError instanceof Error ? loadError.message : 'Unable to load notifications.')
@@ -164,7 +168,7 @@ export default function NotificationFeed({ role, onLogout, onOpenApprovals }) {
       controller.abort()
       if (role === 'student') window.removeEventListener(STUDENT_NOTIFICATIONS_UPDATED_EVENT, refresh)
     }
-  }, [onLogout, role, refreshToken])
+  }, [onLogout, onUnreadCountChange, role, refreshToken])
 
   async function markAsRead(notificationId) {
     setMarkingReadId(notificationId)
@@ -194,6 +198,7 @@ export default function NotificationFeed({ role, onLogout, onOpenApprovals }) {
       setNotifications((current) => current.map((notification) => (
         notification.id === notificationId ? { ...notification, isRead: true } : notification
       )))
+      onUnreadCountChange?.((current) => Math.max(0, current - 1))
     } catch (markError) {
       setReadError(markError instanceof Error ? markError.message : 'Unable to update notification status.')
     } finally {
@@ -213,10 +218,13 @@ export default function NotificationFeed({ role, onLogout, onOpenApprovals }) {
   }
 
   if (isMainAdmin) {
+    const visibleNotifications = Number.isSafeInteger(limit) && limit >= 0
+      ? notifications.slice(0, limit)
+      : notifications
     return (
       <div className="notification-feed notification-feed--admin">
         {readError && <p className="notification-feed__read-error" role="alert">{readError}</p>}
-        {groupByDate(notifications).map((group) => (
+        {groupByDate(visibleNotifications).map((group) => (
           <section className="notification-feed__group" key={group.label}>
             <div className="notification-feed__group-heading">
               <h2>{group.label}</h2>

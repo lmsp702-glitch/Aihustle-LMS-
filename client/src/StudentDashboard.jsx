@@ -1685,9 +1685,8 @@ function StudentResultsPage({ onLogout }) {
     const lessonEntries = getCourseLessons(result.course)
     const completedLessonIds = new Set((result.enrollment.completedLessonIds || []).map(String))
     const completedLessons = lessonEntries.filter(({ lesson }) => completedLessonIds.has(String(lesson._id))).length
-    const progress = lessonEntries.length
-      ? Math.round((completedLessons / lessonEntries.length) * 100)
-      : result.enrollment.status === 'completed' ? 100 : 0
+    const activityProgress = getCourseProgress(result.enrollment)
+    const progress = activityProgress.percentage
     const submittedQuizzes = result.quizAttempts.filter((attempt) => attempt.status === 'submitted')
     const scores = submittedQuizzes.map(getAttemptScore).filter((score) => score !== null)
     const averageScore = scores.length
@@ -1701,6 +1700,8 @@ function StudentResultsPage({ onLogout }) {
       ...result,
       completedLessons,
       lessonCount: lessonEntries.length,
+      completedActivityCount: activityProgress.completedCount,
+      totalActivityCount: activityProgress.totalCount,
       progress,
       status: progress >= 100 ? 'completed' : progress > 0 ? 'in-progress' : 'not-started',
       submittedQuizzes,
@@ -1726,9 +1727,9 @@ function StudentResultsPage({ onLogout }) {
   const averageScore = scoredAttempts.length
     ? Math.round(scoredAttempts.reduce((total, attempt) => total + attempt.score, 0) / scoredAttempts.length)
     : null
-  const lessonCount = courseRows.reduce((total, course) => total + course.lessonCount, 0)
-  const completedLessons = courseRows.reduce((total, course) => total + course.completedLessons, 0)
-  const overallProgress = lessonCount ? Math.round((completedLessons / lessonCount) * 100) : 0
+  const totalActivities = courseRows.reduce((total, course) => total + course.totalActivityCount, 0)
+  const completedActivities = courseRows.reduce((total, course) => total + course.completedActivityCount, 0)
+  const overallProgress = totalActivities ? Math.round((completedActivities / totalActivities) * 100) : 0
   const completedCourseCount = courseRows.filter((course) => course.status === 'completed').length
   const inProgressCourseCount = courseRows.filter((course) => course.status === 'in-progress').length
   const notStartedCourseCount = courseRows.filter((course) => course.status === 'not-started').length
@@ -4654,7 +4655,7 @@ function StudentReferrals({ onLogout }) {
       if (generateError?.statusCode === 429) {
         setReferralData((current) => current && ({
           ...current,
-          stats: { ...current.stats, generatedToday: current.stats.dailyLimit },
+          stats: { ...current.stats, totalGenerated: current.stats.totalLimit, remaining: 0 },
         }))
       }
       setError(generateError instanceof Error ? generateError.message : 'A referral code could not be generated.')
@@ -4676,15 +4677,15 @@ function StudentReferrals({ onLogout }) {
 
   const stats = referralData?.stats || {
     totalGenerated: 0,
-    generatedToday: 0,
-    dailyLimit: 5,
+    totalLimit: 20,
+    remaining: 20,
     successfullyUsed: 0,
     active: 0,
     expired: 0,
   }
   const summary = [
-    { label: 'Total referral codes', value: stats.totalGenerated, tone: 'gold' },
-    { label: 'Generated today', value: `${stats.generatedToday}/${stats.dailyLimit}`, tone: 'blue' },
+    { label: 'Total codes generated', value: `${stats.totalGenerated}/${stats.totalLimit}`, tone: 'gold' },
+    { label: 'Codes remaining', value: stats.remaining, tone: 'blue' },
     { label: 'Successfully used', value: stats.successfullyUsed, tone: 'mint' },
     { label: 'Active codes', value: stats.active, tone: 'peach' },
     { label: 'Expired codes', value: stats.expired, tone: 'lavender' },
@@ -4702,13 +4703,13 @@ function StudentReferrals({ onLogout }) {
           className="student-button"
           type="button"
           onClick={generateReferralCode}
-          disabled={loading || !referralData || generating || stats.generatedToday >= stats.dailyLimit}
+          disabled={loading || !referralData || generating || stats.totalGenerated >= stats.totalLimit}
         >
           {generating ? 'Generating…' : 'Generate Referral Code'}
         </button>
-        {stats.generatedToday >= stats.dailyLimit && (
+        {stats.totalGenerated >= stats.totalLimit && (
           <p className="student-referrals__limit" role="status">
-            You’ve reached today’s limit of 5 codes. The limit resets at 00:00 UTC.
+            You’ve reached your overall limit of 20 referral codes.
           </p>
         )}
       </section>
@@ -4745,7 +4746,7 @@ function StudentReferrals({ onLogout }) {
             <span className="student-eyebrow">YOUR CODE ACTIVITY</span>
             <h2 id="student-referral-history-title">Referral history</h2>
           </div>
-          <span className="student-data-note">Codes expire 15 days after they’re generated.</span>
+          <span className="student-data-note">Codes expire 12 hours after they’re generated.</span>
         </div>
         {loading ? (
           <p role="status">Loading your referral history…</p>

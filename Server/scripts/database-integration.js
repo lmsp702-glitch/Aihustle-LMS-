@@ -31,6 +31,7 @@ const expectedCollections = [
   'quiz_attempts',
   'referralCodeDailyLimits',
   'referralCodes',
+  'referralCodeUserLimits',
   'registrationemailverifications',
   'refresh_sessions',
   'students',

@@ -12,6 +12,10 @@
   gap: 16px;
 }
 
+.admin-progress-reports__toolbar--actions-only {
+  justify-content: flex-end;
+}
+
 .admin-progress-reports__toolbar h2,
 .admin-progress-students__heading h3,
 .admin-progress-chart h3,
@@ -247,6 +251,215 @@
 .admin-progress-detail-section {
   display: grid;
   gap: 12px;
+}
+
+.admin-attention-responses {
+  display: grid;
+  gap: 12px;
+}
+
+.admin-attention-responses__toolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.admin-attention-responses__toolbar button {
+  padding: 6px 10px;
+  border: 1px solid var(--admin-line, #dedace);
+  border-radius: 7px;
+  background: var(--admin-paper, #fffdf8);
+  color: var(--admin-olive-deep, #59613a);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.admin-attention-response {
+  display: grid;
+  min-width: 0;
+  padding: 0 16px;
+  border: 1px solid var(--admin-line, #dedace);
+  border-radius: 10px;
+  background: var(--admin-paper, #fffdf8);
+}
+
+.admin-attention-response__toggle {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 15px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.admin-attention-response__toggle:focus-visible,
+.admin-attention-responses__toolbar button:focus-visible {
+  outline: 2px solid var(--admin-olive);
+  outline-offset: 2px;
+}
+
+.admin-attention-response__chevron {
+  flex: 0 0 8px;
+  width: 8px;
+  height: 8px;
+  margin-left: 2px;
+  border-right: 2px solid var(--admin-muted, #626d67);
+  border-bottom: 2px solid var(--admin-muted, #626d67);
+  transform: rotate(45deg);
+  transition: transform 140ms ease;
+}
+
+.admin-attention-response__toggle[aria-expanded="true"] .admin-attention-response__chevron {
+  transform: rotate(225deg);
+}
+
+.admin-attention-response__content {
+  display: grid;
+  gap: 14px;
+  padding: 0 0 16px;
+}
+
+.admin-attention-response__content[hidden] {
+  display: none;
+}
+
+.admin-attention-response__course {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  margin: 0;
+}
+
+.admin-attention-response__course strong {
+  overflow-wrap: anywhere;
+  color: var(--admin-ink, #293630);
+  font-size: 13px;
+}
+
+.admin-attention-response__course span {
+  color: var(--admin-muted, #626d67);
+  font-size: 11px;
+}
+
+.admin-attention-response__outcome {
+  display: grid;
+  flex: 0 0 auto;
+  justify-items: end;
+  gap: 4px;
+}
+
+.admin-attention-response__result {
+  padding: 5px 9px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.admin-attention-response__result.is-responded {
+  background: #e8f2e9;
+  color: #3d7055;
+}
+
+.admin-attention-response__result.is-not-responded {
+  background: #f7e9e4;
+  color: #984f3c;
+}
+
+.admin-attention-response__correctness {
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.admin-attention-response__correctness.is-correct {
+  color: #3d7055;
+}
+
+.admin-attention-response__correctness.is-incorrect {
+  color: #984f3c;
+}
+
+.admin-attention-response__answers {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.admin-attention-response__answers section {
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid var(--admin-line, #dedace);
+  border-radius: 8px;
+  background: var(--admin-canvas, #f8f6ef);
+}
+
+.admin-attention-response__answers h4 {
+  margin: 0 0 6px;
+  color: var(--admin-muted, #626d67);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.admin-attention-response__answers p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--admin-ink, #293630);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.admin-attention-response__details {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.admin-attention-response__details div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.admin-attention-response__details dt {
+  color: var(--admin-muted, #626d67);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.admin-attention-response__details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--admin-ink, #293630);
+  font-size: 11px;
+}
+
+.admin-app[data-theme="dark"] .admin-attention-response__result.is-responded {
+  background: #2b4939;
+  color: #b7dfc3;
+}
+
+.admin-app[data-theme="dark"] .admin-attention-response__result.is-not-responded {
+  background: #50352f;
+  color: #f0b9a8;
+}
+
+.admin-app[data-theme="dark"] .admin-attention-response__correctness.is-correct {
+  color: #b7dfc3;
+}
+
+.admin-app[data-theme="dark"] .admin-attention-response__correctness.is-incorrect {
+  color: #f0b9a8;
 }
 
 .admin-progress-course-list {
@@ -739,6 +952,10 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .admin-attention-response__answers {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .admin-progress-course__metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -759,6 +976,14 @@
 }
 
 @media (max-width: 520px) {
+  .admin-attention-response {
+    padding: 13px;
+  }
+
+  .admin-attention-response__details {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .admin-progress-reports__toolbar {
     align-items: stretch;
     flex-direction: column;
