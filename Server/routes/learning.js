@@ -1044,7 +1044,7 @@ router.get('/learning/summary', ...requireStudent, async (req, res, next) => {
           userId: req.auth.id,
           enrollmentId: { $in: enrollments.map((enrollment) => enrollment._id) },
           status: 'submitted',
-        }).select('enrollmentId quizId status').lean(),
+        }).select('enrollmentId quizId status passed').lean(),
       ])
       : [[], []]
     return res.json({
@@ -1880,7 +1880,7 @@ router.get('/enrollments/me', ...requireStudent, async (req, res, next) => {
           userId: req.auth.id,
           enrollmentId: { $in: enrollmentIds },
           status: 'submitted',
-        }).select('enrollmentId quizId status').lean(),
+        }).select('enrollmentId quizId status passed').lean(),
       ])
       : [[], []]
     return res.json({
@@ -2178,7 +2178,7 @@ router.patch('/enrollments/:enrollmentId/progress', ...requireStudent, async (re
           userId: req.auth.id,
           enrollmentId: enrollment._id,
           status: 'submitted',
-        }).select('quizId status').lean(),
+        }).select('quizId status passed').lean(),
         AssignmentSubmission.find({
           userId: req.auth.id,
           enrollmentId: enrollment._id,

@@ -258,7 +258,7 @@ export default function StudentQuizPanel({
       }
       setActiveAttempt(result.attempt)
       setView('results')
-      onAttemptAdded(result.attempt)
+      onAttemptAdded(result.attempt, result.courseProgress)
       onLearningDataChanged()
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : 'Your quiz answers could not be submitted.')

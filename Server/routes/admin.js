@@ -3812,11 +3812,11 @@ router.get('/students/:studentId/details', ...requireAdmin, async (req, res, nex
         QuizAttempt.find({
           userId: student._id,
           enrollmentId: { $in: enrollmentIds },
-        }).select('enrollmentId quizId status').lean(),
+        }).select('enrollmentId quizId status passed').lean(),
         AssignmentSubmission.find({
           userId: student._id,
           enrollmentId: { $in: enrollmentIds },
-        }).select('enrollmentId assignmentId').lean(),
+        }).select('enrollmentId assignmentId reviewStatus submittedAt').lean(),
       ])
       : [[], [], []]
     const coursesById = new Map(courses.map((course) => [String(course._id), course]))
@@ -4209,12 +4209,12 @@ router.get('/reports/progress/summary', ...requireAdmin, async (req, res, next) 
         ? QuizAttempt.find({
           status: 'submitted',
           enrollmentId: { $in: relatedEnrollments.map(({ _id }) => _id) },
-        }).select('enrollmentId userId courseId quizId status submittedAt').lean()
+        }).select('enrollmentId userId courseId quizId status passed submittedAt').lean()
         : Promise.resolve([]),
       currentEnrollments.length
         ? AssignmentSubmission.find({
           enrollmentId: { $in: currentEnrollments.map(({ _id }) => _id) },
-        }).select('enrollmentId courseId assignmentId').lean()
+        }).select('enrollmentId courseId assignmentId reviewStatus submittedAt').lean()
         : Promise.resolve([]),
     ])
     const coursesById = new Map(courses.map((course) => [String(course._id), course]))
@@ -4546,7 +4546,7 @@ router.get('/reports/progress/:studentType/:studentId', ...requireAdmin, async (
             ? { collegeId: student.collegeId }
             : { $or: [{ collegeId: { $exists: false } }, { collegeId: null }] }),
         })
-          .select('enrollmentId userId collegeId courseId assignmentId fileName contentType fileSize submittedAt marksObtained evaluationStatus correctness feedback evaluatedAt evaluatorId evaluationHistory')
+          .select('enrollmentId userId collegeId courseId assignmentId fileName contentType fileSize submittedAt reviewStatus marksObtained evaluationStatus correctness feedback evaluatedAt evaluatorId evaluationHistory')
           .sort({ submittedAt: -1 })
           .lean()
         : Promise.resolve([]),

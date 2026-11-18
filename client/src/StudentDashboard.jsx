@@ -17,6 +17,7 @@ import NotificationFeed from './NotificationFeed.jsx'
 import StudentNotificationBell from './StudentNotificationBell.jsx'
 import StudentNotificationsPage from './StudentNotificationsPage.jsx'
 import StudentQuizExperience from './StudentQuizPanel.jsx'
+import { STUDENT_LEARNING_PROGRESS_UPDATED_EVENT } from './student-notifications-events.js'
 import { filterCoursesByCategory, getCourseCategoryNames, normalizeCourseCategory } from './course-categories.js'
 import { findActiveTranscriptCueIndex, formatTranscriptTime } from './srt-transcript.js'
 import { createAttentionCheckSchedule } from './video-attention-checks.js'
@@ -1662,6 +1663,7 @@ function StudentResultsTableSkeleton() {
 
 function StudentResultsPage({ onLogout }) {
   const navigate = useNavigate()
+  const [progressRefresh, setProgressRefresh] = useState(0)
   const [initialResults] = useState(getCachedStudentResults)
   const [courseResults, setCourseResults] = useState(initialResults?.courseResults || [])
   const [certificates, setCertificates] = useState(initialResults?.certificates || [])
@@ -1672,6 +1674,15 @@ function StudentResultsPage({ onLogout }) {
   const [loading, setLoading] = useState(initialResults === null)
   const [certificatesLoading, setCertificatesLoading] = useState(initialResults?.hasCertificatesData !== true)
   const [error, setError] = useState('')
+
+  useEffect(() => {
+    const refreshProgress = () => {
+      invalidateStudentLearningPageCaches()
+      setProgressRefresh((refresh) => refresh + 1)
+    }
+    window.addEventListener(STUDENT_LEARNING_PROGRESS_UPDATED_EVENT, refreshProgress)
+    return () => window.removeEventListener(STUDENT_LEARNING_PROGRESS_UPDATED_EVENT, refreshProgress)
+  }, [])
 
   useEffect(() => {
     let active = true
@@ -1718,7 +1729,7 @@ function StudentResultsPage({ onLogout }) {
     }
     void loadResults()
     return () => { active = false }
-  }, [onLogout])
+  }, [onLogout, progressRefresh])
 
   const courseRows = courseResults.map((result) => {
     const lessonEntries = getCourseLessons(result.course)
@@ -1907,7 +1918,7 @@ function StudentResultsPage({ onLogout }) {
                         <td>{attempt.quizTitle}</td>
                         <td>{attempt.courseName}</td>
                         <td>{attempt.score === null ? '—' : `${Math.round(attempt.score)}%`}</td>
-                        <td><span className={`student-results__status is-${attempt.passed ? 'completed' : 'in-progress'}`}>{attempt.passed ? 'Passed' : 'Submitted'}</span></td>
+                        <td><span className={`student-results__status is-${attempt.passed ? 'completed' : 'in-progress'}`}>{attempt.passed ? 'Passed' : 'Failed'}</span></td>
                         <td>{formatResultDate(attempt.submittedAt || attempt.createdAt)}</td>
                         <td><button className="student-results__details" type="button" onClick={() => openCourse(attempt.courseId)}>Open Course <Icon name="arrow" size={15} /></button></td>
                       </tr>
@@ -2090,21 +2101,23 @@ function getCourseProgress(enrollment) {
   }))
   const activityCompletedCount = activityGroups.reduce((total, group) => total + group.completed, 0)
   const activityTotalCount = activityGroups.reduce((total, group) => total + group.total, 0)
-  const reportedTotalCount = Math.max(0, Math.floor(Number(progress?.totalActivities) || 0))
-  const reportedCompletedCount = Math.max(0, Math.floor(Number(progress?.completedActivities) || 0))
-  const totalCount = reportedTotalCount || activityTotalCount
-  const completedCount = Math.min(totalCount, reportedCompletedCount || activityCompletedCount)
-  const isComplete = enrollment.status === 'completed'
-    || progress?.isComplete === true
-    || (totalCount > 0 && completedCount === totalCount)
-  const reportedPercentage = Number(progress?.percentage)
+  const hasReportedTotalCount = Number.isSafeInteger(Number(progress?.totalActivities))
+    && Number(progress.totalActivities) >= 0
+  const hasReportedCompletedCount = Number.isSafeInteger(Number(progress?.completedActivities))
+    && Number(progress.completedActivities) >= 0
+  const totalCount = hasReportedTotalCount
+    ? Number(progress.totalActivities)
+    : activityTotalCount
+  const completedCount = Math.min(
+    totalCount,
+    hasReportedCompletedCount ? Number(progress.completedActivities) : activityCompletedCount,
+  )
+  const isComplete = totalCount > 0 && completedCount === totalCount
   const percentage = isComplete
     ? 100
     : totalCount
       ? Math.min(99, Math.floor((completedCount / totalCount) * 100))
-      : Number.isFinite(reportedPercentage)
-        ? Math.max(0, Math.min(99, reportedPercentage))
-        : 0
+      : 0
   return {
     completedCount,
     totalCount,
@@ -2579,6 +2592,7 @@ function EnrollmentCourseSkeletons() {
 }
 
 function StudentDashboardCourses({ onLogout, selectedCategory }) {
+  const [progressRefresh, setProgressRefresh] = useState(0)
   const [initialEnrollments] = useState(getCachedStudentPageEnrollments)
   const [enrollments, setEnrollments] = useState(initialEnrollments || [])
   const [loading, setLoading] = useState(initialEnrollments === null)
@@ -2586,6 +2600,15 @@ function StudentDashboardCourses({ onLogout, selectedCategory }) {
   const [averageScores, setAverageScores] = useState({})
   const [scoresLoading, setScoresLoading] = useState(false)
   const [scoreError, setScoreError] = useState('')
+
+  useEffect(() => {
+    const refreshProgress = () => {
+      invalidateStudentLearningPageCaches()
+      setProgressRefresh((refresh) => refresh + 1)
+    }
+    window.addEventListener(STUDENT_LEARNING_PROGRESS_UPDATED_EVENT, refreshProgress)
+    return () => window.removeEventListener(STUDENT_LEARNING_PROGRESS_UPDATED_EVENT, refreshProgress)
+  }, [])
 
   useEffect(() => {
     let active = true
@@ -2601,7 +2624,7 @@ function StudentDashboardCourses({ onLogout, selectedCategory }) {
       })
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
-  }, [onLogout])
+  }, [onLogout, progressRefresh])
 
   const categoryEnrollments = selectedCategory
     ? enrollments.filter((entry) => (
@@ -2648,7 +2671,7 @@ function StudentDashboardCourses({ onLogout, selectedCategory }) {
       })
 
     return () => { active = false }
-  }, [onLogout, scoreCourseIdsKey])
+  }, [onLogout, progressRefresh, scoreCourseIdsKey])
 
   return loading
     ? <StudentDashboardCourseTableSkeleton />
@@ -3621,8 +3644,14 @@ function StudentCourseLearning({
     setCourseCertificateRefresh((current) => current + 1)
   }
 
-  function addQuizAttempt(attempt) {
+  function addQuizAttempt(attempt, courseProgress) {
     setQuizAttempts((current) => [attempt, ...current.filter((entry) => String(entry._id) !== String(attempt._id))])
+    if (courseProgress) {
+      onEnrollmentUpdated({
+        courseProgress,
+        ...(courseProgress.status ? { status: courseProgress.status } : {}),
+      })
+    }
     if (attempt.status === 'submitted') {
       setCourseCertificateRefresh((current) => current + 1)
     }
@@ -5320,6 +5349,29 @@ function StudentCourseLearningPage({
     return () => { active = false }
   }, [courseId, onLogout])
 
+  useEffect(() => {
+    let active = true
+    async function refreshProgress() {
+      const cacheKey = getStudentCourseContentCacheKey(courseId)
+      if (cacheKey) studentCourseContentCache.delete(cacheKey)
+      try {
+        const content = await fetchStudentCourseContent(courseId, onLogout)
+        if (!active) return
+        const { enrollment: courseEnrollment, assignmentSubmissions, quizAttempts } = content
+        if (cacheKey) studentCourseContentCache.set(cacheKey, { content, savedAt: Date.now() })
+        setEnrollment({ ...courseEnrollment, assignmentSubmissions, quizAttempts })
+        setError('')
+      } catch (loadError) {
+        if (active) setError(loadError instanceof Error ? loadError.message : 'Your course could not be loaded.')
+      }
+    }
+    window.addEventListener(STUDENT_LEARNING_PROGRESS_UPDATED_EVENT, refreshProgress)
+    return () => {
+      active = false
+      window.removeEventListener(STUDENT_LEARNING_PROGRESS_UPDATED_EVENT, refreshProgress)
+    }
+  }, [courseId, onLogout])
+
   return (
     <StudentRoutePage title={enrollment?.courseId?.title || 'Course learning'} className="student-course-learning-page">
       {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
@@ -5344,6 +5396,7 @@ function StudentCourseLearningPage({
 }
 
 function StudentCourses({ user, onLogout }) {
+  const [progressRefresh, setProgressRefresh] = useState(0)
   const [initialEnrollments] = useState(getCachedStudentPageEnrollments)
   const [enrollments, setEnrollments] = useState(initialEnrollments || [])
   const [error, setError] = useState('')
@@ -5351,6 +5404,15 @@ function StudentCourses({ user, onLogout }) {
   const location = useLocation()
   const requestedFilter = new URLSearchParams(location.search).get('filter')
   const enrollmentFilter = ['enrolled', 'completed', 'active'].includes(requestedFilter) ? requestedFilter : ''
+
+  useEffect(() => {
+    const refreshProgress = () => {
+      invalidateStudentLearningPageCaches()
+      setProgressRefresh((refresh) => refresh + 1)
+    }
+    window.addEventListener(STUDENT_LEARNING_PROGRESS_UPDATED_EVENT, refreshProgress)
+    return () => window.removeEventListener(STUDENT_LEARNING_PROGRESS_UPDATED_EVENT, refreshProgress)
+  }, [])
 
   useEffect(() => {
     let active = true
@@ -5372,7 +5434,7 @@ function StudentCourses({ user, onLogout }) {
       })
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
-  }, [onLogout, user?.id])
+  }, [onLogout, progressRefresh, user?.id])
 
   const filteredEnrollments = enrollmentFilter
     ? enrollments.filter((entry) => enrollmentFilter === 'enrolled'
@@ -6036,6 +6098,15 @@ function StudentDashboard({
       document.removeEventListener('keydown', closeOnEscape)
     }
   }, [profileMenuOpen])
+
+  useEffect(() => {
+    const refreshProgress = () => {
+      invalidateStudentLearningPageCaches()
+      setLearningSummaryRefresh((refresh) => refresh + 1)
+    }
+    window.addEventListener(STUDENT_LEARNING_PROGRESS_UPDATED_EVENT, refreshProgress)
+    return () => window.removeEventListener(STUDENT_LEARNING_PROGRESS_UPDATED_EVENT, refreshProgress)
+  }, [])
 
   useEffect(() => {
     setProfileMenuOpen(false)

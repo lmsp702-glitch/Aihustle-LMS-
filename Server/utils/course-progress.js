@@ -104,32 +104,7 @@ export function calculateCourseProgress({
 }
 
 export function calculateCourseActivityProgress(course, enrollment, quizAttempts = [], assignmentSubmissions = []) {
-  const activities = getCourseProgressActivities(course, { includeOptional: true })
-  const completedVideoIds = new Set((enrollment?.completedLessonIds || []).map(String))
-  const submittedQuizIds = new Set(quizAttempts
-    .filter((attempt) => attempt.status === 'submitted')
-    .map((attempt) => documentId(attempt.quizId))
-    .filter(Boolean))
-  const latestSubmissions = getLatestSubmissionsByAssignment(assignmentSubmissions)
-
-  const completedVideos = activities.videos.filter(({ id }) => completedVideoIds.has(id)).length
-  const completedQuizzes = activities.quizzes.filter(({ id }) => submittedQuizIds.has(id)).length
-  const completedAssignments = activities.assignments.filter(({ id }) => (
-    latestSubmissions.get(id)?.reviewStatus === 'approved'
-  )).length
-  const totalActivities = activities.videos.length + activities.quizzes.length + activities.assignments.length
-  const completedActivities = completedVideos + completedQuizzes + completedAssignments
-  const isComplete = totalActivities > 0 && completedActivities === totalActivities
-
-  return {
-    completedActivities,
-    totalActivities,
-    percentage: totalActivities ? Math.round((completedActivities / totalActivities) * 100) : 0,
-    isComplete,
-    videos: { completed: completedVideos, total: activities.videos.length },
-    quizzes: { completed: completedQuizzes, total: activities.quizzes.length },
-    assignments: { completed: completedAssignments, total: activities.assignments.length },
-  }
+  return calculateCourseProgress({ course, enrollment, quizAttempts, assignmentSubmissions })
 }
 
 export async function syncEnrollmentStatus(enrollment, progress) {

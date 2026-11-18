@@ -171,11 +171,11 @@ test('course completion uses each course activity structure and deduplicates com
   )
 
   assert.deepEqual(progress.videos, { completed: 6, total: 8 })
-  assert.deepEqual(progress.quizzes, { completed: 2, total: 2 })
-  assert.deepEqual(progress.assignments, { completed: 1, total: 2 })
-  assert.equal(progress.completedActivities, 9)
+  assert.deepEqual(progress.quizzes, { completed: 0, total: 2 })
+  assert.deepEqual(progress.assignments, { completed: 0, total: 2 })
+  assert.equal(progress.completedActivities, 6)
   assert.equal(progress.totalActivities, 12)
-  assert.equal(progress.percentage, 75)
+  assert.equal(progress.percentage, 50)
   assert.equal(progress.isComplete, false)
 })
 
@@ -190,8 +190,8 @@ test('course completion recalculates for changed activity structures and returns
     assignments: [{ _id: 'assignment-a', title: 'Assignment A' }],
   }
   const savedProgress = { completedLessonIds: ['video-a', 'video-removed'] }
-  const records = [{ quizId: 'quiz-a', status: 'submitted' }]
-  const submissions = [{ assignmentId: 'assignment-a' }]
+  const records = [{ quizId: 'quiz-a', status: 'submitted', passed: true }]
+  const submissions = [{ assignmentId: 'assignment-a', reviewStatus: 'approved' }]
   const complete = calculateCourseActivityProgress(originalCourse, savedProgress, records, submissions)
   const changed = calculateCourseActivityProgress(
     { modules: [{ contentItems: [{ _id: 'video-new', type: 'video-lesson', title: 'New video' }] }], assignments: [] },
@@ -5198,6 +5198,7 @@ test('student learning summary counts enrolled courses, lesson progress, assignm
         enrollmentId: '68a000000000000000000071',
         quizId: '68a000000000000000000093',
         status: 'submitted',
+        passed: false,
       }],
     }
   })
@@ -5223,9 +5224,9 @@ test('student learning summary counts enrolled courses, lesson progress, assignm
       inProgressLessons: 1,
       notStartedLessons: 0,
       totalLessons: 3,
-      completedActivities: 3,
+      completedActivities: 2,
       totalActivities: 6,
-      completionPercentage: 50,
+      completionPercentage: 33,
     })
   } finally {
     restoreQuizAttempts()
@@ -9394,6 +9395,7 @@ test('main admin individual progress report includes lessons, quiz scores, and r
         contentType: 'application/pdf',
         fileSize: 128,
         submittedAt,
+        reviewStatus: 'approved',
         marksObtained: 8,
         evaluationStatus: 'evaluated',
         correctness: 'partially_correct',

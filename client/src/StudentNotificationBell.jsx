@@ -2,7 +2,10 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { API_BASE_URL } from './api-base-url.js'
 import { fetchWithAuth, isInvalidSessionResponse } from './auth-session.js'
-import { STUDENT_NOTIFICATIONS_UPDATED_EVENT } from './student-notifications-events.js'
+import {
+  STUDENT_LEARNING_PROGRESS_UPDATED_EVENT,
+  STUDENT_NOTIFICATIONS_UPDATED_EVENT,
+} from './student-notifications-events.js'
 import './StudentNotificationBell.css'
 
 export { STUDENT_NOTIFICATIONS_UPDATED_EVENT }
@@ -70,6 +73,7 @@ export default function StudentNotificationBell({ onLogout }) {
   const rootRef = useRef(null)
   const hasLoadedRef = useRef(false)
   const inFlightRef = useRef(null)
+  const progressNotificationIdsRef = useRef(new Set())
   const [notifications, setNotifications] = useState([])
   const [unreadCount, setUnreadCount] = useState(0)
   const [loading, setLoading] = useState(true)
@@ -102,6 +106,17 @@ export default function StudentNotificationBell({ onLogout }) {
         if (!response.ok) throw new Error(result.message || 'Notifications could not be loaded.')
         if (!Array.isArray(result.notifications)) {
           throw new Error('The server returned invalid notification data.')
+        }
+        let hasNewAssignmentReview = false
+        result.notifications.forEach((notification) => {
+          if (!['assignment_approved', 'assignment_rejected'].includes(notification.type)) return
+          const notificationId = String(notification.id || notification._id || '')
+          if (!notificationId || progressNotificationIdsRef.current.has(notificationId)) return
+          progressNotificationIdsRef.current.add(notificationId)
+          hasNewAssignmentReview = true
+        })
+        if (hasNewAssignmentReview) {
+          window.dispatchEvent(new Event(STUDENT_LEARNING_PROGRESS_UPDATED_EVENT))
         }
         const unreadCount = Number.isSafeInteger(result.unreadCount) && result.unreadCount >= 0
           ? result.unreadCount

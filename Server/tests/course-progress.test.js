@@ -114,8 +114,9 @@ test('activity progress uses each course structure and counts only latest approv
     { completedLessonIds: [...videoIds.slice(0, 6), videoIds[0]] },
     [
       { quizId: quizIds[0], status: 'submitted', passed: false },
-      { quizId: quizIds[0], status: 'submitted', passed: false },
-      { quizId: quizIds[1], status: 'submitted' },
+      { quizId: quizIds[0], status: 'submitted', passed: true },
+      { quizId: quizIds[0], status: 'submitted', passed: true },
+      { quizId: quizIds[1], status: 'submitted', passed: false },
     ],
     [
       {
@@ -137,12 +138,12 @@ test('activity progress uses each course structure and counts only latest approv
   )
 
   assert.deepEqual(progress, {
-    completedActivities: 9,
-    totalActivities: 12,
-    percentage: 75,
+    completedActivities: 8,
+    totalActivities: 11,
+    percentage: 72,
     isComplete: false,
-    videos: { completed: 6, total: 8 },
-    quizzes: { completed: 2, total: 2 },
+    videos: { completed: 6, total: 7 },
+    quizzes: { completed: 1, total: 2 },
     assignments: { completed: 1, total: 2 },
   })
 
@@ -159,11 +160,53 @@ test('activity progress uses each course structure and counts only latest approv
   const otherProgress = calculateCourseActivityProgress(otherCourse, {
     completedLessonIds: ['68a000000000000000000101'],
   }, [
-    { quizId: '68a000000000000000000102', status: 'submitted' },
+    { quizId: '68a000000000000000000102', status: 'submitted', passed: false },
   ])
   assert.equal(otherProgress.totalActivities, 4)
-  assert.equal(otherProgress.completedActivities, 2)
-  assert.equal(otherProgress.percentage, 50)
+  assert.equal(otherProgress.completedActivities, 1)
+  assert.equal(otherProgress.percentage, 25)
+})
+
+test('activity progress counts videos, passed quizzes, and approved assignments only', () => {
+  const videoIds = ['video-1', 'video-2', 'video-3']
+  const quizId = 'quiz'
+  const assignmentId = 'assignment'
+  const course = {
+    modules: [{
+      contentItems: [
+        ...videoIds.map((_id) => ({ _id, type: 'video-lesson' })),
+        { _id: quizId, type: 'quiz' },
+        { _id: assignmentId, type: 'assignment' },
+      ],
+    }],
+  }
+  const enrollment = { completedLessonIds: videoIds }
+  const failedAttempts = [{ quizId, status: 'submitted', passed: false }]
+  const pendingSubmission = [{ assignmentId, reviewStatus: 'pending', submittedAt: new Date('2026-01-01T00:00:00Z') }]
+  const pendingProgress = calculateCourseActivityProgress(course, enrollment, failedAttempts, pendingSubmission)
+  assert.equal(pendingProgress.completedActivities, 3)
+  assert.equal(pendingProgress.totalActivities, 5)
+  assert.equal(pendingProgress.percentage, 60)
+
+  const passedProgress = calculateCourseActivityProgress(course, enrollment, [
+    ...failedAttempts,
+    { quizId, status: 'submitted', passed: true },
+    { quizId, status: 'submitted', passed: true },
+  ], pendingSubmission)
+  assert.equal(passedProgress.completedActivities, 4)
+  assert.equal(passedProgress.percentage, 80)
+
+  const approvedProgress = calculateCourseActivityProgress(course, enrollment, [
+    ...failedAttempts,
+    { quizId, status: 'submitted', passed: true },
+    { quizId, status: 'submitted', passed: true },
+  ], [
+    ...pendingSubmission,
+    { assignmentId, reviewStatus: 'approved', submittedAt: new Date('2026-01-02T00:00:00Z') },
+  ])
+  assert.equal(approvedProgress.completedActivities, 5)
+  assert.equal(approvedProgress.percentage, 100)
+  assert.equal(approvedProgress.isComplete, true)
 })
 
 test('activity progress keeps a submitted assignment incomplete until its latest submission is approved', () => {
