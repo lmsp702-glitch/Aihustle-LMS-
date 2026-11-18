@@ -685,21 +685,89 @@
   font-size: 10px;
 }
 
-.admin-profile-dropdown > button {
+.admin-avatar__img {
   width: 100%;
-  margin-top: 12px;
-  padding: 9px 10px;
-  border: 1px solid #eee6de;
-  border-radius: 7px;
-  background: #fff8f4;
-  color: #8e5e4d;
-  font: inherit;
-  font-size: 10px;
-  text-align: left;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 50%;
 }
 
-.admin-profile-dropdown > button:hover {
-  background: #f8ece5;
+/* My Profile button - prominent, taller, subtle golden-yellow background */
+.admin-profile-dropdown__profile-btn {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 40px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid #f2dfa2;
+  border-radius: 8px;
+  background: #fdf8e6;
+  color: #3b3014;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(184, 142, 20, 0.08);
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+  box-sizing: border-box;
+}
+
+.admin-profile-dropdown__profile-btn:hover {
+  background: #faeed0;
+  border-color: #e5c46b;
+  color: #261f06;
+  box-shadow: 0 2px 6px rgba(184, 142, 20, 0.14);
+}
+
+.admin-profile-dropdown__profile-btn:focus-visible {
+  outline: 2px solid #eebd17;
+  outline-offset: 1px;
+}
+
+.admin-profile-dropdown__profile-btn svg {
+  flex-shrink: 0;
+  color: #a47d10;
+  transition: transform 0.15s ease;
+}
+
+.admin-profile-dropdown__profile-btn:hover svg {
+  transform: scale(1.05);
+}
+
+/* Logout button - clean, subtle neutral background */
+.admin-profile-dropdown__logout {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  width: 100%;
+  min-height: 33px;
+  margin-top: 8px;
+  padding: 7px 12px;
+  border: 1px solid #e2e5e0;
+  border-radius: 7px;
+  background: #f6f7f5;
+  color: #555e54;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  box-sizing: border-box;
+}
+
+.admin-profile-dropdown__logout:hover {
+  background: #eceee9;
+  border-color: #d1d6ce;
+  color: #232722;
+}
+
+.admin-profile-dropdown__logout:focus-visible {
+  outline: 2px solid #9aa59d;
+  outline-offset: 1px;
 }
 
 .admin-menu-toggle {
@@ -3237,7 +3305,6 @@
 }
 
 .admin-app[data-theme="dark"] .admin-icon-button:hover,
-.admin-app[data-theme="dark"] .admin-profile-dropdown > button:hover,
 .admin-app[data-theme="dark"] .admin-report-dialog__close:hover {
   background: #3b4038;
 }
@@ -3248,10 +3315,34 @@
   color: #c4dbc8;
 }
 
-.admin-app[data-theme="dark"] .admin-profile-dropdown > button {
-  border-color: #59473d;
-  background: #382f2a;
-  color: #e2b4a1;
+.admin-app[data-theme="dark"] .admin-profile-dropdown__profile-btn {
+  border-color: #5a4b22;
+  background: #2b2617;
+  color: #faefc2;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+}
+
+.admin-app[data-theme="dark"] .admin-profile-dropdown__profile-btn:hover {
+  background: #362f1a;
+  border-color: #8c7330;
+  color: #ffffff;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+}
+
+.admin-app[data-theme="dark"] .admin-profile-dropdown__profile-btn svg {
+  color: #eebd17;
+}
+
+.admin-app[data-theme="dark"] .admin-profile-dropdown__logout {
+  border-color: #3d453f;
+  background: #252a26;
+  color: #abb3ad;
+}
+
+.admin-app[data-theme="dark"] .admin-profile-dropdown__logout:hover {
+  background: #313732;
+  border-color: #505952;
+  color: #e4e8e5;
 }
 
 .admin-app[data-theme="dark"] .admin-button--primary {

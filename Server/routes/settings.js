@@ -1,7 +1,10 @@
 import bcrypt from 'bcryptjs'
 import { createHmac, randomInt, timingSafeEqual } from 'node:crypto'
+import { Readable } from 'node:stream'
 import { Router } from 'express'
+import multer from 'multer'
 import mongoose from 'mongoose'
+import cloudinary from '../config/cloudinary.js'
 import AccountIdentity from '../models/AccountIdentity.js'
 import SupportTicket from '../models/SupportTicket.js'
 import { accountModelsByCollection, roleForAccountCollection } from '../models/account-models.js'
@@ -70,6 +73,8 @@ function serializeSettings(user, identity) {
     hasPassword: Boolean(user.passwordHash),
     twoFactorEnabled: user.role === 'student' ? user.twoFactorEnabled === true : null,
     twoFactorEnabledAt: user.role === 'student' ? user.twoFactorEnabledAt || null : null,
+    phone: user.phone || '',
+    avatarUrl: user.avatarUrl || '',
   }
 }
 
@@ -291,9 +296,9 @@ router.patch('/profile', async (req, res, next) => {
     if (!body || typeof body !== 'object' || Array.isArray(body)) {
       return res.status(400).json({ message: 'Enter valid account details.' })
     }
-    const allowedFields = new Set(['fullName', 'username'])
+    const allowedFields = new Set(['fullName', 'username', 'phone', 'avatarUrl'])
     if (Object.keys(body).some((field) => !allowedFields.has(field))) {
-      return res.status(400).json({ message: 'Only your display name and username can be changed here.' })
+      return res.status(400).json({ message: 'Only your display name, username, phone, and avatar can be changed here.' })
     }
 
     const updates = {}
@@ -302,6 +307,18 @@ router.patch('/profile', async (req, res, next) => {
         return res.status(400).json({ message: 'Display name must be between 2 and 120 characters.' })
       }
       updates.fullName = body.fullName.trim()
+    }
+    if (Object.hasOwn(body, 'phone')) {
+      if (typeof body.phone !== 'string' || body.phone.trim().length > 40) {
+        return res.status(400).json({ message: 'Phone number cannot exceed 40 characters.' })
+      }
+      updates.phone = body.phone.trim()
+    }
+    if (Object.hasOwn(body, 'avatarUrl')) {
+      if (typeof body.avatarUrl !== 'string' || body.avatarUrl.trim().length > 1000) {
+        return res.status(400).json({ message: 'Avatar URL is invalid.' })
+      }
+      updates.avatarUrl = body.avatarUrl.trim()
     }
     if (Object.hasOwn(body, 'username')) {
       if (AccountModel.collection.name !== 'clg_students') {
@@ -374,6 +391,8 @@ router.patch('/profile', async (req, res, next) => {
               identity.username = updates.username
             }
             if (updates.fullName) user.fullName = updates.fullName
+            if (Object.hasOwn(updates, 'phone')) user.phone = updates.phone
+            if (Object.hasOwn(updates, 'avatarUrl')) user.avatarUrl = updates.avatarUrl
             await user.save({ session })
             await identity.save({ session })
             updatedUser = user
@@ -392,6 +411,86 @@ router.patch('/profile', async (req, res, next) => {
   } catch (error) {
     if (error?.statusCode) return res.status(error.statusCode).json({ message: error.message })
     if (error?.code === 11000) return res.status(409).json({ message: 'That username is already taken.' })
+    return next(error)
+  }
+})
+
+const uploadAvatar = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true)
+    } else {
+      cb(new Error('Only image files (PNG, JPG, WEBP, GIF) are allowed.'))
+    }
+  },
+})
+
+router.post('/avatar', uploadAvatar.single('avatar'), async (req, res, next) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: 'No image file was uploaded.' })
+    }
+
+    const AccountModel = getAccountModel(req, res)
+    if (!AccountModel) return
+
+    let avatarUrl = ''
+    if (cloudinary.isConfigured) {
+      const uploadResult = await new Promise((resolve, reject) => {
+        const uploadStream = cloudinary.uploader.upload_stream(
+          {
+            folder: 'admin-avatars',
+            resource_type: 'image',
+            transformation: [{ width: 400, height: 400, crop: 'fill', gravity: 'face' }],
+          },
+          (error, result) => {
+            if (error) reject(error)
+            else resolve(result)
+          },
+        )
+        Readable.from(req.file.buffer).pipe(uploadStream)
+      })
+      avatarUrl = uploadResult.secure_url || uploadResult.url
+    } else {
+      const base64 = req.file.buffer.toString('base64')
+      avatarUrl = `data:${req.file.mimetype};base64,${base64}`
+    }
+
+    const user = await AccountModel.findByIdAndUpdate(
+      req.auth.id,
+      { $set: { avatarUrl } },
+      { new: true },
+    )
+    if (!user) return res.status(404).json({ message: 'Account could not be found.' })
+
+    return res.json({
+      message: 'Profile picture updated successfully.',
+      avatarUrl,
+    })
+  } catch (error) {
+    return next(error)
+  }
+})
+
+router.delete('/avatar', async (req, res, next) => {
+  try {
+    const AccountModel = getAccountModel(req, res)
+    if (!AccountModel) return
+
+    const user = await AccountModel.findByIdAndUpdate(
+      req.auth.id,
+      { $set: { avatarUrl: '' } },
+      { new: true },
+    )
+    if (!user) return res.status(404).json({ message: 'Account could not be found.' })
+
+    return res.json({
+      message: 'Profile picture removed.',
+      avatarUrl: '',
+    })
+  } catch (error) {
     return next(error)
   }
 })

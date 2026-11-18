@@ -3,6 +3,7 @@ import AdminSupport from './AdminSupport.jsx'
 import AdminDashboard from './AdminDashboard.jsx'
 import CollegeAdminDashboard from './CollegeAdminDashboard.jsx'
 import SettingsPage from './SettingsPage.jsx'
+import AdminProfilePage from './AdminProfilePage.jsx'
 import StudentDashboard from './StudentDashboard.jsx'
 import ThemeToggle from './ThemeToggle.jsx'
 import WorkspaceTopbar from './WorkspaceTopbar.jsx'
@@ -1513,6 +1514,31 @@ function DashboardPage({ role, isDark, onToggleTheme, themePreference, onSetThem
     )
   }
 
+  if (role === 'main_admin' && user && location.pathname.startsWith('/admin/profile')) {
+    return (
+      <>
+        <WorkspaceTopbar
+          title="Admin Profile"
+          name={user.fullName}
+          email={user.email}
+          roleLabel={roleLabels[role]}
+          dashboardPath="/admin/dashboard"
+          helpPath="/admin/support"
+          settingsPath="/admin/settings"
+          isDark={isDark}
+          onToggleTheme={onToggleTheme}
+          onLogout={signOut}
+        />
+        <AdminProfilePage
+          user={user}
+          onAccountUpdated={updateAccount}
+          onLogout={signOut}
+          isDark={isDark}
+          standalone
+        />
+      </>
+    )
+  }
   if (role === 'main_admin' && user) {
     return (
       <AdminDashboard
@@ -1632,7 +1658,7 @@ function App() {
   const isRegistering = mode === 'register'
   const dashboardRole = location.pathname.startsWith('/student/')
     ? 'student'
-    : location.pathname.startsWith('/admin/support') || location.pathname.startsWith('/admin/settings')
+    : location.pathname.startsWith('/admin/') || location.pathname === '/admin'
       ? 'main_admin'
       : location.pathname.startsWith('/college-admin/')
         ? 'college_admin'
@@ -1657,6 +1683,15 @@ function App() {
     return (
       <Navigate
         to={{ pathname: DASHBOARD_PATHS.student, search: location.search, hash: location.hash }}
+        replace
+      />
+    )
+  }
+
+  if (location.pathname === '/admin') {
+    return (
+      <Navigate
+        to={{ pathname: DASHBOARD_PATHS.main_admin, search: location.search, hash: location.hash }}
         replace
       />
     )

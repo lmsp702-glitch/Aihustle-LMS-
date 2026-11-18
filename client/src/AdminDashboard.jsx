@@ -10,6 +10,7 @@ import AdminFeedback from './AdminFeedback.jsx'
 import AdminSupport from './AdminSupport.jsx'
 import NotificationFeed from './NotificationFeed.jsx'
 import SettingsPage from './SettingsPage.jsx'
+import AdminProfilePage from './AdminProfilePage.jsx'
 import { readStudentFile } from './student-file.js'
 import './AdminDashboard.css'
 import './AdminPageConsistency.css'
@@ -557,6 +558,7 @@ function AdminDashboard({
     const requestedView = new URLSearchParams(location.search).get('section')
     if (['feedback', 'notifications'].includes(requestedView)) return requestedView
     if (location.pathname.startsWith('/admin/support')) return 'complaints'
+    if (location.pathname.startsWith('/admin/profile')) return 'profile'
     return location.pathname.startsWith('/admin/settings')
       ? 'settings' : 'overview'
   })
@@ -630,6 +632,7 @@ function AdminDashboard({
   const searchInputRef = useRef(null)
   const notificationMenuRef = useRef(null)
   const studentDataActionsRef = useRef(null)
+  const profileMenuRef = useRef(null)
   const [colleges, setColleges] = useState([])
   const [reportColleges, setReportColleges] = useState([])
   const [reportCollegesError, setReportCollegesError] = useState('')
@@ -785,6 +788,29 @@ function AdminDashboard({
       document.removeEventListener('keydown', closeOnEscape)
     }
   }, [notificationOpen])
+
+  useEffect(() => {
+    if (!profileOpen) return undefined
+
+    function closeProfileMenuOnOutsideClick(event) {
+      if (!profileMenuRef.current?.contains(event.target)) {
+        setProfileOpen(false)
+      }
+    }
+
+    function closeProfileMenuOnEscape(event) {
+      if (event.key === 'Escape') {
+        setProfileOpen(false)
+      }
+    }
+
+    document.addEventListener('pointerdown', closeProfileMenuOnOutsideClick)
+    document.addEventListener('keydown', closeProfileMenuOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeProfileMenuOnOutsideClick)
+      document.removeEventListener('keydown', closeProfileMenuOnEscape)
+    }
+  }, [profileOpen])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -1807,14 +1833,21 @@ function AdminDashboard({
 
   function selectView(view) {
     if (view === 'logout') {
+      setProfileOpen(false)
       onLogout()
       return
     }
     if (view === 'settings') {
+      setProfileOpen(false)
       navigate('/admin/settings')
       return
     }
-    if (location.pathname.startsWith('/admin/support') || location.pathname.startsWith('/admin/settings')) {
+    if (view === 'profile') {
+      setProfileOpen(false)
+      navigate('/admin/profile')
+      return
+    }
+    if (location.pathname.startsWith('/admin/support') || location.pathname.startsWith('/admin/settings') || location.pathname.startsWith('/admin/profile')) {
       navigate('/admin/dashboard')
     }
     setActiveView(view)
@@ -1831,6 +1864,24 @@ function AdminDashboard({
     }
   }
 
+  function handleMyProfileClick(event) {
+    if (event) {
+      event.preventDefault()
+      event.stopPropagation()
+    }
+    setProfileOpen(false)
+    navigate('/admin/profile')
+  }
+
+  function handleLogoutClick(event) {
+    if (event) {
+      event.preventDefault()
+      event.stopPropagation()
+    }
+    setProfileOpen(false)
+    onLogout()
+  }
+
   const stats = overview?.stats
   const viewTitles = {
     overview: 'Admin Dashboard',
@@ -1844,6 +1895,7 @@ function AdminDashboard({
     feedback: 'Feedback',
     complaints: 'Complaints',
     settings: 'Settings',
+    profile: 'Admin Profile',
   }
   const isDrawerViewport = window.matchMedia('(max-width: 1024px)').matches
 
@@ -2071,9 +2123,7 @@ function AdminDashboard({
                 </section>
               )}
             </div>
-            <div className="admin-profile-menu" onBlur={(event) => {
-              if (!event.currentTarget.contains(event.relatedTarget)) setProfileOpen(false)
-            }}>
+            <div className="admin-profile-menu" ref={profileMenuRef}>
               <button
                 type="button"
                 className="admin-profile"
@@ -2081,7 +2131,13 @@ function AdminDashboard({
                 aria-expanded={profileOpen}
                 onClick={() => setProfileOpen((open) => !open)}
               >
-                <span className="admin-avatar">{(email || 'A').slice(0, 1).toUpperCase()}</span>
+                <span className="admin-avatar">
+                  {user?.avatarUrl ? (
+                    <img src={user.avatarUrl} alt="Avatar" className="admin-avatar__img" />
+                  ) : (
+                    (email || 'A').slice(0, 1).toUpperCase()
+                  )}
+                </span>
                 <span className="admin-profile__label"><strong>Administrator</strong></span>
                 <span className="admin-profile__chevron">⌄</span>
               </button>
@@ -2089,7 +2145,26 @@ function AdminDashboard({
                 <div className="admin-profile-dropdown" role="menu">
                   <strong>Administrator</strong>
                   <span className="admin-profile-dropdown__email">{email || 'Email unavailable'}</span>
-                  <button type="button" role="menuitem" onClick={onLogout}>Logout</button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="admin-profile-dropdown__profile-btn"
+                    onClick={handleMyProfileClick}
+                  >
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                      <circle cx="12" cy="7" r="4" />
+                    </svg>
+                    <span>My Profile</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="admin-profile-dropdown__logout"
+                    onClick={handleLogoutClick}
+                  >
+                    Logout
+                  </button>
                 </div>
               )}
             </div>
@@ -2717,6 +2792,16 @@ function AdminDashboard({
             />
           )}
           {activeView === 'feedback' && <AdminFeedback />}
+
+          {activeView === 'profile' && (
+            <AdminProfilePage
+              user={user}
+              onAccountUpdated={onAccountUpdated}
+              onLogout={onLogout}
+              isDark={isDark}
+              onBack={() => selectView('overview')}
+            />
+          )}
 
           {['reports', 'notifications', 'settings'].includes(activeView) && (
             <div className="admin-data-page">

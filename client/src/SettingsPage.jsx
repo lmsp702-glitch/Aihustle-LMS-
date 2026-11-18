@@ -700,27 +700,31 @@ function SettingsPage({
             </SettingsSection>
           )}
 
-          <SettingsSection title="Connected Accounts" description="Only linked authentication providers are shown.">
-            <div className="settings-connected-account">
-              <span className="settings-google-mark" aria-hidden="true">G</span>
-              <div><strong>Google</strong><span>{account?.googleConnected ? `Connected${account.googleEmail ? ` · ${account.googleEmail}` : ''}` : 'Not connected'}</span></div>
-              <span className={`settings-pill${account?.googleConnected ? ' is-connected' : ''}`}>{account?.googleConnected ? 'Connected' : 'Not connected'}</span>
-            </div>
-            <p className="settings-note">Account linking and unlinking are managed securely during sign-in. Settings does not offer unlinking.</p>
-          </SettingsSection>
+          {user?.role !== 'main_admin' && (
+            <>
+              <SettingsSection title="Connected Accounts" description="Only linked authentication providers are shown.">
+                <div className="settings-connected-account">
+                  <span className="settings-google-mark" aria-hidden="true">G</span>
+                  <div><strong>Google</strong><span>{account?.googleConnected ? `Connected${account.googleEmail ? ` · ${account.googleEmail}` : ''}` : 'Not connected'}</span></div>
+                  <span className={`settings-pill${account?.googleConnected ? ' is-connected' : ''}`}>{account?.googleConnected ? 'Connected' : 'Not connected'}</span>
+                </div>
+                <p className="settings-note">Account linking and unlinking are managed securely during sign-in. Settings does not offer unlinking.</p>
+              </SettingsSection>
 
-          <SettingsSection title="Active Sessions" description="Your current sign-in uses a stateless access token.">
-            <ComingSoon>The platform does not yet track or revoke individual device sessions. No device or location data is shown.</ComingSoon>
-          </SettingsSection>
+              <SettingsSection title="Active Sessions" description="Your current sign-in uses a stateless access token.">
+                <ComingSoon>The platform does not yet track or revoke individual device sessions. No device or location data is shown.</ComingSoon>
+              </SettingsSection>
 
-          <SettingsSection title="Your LMS Data" description="Generate a copy of account details and LMS records currently available for your account.">
-            <p className="settings-note">The report includes your account information and support requests, when available. Enrollment, course-progress, purchase, and achievement records are not currently connected.</p>
-            {exportState.error && <p className="settings-message is-error" role="alert">{exportState.error}</p>}
-            {exportState.notice && <p className="settings-message is-success" role="status">{exportState.notice}</p>}
-            <button className="student-button student-button--quiet" type="button" onClick={downloadData} disabled={exportState.loading || isLoading}>
-              {exportState.loading ? 'Preparing report…' : 'Download my data'}
-            </button>
-          </SettingsSection>
+              <SettingsSection title="Your LMS Data" description="Generate a copy of account details and LMS records currently available for your account.">
+                <p className="settings-note">The report includes your account information and support requests, when available. Enrollment, course-progress, purchase, and achievement records are not currently connected.</p>
+                {exportState.error && <p className="settings-message is-error" role="alert">{exportState.error}</p>}
+                {exportState.notice && <p className="settings-message is-success" role="status">{exportState.notice}</p>}
+                <button className="student-button student-button--quiet" type="button" onClick={downloadData} disabled={exportState.loading || isLoading}>
+                  {exportState.loading ? 'Preparing report…' : 'Download my data'}
+                </button>
+              </SettingsSection>
+            </>
+          )}
 
           <SettingsSection title="Delete Account" description="This action is not currently available." className="settings-delete-section">
             <div className="settings-delete-warning">

@@ -72,7 +72,12 @@ const collegeAdminFields = {
   activationTokenExpiresAt: { type: Date, select: false },
 }
 
-export const Admin = createAccountModel('Admin', 'admin', 'main_admin')
+const adminFields = {
+  phone: { type: String, trim: true, maxlength: 40, default: '' },
+  avatarUrl: { type: String, trim: true, maxlength: 1000, default: '' },
+}
+
+export const Admin = createAccountModel('Admin', 'admin', 'main_admin', adminFields)
 export const CollegeAdmin = createAccountModel('CollegeAdmin', 'sub_admins', 'college_admin', collegeAdminFields)
 export const Student = createAccountModel('Student', 'students', 'student', independentStudentFields)
 export const CollegeStudent = createAccountModel('CollegeStudent', 'clg_students', 'student', collegeStudentFields)
