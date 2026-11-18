@@ -3086,6 +3086,24 @@ function AdminDashboard({
                   </dl>
                 </section>
 
+                <section className="admin-student-detail-section" aria-labelledby="admin-student-course-summary-title">
+                  <div className="admin-student-detail-section__heading">
+                    <h3 id="admin-student-course-summary-title">Course Summary</h3>
+                  </div>
+                  <div className="admin-student-course-summary">
+                    {[
+                      ['Courses Assigned', studentDetails.summary.coursesAssigned, 'sage'],
+                      ['Courses Enrolled', studentDetails.summary.coursesEnrolled, 'teal'],
+                      ['Completed Courses', studentDetails.summary.coursesCompleted, 'gold'],
+                    ].map(([label, count, tone]) => (
+                      <article className={`admin-student-course-summary__card is-${tone}`} key={label}>
+                        <span>{label}</span>
+                        <strong>{count}</strong>
+                      </article>
+                    ))}
+                  </div>
+                </section>
+
                 <section className="admin-student-detail-section" aria-labelledby="admin-student-referral-title">
                   <div className="admin-student-detail-section__heading">
                     <h3 id="admin-student-referral-title">Referral Details</h3>
@@ -3214,24 +3232,6 @@ function AdminDashboard({
                       ) : <p className="admin-student-no-data">No referral code generated</p>}
                     </>
                   )}
-                </section>
-
-                <section className="admin-student-detail-section" aria-labelledby="admin-student-course-summary-title">
-                  <div className="admin-student-detail-section__heading">
-                    <h3 id="admin-student-course-summary-title">Course Summary</h3>
-                  </div>
-                  <div className="admin-student-course-summary">
-                    {[
-                      ['Courses Assigned', studentDetails.summary.coursesAssigned, 'sage'],
-                      ['Courses Enrolled', studentDetails.summary.coursesEnrolled, 'teal'],
-                      ['Completed Courses', studentDetails.summary.coursesCompleted, 'gold'],
-                    ].map(([label, count, tone]) => (
-                      <article className={`admin-student-course-summary__card is-${tone}`} key={label}>
-                        <span>{label}</span>
-                        <strong>{count}</strong>
-                      </article>
-                    ))}
-                  </div>
                 </section>
 
               </>
