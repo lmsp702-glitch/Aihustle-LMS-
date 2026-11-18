@@ -297,3 +297,36 @@ export async function sendSupportTicketComplaintEmail({ email, fullName, ticket 
     ].join('\n'),
   })
 }
+
+export async function sendEmailSupportMessage({ email, fullName, subject, message }) {
+  await sendEmail({
+    to: 'aihustle.notification@gmail.com',
+    subject: `AIHustle LMS Email Support: ${subject}`,
+    text: [
+      'A student submitted an Email Support request.',
+      '',
+      `Student: ${fullName}`,
+      `Email: ${email}`,
+      `Subject: ${subject}`,
+      '',
+      'Message:',
+      message,
+    ].join('\n'),
+  })
+}
+
+export async function sendEmailSupportReply({ email, fullName, subject, message }) {
+  await sendEmail({
+    to: email,
+    subject: `Re: ${subject}`,
+    text: [
+      `Hello${fullName ? ` ${fullName}` : ''},`,
+      '',
+      'The AIHustle LMS support team replied to your Email Support request:',
+      '',
+      `Subject: ${subject}`,
+      '',
+      message,
+    ].join('\n'),
+  })
+}

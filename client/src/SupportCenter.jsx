@@ -3,7 +3,6 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { API_BASE_URL } from './api-base-url.js'
 import './SupportCenter.css'
 
-const supportEmail = import.meta.env.VITE_SUPPORT_EMAIL?.trim() || ''
 const ticketCategories = [
   'Account and Login',
   'Course and Enrollment',
@@ -153,56 +152,92 @@ export function HelpCenterHome() {
 }
 
 export function EmailSupportPage({ user }) {
-  const [values, setValues] = useState({
-    name: user?.fullName || '',
+  const [profile, setProfile] = useState({
+    fullName: user?.fullName || '',
     email: user?.email || '',
-    subject: '',
-    message: '',
   })
+  const [subject, setSubject] = useState('')
+  const [message, setMessage] = useState('')
+  const [profileError, setProfileError] = useState('')
+  const [isLoadingProfile, setIsLoadingProfile] = useState(true)
+  const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const submissionLock = useRef(false)
 
   useEffect(() => {
-    setValues((current) => ({
-      ...current,
-      name: user?.fullName || '',
-      email: user?.email || '',
-    }))
-  }, [user?.fullName, user?.email])
+    let active = true
+    complaintRequest('/profile')
+      .then((result) => {
+        if (!result.student) throw new Error('Your student profile could not be loaded.')
+        if (active) setProfile(result.student)
+      })
+      .catch((profileRequestError) => {
+        if (active) {
+          setProfileError(profileRequestError instanceof Error
+            ? profileRequestError.message
+            : 'Your student profile could not be loaded.')
+        }
+      })
+      .finally(() => {
+        if (active) setIsLoadingProfile(false)
+      })
+    return () => { active = false }
+  }, [])
 
-  function updateValue(event) {
-    const { name, value } = event.currentTarget
-    setValues((current) => ({ ...current, [name]: value }))
-    setNotice('')
-  }
-
-  function submitEmail(event) {
+  async function submitEmail(event) {
     event.preventDefault()
-    if (!supportEmail) {
-      setNotice('Email support is not configured yet. Please submit a support ticket instead.')
-      return
+    if (submissionLock.current) return
+    submissionLock.current = true
+    setIsSubmitting(true)
+    setError('')
+    setNotice('')
+    try {
+      const result = await complaintRequest('/email-support', {
+        method: 'POST',
+        body: JSON.stringify({ subject, message }),
+      })
+      setSubject('')
+      setMessage('')
+      if (result.emailSent === false) {
+        setError(result.message || 'Your message was saved, but its email notification could not be sent. Please do not resubmit.')
+      } else {
+        setNotice(`Your support message ${result.complaint?.complaintId || ''} was sent successfully.`.trim())
+      }
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Your support message could not be submitted.')
+    } finally {
+      submissionLock.current = false
+      setIsSubmitting(false)
     }
-    const body = `Name: ${values.name.trim()}\nEmail: ${values.email.trim()}\n\n${values.message.trim()}`
-    window.location.href = `mailto:${encodeURIComponent(supportEmail)}?subject=${encodeURIComponent(values.subject.trim())}&body=${encodeURIComponent(body)}`
-    setNotice('Your email application is opening. Review the request and send it there.')
   }
 
   return (
     <SupportPage eyebrow="CONTACT THE LMS TEAM" title="Email Support">
-      {!supportEmail && (
-        <div className="support-notice is-warning" role="status">
-          Email support is not configured yet. Configure the official VITE_SUPPORT_EMAIL setting to enable this form.
-        </div>
+      <p className="support-page-intro">Your account name and email are securely added from your student profile.</p>
+      {isLoadingProfile ? <p className="support-loading" role="status">Loading your profile…</p> : profileError ? (
+        <div className="support-notice is-error" role="alert">{profileError}</div>
+      ) : (
+        <form className="support-form" onSubmit={submitEmail}>
+          <div className="support-form__grid">
+            <label>Name<input autoComplete="name" value={profile.fullName || ''} readOnly required /></label>
+            <label>Email<input type="email" autoComplete="email" value={profile.email || ''} readOnly required /></label>
+          </div>
+          <label>Subject<input value={subject} onChange={(event) => {
+            setSubject(event.currentTarget.value)
+            setError('')
+          }} required minLength={3} maxLength={160} disabled={isSubmitting} /></label>
+          <label>Message<textarea value={message} onChange={(event) => {
+            setMessage(event.currentTarget.value)
+            setError('')
+          }} required minLength={10} maxLength={10000} rows={7} disabled={isSubmitting} /></label>
+          {error && <div className="support-notice is-error" role="alert">{error}</div>}
+          {notice && <div className="support-notice is-success" role="status">{notice}</div>}
+          <button className="student-button" type="submit" disabled={isSubmitting}>
+            {isSubmitting ? 'Sending…' : 'Send support message'}
+          </button>
+        </form>
       )}
-      <form className="support-form" onSubmit={submitEmail}>
-        <div className="support-form__grid">
-          <label>Name<input name="name" autoComplete="name" value={values.name} onChange={updateValue} required maxLength={120} /></label>
-          <label>Email<input name="email" type="email" autoComplete="email" value={values.email} onChange={updateValue} required maxLength={254} /></label>
-        </div>
-        <label>Subject<input name="subject" value={values.subject} onChange={updateValue} required minLength={3} maxLength={160} /></label>
-        <label>Message<textarea name="message" value={values.message} onChange={updateValue} required minLength={10} maxLength={10000} rows={7} /></label>
-        <button className="student-button" type="submit" disabled={!supportEmail}>Continue to email</button>
-        {notice && <p className="support-form__notice" role="status">{notice}</p>}
-      </form>
     </SupportPage>
   )
 }

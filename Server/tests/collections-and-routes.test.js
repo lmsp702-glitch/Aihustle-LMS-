@@ -646,7 +646,7 @@ test('main admin ticket details identify the student creator instead of the assi
     userId: studentId,
     userCollection: 'students',
     assignedTo: handlerId,
-    status: 'Open',
+    status: 'Unsolved',
     priority: 'Medium',
     category: 'Course access',
     description: 'Unable to open the course.',
@@ -900,6 +900,269 @@ test('Feedback and Complaints use separate student submission APIs with Main Adm
       subject: collegeAdminId,
     })
     assert.equal(collegeAdminComplaints.status, 403)
+  } finally {
+    restores.reverse().forEach((restore) => restore())
+  }
+})
+
+test('Email Support saves authenticated messages, reports delivery failures, and enables Main Admin replies and status updates', async () => {
+  const studentId = '68a000000000000000000060'
+  const otherStudentId = '68a000000000000000000061'
+  const adminId = '68a000000000000000000062'
+  const student = {
+    _id: new mongoose.Types.ObjectId(studentId),
+    role: 'student',
+    studentType: 'independent',
+    status: 'active',
+    approvalStatus: 'approved',
+    isActive: true,
+    fullName: 'Verified Student',
+    studentId: 'STU-060',
+    email: 'verified.student@example.invalid',
+    select() { return this },
+    lean: async function leanStudent() { return this },
+  }
+  const created = []
+  const sentMessages = []
+  let failEmail = false
+  const emailComplaint = {
+    _id: new mongoose.Types.ObjectId('68a000000000000000000063'),
+    complaintId: 'CMP-EMAIL-SUPPORT',
+    userId: student._id,
+    userCollection: 'students',
+    studentName: student.fullName,
+    studentId: student.studentId,
+    studentEmail: student.email,
+    source: 'Email Support',
+    priority: 'Normal',
+    subject: 'Access to a course',
+    category: 'Email Support',
+    description: 'I cannot open the course materials after enrolling.',
+    status: 'Open',
+    replies: [],
+    statusHistory: [],
+    createdAt: new Date(),
+    toObject() {
+      return {
+        _id: this._id,
+        complaintId: this.complaintId,
+        userId: this.userId,
+        userCollection: this.userCollection,
+        studentName: this.studentName,
+        studentId: this.studentId,
+        studentEmail: this.studentEmail,
+        source: this.source,
+        priority: this.priority,
+        subject: this.subject,
+        category: this.category,
+        description: this.description,
+        status: this.status,
+        replies: this.replies,
+        statusHistory: this.statusHistory,
+        createdAt: this.createdAt,
+      }
+    },
+    async save() {},
+  }
+  const standardComplaint = {
+    ...emailComplaint,
+    _id: new mongoose.Types.ObjectId('68a000000000000000000064'),
+    complaintId: 'CMP-STANDARD',
+    source: 'Complaint',
+    category: 'Other',
+    status: 'Unsolved',
+    replies: [],
+    statusHistory: [],
+  }
+  const restores = [
+    stub(Student, 'findById', (id) => ({
+      ...student,
+      _id: new mongoose.Types.ObjectId(String(id)),
+      select() { return this },
+      lean: async function leanStudent() {
+        return { ...student, _id: new mongoose.Types.ObjectId(String(id)) }
+      },
+    })),
+    stub(Student, 'find', () => queryResult([student])),
+    stub(CollegeStudent, 'find', () => queryResult([])),
+    stub(Admin, 'findById', (id) => ({
+      _id: new mongoose.Types.ObjectId(String(id)),
+      role: 'main_admin',
+      status: 'active',
+      isActive: true,
+    })),
+    stub(Complaint, 'create', async (values) => {
+      const record = {
+        _id: new mongoose.Types.ObjectId(`68a0000000000000000000${String(70 + created.length)}`),
+        ...values,
+        createdAt: new Date(),
+        toObject() { return { ...this, toObject: undefined } },
+      }
+      created.push(record)
+      return record
+    }),
+    stub(Complaint, 'find', () => queryResult(created)),
+    stub(Complaint, 'findOne', (filter) => {
+      assert.equal(String(filter.userId), otherStudentId)
+      assert.equal(filter.userCollection, 'students')
+      return queryResult(null)
+    }),
+    stub(Complaint, 'findById', (id) => queryResult(
+      String(id) === String(standardComplaint._id) ? standardComplaint : emailComplaint,
+    )),
+    stubGmailTransport(async (mail) => {
+      if (failEmail) throw new Error('Simulated SMTP failure')
+      sentMessages.push(mail)
+      return { accepted: [mail.to], messageId: 'test-email-support-message' }
+    }),
+  ]
+  try {
+    const invalidRequest = await request('/complaints/email-support', {
+      role: 'student',
+      subject: studentId,
+      body: { subject: 'ok', message: 'short' },
+    })
+    assert.equal(invalidRequest.status, 400)
+    assert.equal(created.length, 0)
+
+    const invalidSubject = await request('/complaints/email-support', {
+      role: 'student',
+      subject: studentId,
+      body: {
+        subject: 'Course issue\r\nBcc: other@example.invalid',
+        message: 'A message with a subject that must be rejected.',
+      },
+    })
+    assert.equal(invalidSubject.status, 400)
+    assert.equal(created.length, 0)
+
+    const response = await request('/complaints/email-support', {
+      role: 'student',
+      subject: studentId,
+      body: {
+        name: 'Forged Student',
+        email: 'forged@example.invalid',
+        subject: 'Access to a course',
+        message: 'I cannot open the course materials after enrolling.',
+      },
+    })
+    const result = await response.json()
+    assert.equal(response.status, 201)
+    assert.equal(result.emailSent, true)
+    assert.equal(created[0].source, 'Email Support')
+    assert.equal(created[0].priority, 'Normal')
+    assert.equal(created[0].status, 'Unsolved')
+    assert.equal(created[0].studentName, 'Verified Student')
+    assert.equal(created[0].studentEmail, 'verified.student@example.invalid')
+    assert.equal(created[0].studentId, 'STU-060')
+    assert.equal(String(created[0].userId), studentId)
+    assert.equal(sentMessages[0].to, 'aihustle.notification@gmail.com')
+    assert.match(sentMessages[0].text, /Verified Student/)
+    assert.match(sentMessages[0].text, /verified\.student@example\.invalid/)
+    assert.match(sentMessages[0].text, /Access to a course/)
+    assert.match(sentMessages[0].text, /I cannot open the course materials after enrolling\./)
+    assert.doesNotMatch(sentMessages[0].text, /Forged Student|forged@example\.invalid/)
+
+    const otherStudentRead = await request(`/complaints/mine/${created[0]._id}`, {
+      role: 'student',
+      subject: otherStudentId,
+    })
+    assert.equal(otherStudentRead.status, 404)
+
+    const adminListResponse = await request('/complaints/admin', {
+      role: 'main_admin',
+      subject: adminId,
+    })
+    const adminList = await adminListResponse.json()
+    assert.equal(adminListResponse.status, 200)
+    assert.equal(adminList.complaints[0].source, 'Email Support')
+    assert.equal(adminList.complaints[0].requester.fullName, 'Verified Student')
+    assert.equal(adminList.complaints[0].requester.email, 'verified.student@example.invalid')
+
+    const replyResponse = await request(`/complaints/admin/${emailComplaint._id}/replies`, {
+      role: 'main_admin',
+      subject: adminId,
+      body: { message: 'We restored access to the course materials.' },
+    })
+    const replyResult = await replyResponse.json()
+    assert.equal(replyResponse.status, 200)
+    assert.equal(replyResult.emailSent, true)
+    assert.equal(emailComplaint.replies[0].message, 'We restored access to the course materials.')
+    assert.equal(emailComplaint.status, 'Open')
+    assert.equal(sentMessages[1].to, 'verified.student@example.invalid')
+    assert.match(sentMessages[1].text, /We restored access to the course materials\./)
+
+    const statusResponse = await request(`/complaints/admin/${emailComplaint._id}/status`, {
+      role: 'main_admin',
+      subject: adminId,
+      method: 'PATCH',
+      body: { status: 'Solved' },
+    })
+    const statusResult = await statusResponse.json()
+    assert.equal(statusResponse.status, 200, JSON.stringify(statusResult))
+    assert.equal(emailComplaint.status, 'Solved')
+    assert.equal(emailComplaint.statusHistory[0].to, 'Solved')
+
+    const reopenResponse = await request(`/complaints/admin/${emailComplaint._id}/status`, {
+      role: 'main_admin',
+      subject: adminId,
+      method: 'PATCH',
+      body: { status: 'Unsolved' },
+    })
+    assert.equal(reopenResponse.status, 200)
+    assert.equal(emailComplaint.status, 'Unsolved')
+    assert.equal(emailComplaint.statusHistory[1].from, 'Solved')
+    assert.equal(emailComplaint.statusHistory[1].to, 'Unsolved')
+    assert.equal(emailComplaint.replies.length, 1)
+    assert.equal(sentMessages.length, 2)
+
+    const standardSolvedResponse = await request(`/complaints/admin/${standardComplaint._id}/status`, {
+      role: 'main_admin',
+      subject: adminId,
+      method: 'PATCH',
+      body: { status: 'Solved' },
+    })
+    assert.equal(standardSolvedResponse.status, 200)
+    assert.equal(standardComplaint.status, 'Solved')
+    assert.equal(standardComplaint.statusHistory[0].to, 'Solved')
+    assert.equal(standardComplaint.replies.length, 0)
+    assert.equal(sentMessages.length, 2)
+
+    const standardUnsolvedResponse = await request(`/complaints/admin/${standardComplaint._id}/status`, {
+      role: 'main_admin',
+      subject: adminId,
+      method: 'PATCH',
+      body: { status: 'Unsolved' },
+    })
+    assert.equal(standardUnsolvedResponse.status, 200)
+    assert.equal(standardComplaint.status, 'Unsolved')
+    assert.equal(standardComplaint.statusHistory[1].to, 'Unsolved')
+
+    failEmail = true
+    const failedDeliveryResponse = await request('/complaints/email-support', {
+      role: 'student',
+      subject: studentId,
+      body: {
+        subject: 'Another course issue',
+        message: 'The second request must still be stored if SMTP is unavailable.',
+      },
+    })
+    const failedDelivery = await failedDeliveryResponse.json()
+    assert.equal(failedDeliveryResponse.status, 201)
+    assert.equal(failedDelivery.emailSent, false)
+    assert.match(failedDelivery.message, /was saved/)
+    assert.equal(created.length, 2)
+    assert.equal(created[1].source, 'Email Support')
+
+    const deniedSubmission = await request('/complaints/email-support', {
+      role: 'main_admin',
+      subject: adminId,
+      body: {
+        subject: 'Unauthorized',
+        message: 'This account cannot submit an Email Support message.',
+      },
+    })
+    assert.equal(deniedSubmission.status, 403)
   } finally {
     restores.reverse().forEach((restore) => restore())
   }
