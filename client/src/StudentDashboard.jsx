@@ -4653,10 +4653,16 @@ function StudentReferrals({ onLogout }) {
       setReferralData(result)
     } catch (generateError) {
       if (generateError?.statusCode === 429) {
-        setReferralData((current) => current && ({
-          ...current,
-          stats: { ...current.stats, totalGenerated: current.stats.totalLimit, remaining: 0 },
-        }))
+        setReferralData((current) => {
+          if (!current) return current
+          const totalLimit = Number.isSafeInteger(current.stats?.totalLimit)
+            ? current.stats.totalLimit
+            : 20
+          return {
+            ...current,
+            stats: { ...current.stats, totalGenerated: totalLimit, totalLimit, remaining: 0 },
+          }
+        })
       }
       setError(generateError instanceof Error ? generateError.message : 'A referral code could not be generated.')
     } finally {
@@ -4675,13 +4681,25 @@ function StudentReferrals({ onLogout }) {
     }
   }
 
-  const stats = referralData?.stats || {
-    totalGenerated: 0,
-    totalLimit: 20,
-    remaining: 20,
-    successfullyUsed: 0,
-    active: 0,
-    expired: 0,
+  const rawStats = referralData?.stats || {}
+  const totalLimit = Number.isSafeInteger(rawStats.totalLimit) && rawStats.totalLimit >= 0
+    ? rawStats.totalLimit
+    : 20
+  const totalGenerated = Number.isSafeInteger(rawStats.totalGenerated) && rawStats.totalGenerated >= 0
+    ? rawStats.totalGenerated
+    : 0
+  const stats = {
+    ...rawStats,
+    totalGenerated,
+    totalLimit,
+    remaining: Number.isSafeInteger(rawStats.remaining) && rawStats.remaining >= 0
+      ? rawStats.remaining
+      : Math.max(0, totalLimit - totalGenerated),
+    successfullyUsed: Number.isSafeInteger(rawStats.successfullyUsed) && rawStats.successfullyUsed >= 0
+      ? rawStats.successfullyUsed
+      : 0,
+    active: Number.isSafeInteger(rawStats.active) && rawStats.active >= 0 ? rawStats.active : 0,
+    expired: Number.isSafeInteger(rawStats.expired) && rawStats.expired >= 0 ? rawStats.expired : 0,
   }
   const summary = [
     { label: 'Total codes generated', value: `${stats.totalGenerated}/${stats.totalLimit}`, tone: 'gold' },
