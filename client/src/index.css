@@ -133,7 +133,6 @@ textarea:focus-visible {
 }
 
 :root[data-theme='dark'] .student-sidebar__link:hover,
-:root[data-theme='dark'] .student-sidebar__logout:hover,
 :root[data-theme='dark'] .student-icon-button:hover,
 :root[data-theme='dark'] .student-topbar .student-theme-toggle:hover {
   border-color: #46564d;
@@ -145,10 +144,6 @@ textarea:focus-visible {
   border-color: #776533;
   background: #383321;
   color: #f0dfaa;
-}
-
-:root[data-theme='dark'] .student-sidebar__bottom {
-  border-color: var(--theme-border);
 }
 
 :root[data-theme='dark'] .student-panel,
@@ -351,8 +346,7 @@ textarea:focus-visible {
 }
 
 :root[data-theme='dark'] .workspace-topbar__logout,
-:root[data-theme='dark'] .admin-nav__item,
-:root[data-theme='dark'] .student-sidebar__logout {
+:root[data-theme='dark'] .admin-nav__item {
   color: var(--theme-muted);
 }
 

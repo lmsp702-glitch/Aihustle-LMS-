@@ -287,7 +287,9 @@ test('referral generation enforces a lifetime per-user limit, redemption, histor
   assert.equal(generated.filter(({ response }) => response.status === 429).length, 1)
   const codes = successful.map(({ result }) => result.code)
   assert.equal(new Set(codes.map(({ code }) => code)).size, 20)
-  assert.ok(codes.every(({ code }) => /^LMS-[A-F0-9]{32}$/.test(code)))
+  assert.ok(codes.every(({ code }) => (
+    /^[A-Z0-9]{6}$/.test(code) && /[A-Z]/.test(code) && /[0-9]/.test(code)
+  )))
   assert.equal(
     new originalDate(codes[0].expiresAt).getTime() - new originalDate(codes[0].createdAt).getTime(),
     12 * 60 * 60 * 1000,

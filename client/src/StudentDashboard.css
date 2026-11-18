@@ -113,7 +113,7 @@
   flex: 0 0 auto;
 }
 
-.student-sidebar__link > span:not(.student-sidebar__soon) {
+.student-sidebar__link > span {
   min-width: 0;
   overflow-wrap: anywhere;
 }
@@ -132,23 +132,6 @@
 
 .student-sidebar__link.is-active svg {
   color: #94701f;
-}
-
-.student-sidebar__soon {
-  margin-left: auto;
-  padding: 3px 6px;
-  border-radius: 5px;
-  background: #ebece3;
-  color: #5f665d;
-  font-size: 8px;
-  font-weight: 650;
-}
-
-.student-sidebar__bottom {
-  flex: 0 0 auto;
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid #e3dfd3;
 }
 
 .student-avatar {
@@ -183,27 +166,6 @@
 .student-profile-trigger__copy small {
   color: #626960;
   font-size: 10px;
-}
-
-.student-sidebar__logout {
-  display: flex;
-  width: 100%;
-  min-height: 38px;
-  align-items: center;
-  gap: 10px;
-  padding: 0 11px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: #646a62;
-  font-size: 10px;
-  cursor: pointer;
-  text-align: left;
-}
-
-.student-sidebar__logout:hover {
-  background: #f7f1e7;
-  color: #8c6441;
 }
 
 .student-main {
@@ -4982,8 +4944,7 @@ button.student-category {
 }
 
 .student-dashboard .student-sidebar__identity small,
-.student-dashboard .student-profile-trigger__copy small,
-.student-dashboard .student-sidebar__logout {
+.student-dashboard .student-profile-trigger__copy small {
   color: #53615c;
   font-size: 11px;
 }
@@ -5118,97 +5079,334 @@ button.student-category {
 
 .student-referrals {
   display: grid;
-  gap: 18px;
+  gap: 14px;
 }
 
-.student-referrals__intro {
+.student-referrals__hero {
+  display: grid;
+  min-height: 208px;
+  grid-template-columns: minmax(0, 0.95fr) 1px minmax(0, 1.25fr);
+  align-items: center;
+  gap: 24px;
+  padding: 20px 24px;
+  overflow: hidden;
+  border: 1px solid #e5dfcd;
+  border-radius: 16px;
+  background:
+    radial-gradient(circle at 82% 18%, rgba(245, 236, 195, 0.5), transparent 25%),
+    linear-gradient(112deg, #f8f8ef 0%, #fffaf0 58%, #e7f0e5 100%);
+  box-shadow: 0 3px 12px rgba(53, 65, 53, 0.035);
+}
+
+.student-referrals__code-panel {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+}
+
+.student-referrals__code-label {
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  color: #426d60;
+  font-size: 11px;
+  font-weight: 730;
+  letter-spacing: 0.11em;
+}
+
+.student-referrals__code-value {
+  display: flex;
+  min-height: 60px;
   align-items: center;
   justify-content: space-between;
-  gap: 16px 24px;
+  gap: 12px;
+  padding: 8px 16px 8px 20px;
+  border-radius: 15px;
+  background: rgba(224, 237, 222, 0.82);
 }
 
-.student-referrals__intro h1 {
-  margin: 8px 0 5px;
-  color: #202c28;
-  font-size: clamp(22px, 2.4vw, 29px);
-  font-weight: 650;
-  letter-spacing: -0.035em;
+.student-referrals__code-value strong {
+  min-width: 0;
+  color: #315b50;
+  font-family: var(--font-mono, monospace);
+  font-size: clamp(23px, 3vw, 34px);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  overflow-wrap: anywhere;
 }
 
-.student-referrals__intro p {
+.student-referrals__code-value > span:not(.student-page-skeleton) {
+  color: #69766d;
+  font-size: 14px;
+}
+
+.student-referrals__copy-current {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid rgba(68, 109, 95, 0.12);
+  border-radius: 50%;
+  background: #fffdf7;
+  color: #3a695c;
+}
+
+.student-referrals__copy-current:hover,
+.student-referrals__copy-row:hover {
+  background: #edf4ed;
+}
+
+.student-referrals__code-expiry {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
   margin: 0;
-  color: #53615c;
-  font-size: 13px;
+  color: #567d6a;
+  font-size: 10px;
   line-height: 1.5;
 }
 
+.student-referrals__code-expiry > span {
+  display: grid;
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 50%;
+  background: #42a675;
+  color: white;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.student-referrals__hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 9px;
+}
+
+.student-referrals__share,
+.student-referrals__generate {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 14px;
+  border: 1px solid #315d51;
+  border-radius: 20px;
+  background: #315d51;
+  color: #fffdf7;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.student-referrals__share:hover {
+  background: #244b40;
+}
+
+.student-referrals__share:disabled,
+.student-referrals__generate:disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
+}
+
+.student-referrals__generate {
+  border-color: #d6d8ca;
+  background: rgba(255, 253, 247, 0.68);
+  color: #45675b;
+}
+
+.student-referrals__generate:hover {
+  background: #fffdf7;
+}
+
 .student-referrals__limit {
-  width: 100%;
-  padding-top: 12px;
-  border-top: 1px solid #e8e5db;
+  margin: 2px 0 0;
+  color: #806b3e;
+  font-size: 10px;
+}
+
+.student-referrals__hero-divider {
+  width: 1px;
+  height: 100%;
+  min-height: 138px;
+  background: #e4dfd1;
+}
+
+.student-referrals__invite {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.student-referrals__invite h1 {
+  margin: 0 0 8px;
+  color: #263d4b;
+  font-size: clamp(20px, 2.4vw, 27px);
+  font-weight: 680;
+  letter-spacing: -0.035em;
+}
+
+.student-referrals__invite p {
+  max-width: 330px;
+  margin: 0;
+  color: #53615c;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.student-referrals__gift-illustration {
+  width: clamp(110px, 18vw, 178px);
+  max-height: 145px;
+  flex: 0 0 auto;
 }
 
 .student-referrals__summary {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.student-referrals__summary .student-stat {
-  min-height: 124px;
-  padding: 14px 12px;
-}
-
-.student-referrals__summary .student-stat__label {
-  font-size: 11px;
-}
-
-.student-referrals__summary .student-stat__value {
-  overflow-wrap: anywhere;
-}
-
-.student-referrals__history .student-section-heading {
-  margin-bottom: 17px;
-}
-
-.student-referrals__list {
-  display: grid;
-  gap: 11px;
-}
-
-.student-referral-card {
-  min-width: 0;
-  padding: 14px 15px;
-  border: 1px solid #e4e1d7;
-  border-radius: 9px;
-  background: var(--student-paper);
-}
-
-.student-referral-card__top {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
   gap: 10px;
 }
 
-.student-referral-card__code {
-  margin-right: auto;
-  color: #26332f;
-  font-family: var(--font-mono, monospace);
-  font-size: 14px;
-  letter-spacing: 0.04em;
+.student-referrals__summary .student-stat {
+  min-height: 82px;
+  grid-template-columns: 31px minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  align-items: center;
+  column-gap: 8px;
+  padding: 11px 10px;
+}
+
+.student-referrals__summary .student-stat__icon {
+  width: 30px;
+  height: 30px;
+}
+
+.student-referrals__summary .student-stat__icon.is-lavender {
+  background: #efebf5;
+  color: #716188;
+}
+
+.student-referrals__summary .student-stat__label {
+  font-size: 10px;
+}
+
+.student-referrals__summary .student-stat__value {
+  margin-top: 2px;
+  font-size: 18px;
   overflow-wrap: anywhere;
 }
 
+.student-referrals__history {
+  min-width: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.student-referrals__history-heading {
+  display: flex;
+  min-height: 58px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 19px;
+  border-bottom: 1px solid #e9e5db;
+}
+
+.student-referrals__history-heading h2 {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0;
+  color: #283d48;
+  font-size: 17px;
+  font-weight: 660;
+}
+
+.student-referrals__view-all {
+  padding: 5px 0;
+  border: 0;
+  background: transparent;
+  color: #4c7063;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.student-referrals__view-all:hover {
+  color: #244b40;
+  text-decoration: underline;
+}
+
+.student-referrals__table-wrap {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.student-referrals__table {
+  width: 100%;
+  min-width: 650px;
+  border-collapse: collapse;
+  text-align: left;
+}
+
 .student-referral-card__status {
-  padding: 4px 8px;
-  border-radius: 12px;
+  display: inline-flex;
+  padding: 5px 10px;
+  border-radius: 14px;
   background: #e8f1e8;
   color: #3f7968;
   font-size: 10px;
+  font-weight: 600;
   text-transform: capitalize;
+}
+
+.student-referrals__table th,
+.student-referrals__table td {
+  padding: 11px 16px;
+  border-bottom: 1px solid #eeece5;
+  color: #37433f;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.student-referrals__table th {
+  background: #fbfaf6;
+  color: #5c6861;
+  font-weight: 560;
+}
+
+.student-referrals__table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.student-referrals__history-code {
+  color: #2f4249;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  letter-spacing: 0.03em;
+}
+
+.student-referrals__copy-row {
+  display: inline-flex;
+  min-height: 29px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 9px;
+  border: 1px solid #e0dfd6;
+  border-radius: 16px;
+  background: #fffdf7;
+  color: #45675b;
+  font-size: 10px;
+  font-weight: 560;
+}
+
+.student-referrals__no-action {
+  color: #8a908b;
 }
 
 .student-referral-card__status.is-used {
@@ -5217,47 +5415,66 @@ button.student-category {
 }
 
 .student-referral-card__status.is-expired {
-  background: #f3eee1;
-  color: #796840;
+  background: #eceff1;
+  color: #626c78;
 }
 
-.student-referral-card dl {
+.student-referrals__loading {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px 20px;
-  margin: 14px 0 0;
+  gap: 9px;
+  padding: 14px 18px;
 }
 
-.student-referral-card dl > div {
-  min-width: 0;
+.student-referrals__loading .student-page-skeleton {
+  width: 100%;
+  height: 30px;
 }
 
-.student-referral-card dt {
-  margin-bottom: 4px;
-  color: #657069;
-  font-size: 10px;
+.student-referrals__history .student-empty-state {
+  margin: 18px;
 }
 
-.student-referral-card dd {
-  margin: 0;
-  color: #26332f;
-  font-size: 12px;
-  text-transform: capitalize;
-  overflow-wrap: anywhere;
-}
-
-:root[data-theme='dark'] .student-dashboard .student-referrals__intro h1,
-:root[data-theme='dark'] .student-dashboard .student-referral-card__code,
-:root[data-theme='dark'] .student-dashboard .student-referral-card dd {
+:root[data-theme='dark'] .student-dashboard .student-referrals__code-value strong,
+:root[data-theme='dark'] .student-dashboard .student-referrals__invite h1,
+:root[data-theme='dark'] .student-dashboard .student-referrals__history-heading h2,
+:root[data-theme='dark'] .student-dashboard .student-referrals__history-code {
   color: var(--theme-ink);
 }
 
-:root[data-theme='dark'] .student-dashboard .student-referrals__intro p,
-:root[data-theme='dark'] .student-dashboard .student-referral-card dt {
+:root[data-theme='dark'] .student-dashboard .student-referrals__invite p {
   color: var(--theme-muted);
 }
 
-:root[data-theme='dark'] .student-dashboard .student-referral-card {
+:root[data-theme='dark'] .student-dashboard .student-referrals__hero {
+  border-color: var(--theme-border);
+  background: linear-gradient(112deg, #202a27 0%, #2b2c26 58%, #24302a 100%);
+}
+
+:root[data-theme='dark'] .student-dashboard .student-referrals__code-value {
+  background: rgba(90, 126, 109, 0.22);
+}
+
+:root[data-theme='dark'] .student-dashboard .student-referrals__copy-current,
+:root[data-theme='dark'] .student-dashboard .student-referrals__copy-row,
+:root[data-theme='dark'] .student-dashboard .student-referrals__generate,
+:root[data-theme='dark'] .student-dashboard .student-referrals__table th {
+  border-color: var(--theme-border);
+  background: var(--theme-surface-raised);
+  color: var(--theme-ink);
+}
+
+:root[data-theme='dark'] .student-dashboard .student-referrals__history-heading,
+:root[data-theme='dark'] .student-dashboard .student-referrals__table th,
+:root[data-theme='dark'] .student-dashboard .student-referrals__table td {
+  border-color: var(--theme-border);
+}
+
+:root[data-theme='dark'] .student-dashboard .student-referrals__table th,
+:root[data-theme='dark'] .student-dashboard .student-referrals__table td {
+  color: var(--theme-ink);
+}
+
+:root[data-theme='dark'] .student-dashboard .student-referrals__history {
   border-color: var(--theme-border);
   background: var(--theme-surface-raised);
 }
@@ -5269,12 +5486,42 @@ button.student-category {
 }
 
 @media (max-width: 680px) {
+  .student-referrals__hero {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 15px;
+    padding: 18px;
+  }
+
+  .student-referrals__hero-divider {
+    width: 100%;
+    height: 1px;
+    min-height: 0;
+  }
+
+  .student-referrals__gift-illustration {
+    width: 112px;
+  }
+
+  .student-referrals__invite {
+    gap: 5px;
+  }
+
   .student-referrals__summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .student-referral-card dl {
-    gap: 10px 12px;
+  .student-referrals__history-heading {
+    padding: 12px 15px;
+  }
+
+  .student-referrals__table {
+    min-width: 610px;
+  }
+
+  .student-referrals__table th,
+  .student-referrals__table td {
+    padding-right: 12px;
+    padding-left: 12px;
   }
 }
 
@@ -5536,7 +5783,7 @@ button.student-category {
 }
 
 .student-enrolled-course__completed {
-  transform: translateX(15px);
+  transform: translateX(25px);
   padding: 5px 8px;
   border: 1px solid #c9ddca;
   border-radius: 6px;

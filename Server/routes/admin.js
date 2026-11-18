@@ -3466,7 +3466,7 @@ router.delete('/students/:studentId', ...requireAdmin, async (req, res, next) =>
 router.get('/referral-codes/:code/details', ...requireAdmin, async (req, res, next) => {
   try {
     const codeValue = req.params.code
-    if (typeof codeValue !== 'string' || codeValue.length < 8 || codeValue.length > 64) {
+    if (typeof codeValue !== 'string' || codeValue.length < 6 || codeValue.length > 64) {
       return res.status(400).json({ message: 'Select a valid referral code.' })
     }
 

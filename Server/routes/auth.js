@@ -587,7 +587,7 @@ router.post('/register', async (req, res, next) => {
     }
     let referralCode
     if (submittedReferralCode !== undefined) {
-      if (typeof submittedReferralCode !== 'string' || submittedReferralCode.trim().length < 8 || submittedReferralCode.trim().length > 64) {
+      if (typeof submittedReferralCode !== 'string' || submittedReferralCode.trim().length < 6 || submittedReferralCode.trim().length > 64) {
         return res.status(400).json({ message: 'Enter a valid referral code.' })
       }
       referralCode = submittedReferralCode.trim().toUpperCase()

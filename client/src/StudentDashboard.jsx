@@ -33,6 +33,8 @@ const studentCourseContentRequests = new Map()
 const studentCourseLearningSeeds = new Map()
 const studentPageCertificateRequests = new Map()
 const studentResultsCache = new Map()
+const studentReferralCache = new Map()
+const studentReferralRequests = new Map()
 const COURSE_NOTES_KEY = 'course-notes'
 const COURSE_RESOURCES_KEY = 'course-resources'
 const COURSE_CERTIFICATE_KEY = 'course-certificate'
@@ -52,7 +54,6 @@ const navigation = [
   { label: 'Assignments', icon: 'check', path: '/student/assignments' },
   { label: 'Grades & Results', icon: 'chart', path: '/student/results' },
   { label: 'Learning Resources', icon: 'folder', path: '/student/resources' },
-  { label: 'Messages', icon: 'message', path: '/student/messages' },
   { label: 'Certificates', icon: 'award', path: '/student/certificates' },
   { label: 'My Referrals', icon: 'users', path: '/student/referrals' },
   { label: 'My Profile', icon: 'user', path: '/student/profile' },
@@ -100,7 +101,6 @@ const categories = [
 const tools = [
   { title: 'Grades & Results', description: 'View your quiz and assignment scores.', icon: 'chart', id: 'student-grades', path: '/student/results' },
   { title: 'Learning Resources', description: 'Access course notes and learning materials.', icon: 'folder', id: 'student-resources', path: '/student/resources' },
-  { title: 'Messages', description: 'Open course conversations and updates.', icon: 'message', id: 'student-messages', path: '/student/messages' },
   { title: 'Certificates', description: 'View and download your earned certificates.', icon: 'award', id: 'student-certificates', path: '/student/certificates' },
   { title: 'My Profile', description: 'Review your personal and academic details.', icon: 'user', id: 'student-profile', path: '/student/profile' },
   { title: 'Settings', description: 'Manage your account and preferences.', icon: 'settings', id: 'student-settings', path: '/student/settings' },
@@ -114,7 +114,6 @@ function Icon({ name, size = 19 }) {
     play: <><circle cx="12" cy="12" r="9" /><path d="m10 8 6 4-6 4z" /></>,
     clipboardCheck: <><rect x="8" y="4" width="8" height="4" rx="1" /><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" /><path d="m9 14 2 2 4-4" /></>,
     chartNoAxesCombined: <><path d="M3 3v18h18" /><path d="m19 9-5 5-4-4-5 5" /></>,
-    messageCircle: <><path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5 8 8 0 0 1-3.5-.8L4 20l1.5-4A7.5 7.5 0 1 1 20 11.5Z" /><path d="M8 11h.01M12 11h.01M16 11h.01" /></>,
     userRound: <><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" /></>,
     circleHelp: <><circle cx="12" cy="12" r="9" /><path d="M9.6 9a2.5 2.5 0 1 1 4.5 1.5c-.9 1.1-2.1 1.3-2.1 3m0 3h.01" /></>,
     grid: <><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></>,
@@ -140,6 +139,9 @@ function Icon({ name, size = 19 }) {
     clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
     circleX: <><circle cx="12" cy="12" r="9" /><path d="m9 9 6 6m0-6-6 6" /></>,
     lock: <><rect x="4" y="10" width="16" height="11" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></>,
+    copy: <><rect x="8" y="8" width="12" height="12" rx="2" /><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" /></>,
+    share: <><circle cx="18" cy="5" r="3" /><circle cx="6" cy="12" r="3" /><circle cx="18" cy="19" r="3" /><path d="m8.7 10.6 6.6-4.2m-6.6 7 6.6 4.2" /></>,
+    gift: <><rect x="3" y="9" width="18" height="12" rx="1" /><path d="M2 6h20v4H2zm10 0v15m0-15H7.5a2.5 2.5 0 1 1 2.4-3.2L12 6Zm0 0h4.5a2.5 2.5 0 1 0-2.4-3.2L12 6Z" /></>,
     briefcase: <><rect x="3" y="7" width="18" height="14" rx="2" /><path d="M8 7V4h8v3m-13 5h18m-11 0v2h4v-2" /></>,
     code: <><path d="m8 7-5 5 5 5m8-10 5 5-5 5m-3-12-2 14" /></>,
     laptop: <><rect x="4" y="4" width="16" height="12" rx="1.5" /><path d="M2 20h20l-2-4H4z" /></>,
@@ -2587,7 +2589,7 @@ function StudentDashboardCourses({ onLogout, selectedCategory }) {
 
   useEffect(() => {
     let active = true
-    fetchMyEnrollments(onLogout)
+    fetchStudentPageEnrollments(onLogout)
       .then((loadedEnrollments) => {
         if (!active) return
         const cacheKey = getStudentPageCacheKey()
@@ -4685,36 +4687,85 @@ function formatReferralDate(value) {
     : new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
 }
 
+function formatReferralDay(value) {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime())
+    ? 'Date unavailable'
+    : new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(date)
+}
+
+function getReferralExpiryLabel(value) {
+  const expiresAt = new Date(value).getTime()
+  if (!Number.isFinite(expiresAt)) return 'Expiry unavailable'
+  const hoursRemaining = Math.ceil((expiresAt - Date.now()) / (60 * 60 * 1000))
+  if (hoursRemaining <= 0) return 'Expired'
+  return `Expires in ${hoursRemaining} ${hoursRemaining === 1 ? 'hour' : 'hours'}`
+}
+
+function getCachedStudentReferralData() {
+  const cacheKey = getStudentCertificateCacheKey()
+  const cached = cacheKey ? studentReferralCache.get(cacheKey) : null
+  if (!cached) return null
+  if (Date.now() - cached.savedAt >= studentLearningPageCacheTtlMs) {
+    studentReferralCache.delete(cacheKey)
+    return null
+  }
+  return cached.data
+}
+
+async function fetchStudentReferralData(onLogout) {
+  const cacheKey = getStudentCertificateCacheKey()
+  let request = cacheKey ? studentReferralRequests.get(cacheKey) : null
+  if (!request) {
+    request = referralsRequest('/referrals/me', { onLogout }).then((result) => {
+      if (!Array.isArray(result.codes) || !result.stats) {
+        throw new Error('The server returned invalid referral information.')
+      }
+      if (cacheKey) studentReferralCache.set(cacheKey, { data: result, savedAt: Date.now() })
+      return result
+    })
+    if (cacheKey) studentReferralRequests.set(cacheKey, request)
+  }
+  try {
+    return await request
+  } finally {
+    if (cacheKey && studentReferralRequests.get(cacheKey) === request) {
+      studentReferralRequests.delete(cacheKey)
+    }
+  }
+}
+
 function StudentReferrals({ onLogout }) {
-  const [referralData, setReferralData] = useState(null)
-  const [loading, setLoading] = useState(true)
+  const [initialReferralData] = useState(getCachedStudentReferralData)
+  const [referralData, setReferralData] = useState(initialReferralData)
+  const [loading, setLoading] = useState(!initialReferralData)
   const [generating, setGenerating] = useState(false)
   const [error, setError] = useState('')
   const [loadAttempt, setLoadAttempt] = useState(0)
   const [notice, setNotice] = useState('')
   const [copiedCode, setCopiedCode] = useState('')
+  const [showAllCodes, setShowAllCodes] = useState(false)
   const pendingRequestId = useRef('')
 
   useEffect(() => {
-    const controller = new AbortController()
-    setLoading(true)
+    let active = true
+    const cachedData = getCachedStudentReferralData()
+    if (cachedData) setReferralData(cachedData)
+    setLoading(!cachedData)
     setError('')
-    referralsRequest('/referrals/me', { onLogout, signal: controller.signal })
+    fetchStudentReferralData(onLogout)
       .then((result) => {
-        if (!Array.isArray(result.codes) || !result.stats) {
-          throw new Error('The server returned invalid referral information.')
-        }
-        setReferralData(result)
+        if (active) setReferralData(result)
       })
       .catch((loadError) => {
-        if (loadError.name !== 'AbortError') {
+        if (active) {
           setError(loadError instanceof Error ? loadError.message : 'Referral information could not be loaded.')
         }
       })
       .finally(() => {
-        if (!controller.signal.aborted) setLoading(false)
+        if (active) setLoading(false)
       })
-    return () => controller.abort()
+    return () => { active = false }
   }, [onLogout, loadAttempt])
 
   async function generateReferralCode() {
@@ -4735,7 +4786,7 @@ function StudentReferrals({ onLogout }) {
       })
       pendingRequestId.current = ''
       setNotice('Your referral code has been generated.')
-      const result = await referralsRequest('/referrals/me', { onLogout })
+      const result = await fetchStudentReferralData(onLogout)
       setReferralData(result)
     } catch (generateError) {
       if (generateError?.statusCode === 429) {
@@ -4767,6 +4818,36 @@ function StudentReferrals({ onLogout }) {
     }
   }
 
+  async function shareReferralCode(code) {
+    const url = new URL('/', window.location.origin)
+    url.searchParams.set('mode', 'register')
+    url.searchParams.set('referralCode', code)
+    const shareData = {
+      title: 'Join Morrow Learning',
+      text: `Use my referral code ${code} when you sign up.`,
+      url: url.toString(),
+    }
+
+    if (typeof navigator.share === 'function') {
+      try {
+        await navigator.share(shareData)
+        setNotice('Referral link shared.')
+        setError('')
+        return
+      } catch (shareError) {
+        if (shareError?.name === 'AbortError') return
+      }
+    }
+
+    try {
+      await navigator.clipboard.writeText(shareData.url)
+      setNotice('Referral link copied.')
+      setError('')
+    } catch {
+      setError('The referral link could not be shared. Please copy the code manually.')
+    }
+  }
+
   const rawStats = referralData?.stats || {}
   const totalLimit = Number.isSafeInteger(rawStats.totalLimit) && rawStats.totalLimit >= 0
     ? rawStats.totalLimit
@@ -4794,30 +4875,12 @@ function StudentReferrals({ onLogout }) {
     { label: 'Active codes', value: stats.active, tone: 'peach' },
     { label: 'Expired codes', value: stats.expired, tone: 'lavender' },
   ]
+  const referralCodes = referralData?.codes || []
+  const activeReferralCode = referralCodes.find((code) => code.status === 'active') || null
+  const visibleReferralCodes = showAllCodes ? referralCodes : referralCodes.slice(0, 3)
 
   return (
     <div className="student-referrals">
-      <section className="student-panel student-referrals__intro">
-        <div>
-          <span className="student-eyebrow">SHARE YOUR LEARNING JOURNEY</span>
-          <h1>My Referrals</h1>
-          <p>Invite a friend to join Morrow Learning with a one-time referral code.</p>
-        </div>
-        <button
-          className="student-button"
-          type="button"
-          onClick={generateReferralCode}
-          disabled={loading || !referralData || generating || stats.totalGenerated >= stats.totalLimit}
-        >
-          {generating ? 'Generating…' : 'Generate Referral Code'}
-        </button>
-        {stats.totalGenerated >= stats.totalLimit && (
-          <p className="student-referrals__limit" role="status">
-            You’ve reached your overall limit of 20 referral codes.
-          </p>
-        )}
-      </section>
-
       {error && (
         <p className="student-courses__message is-error" role="alert">
           {error}
@@ -4834,50 +4897,160 @@ function StudentReferrals({ onLogout }) {
       )}
       {notice && <p className="student-courses__message" role="status">{notice}</p>}
 
+      <section className="student-referrals__hero">
+        <div className="student-referrals__code-panel">
+          <div className="student-referrals__code-label">
+            <Icon name="gift" size={21} />
+            <span>YOUR REFERRAL CODE</span>
+          </div>
+          <div className="student-referrals__code-value">
+            {loading && !referralData
+              ? <span className="student-page-skeleton" style={{ width: '150px', height: '32px' }} />
+              : activeReferralCode
+                ? <strong>{activeReferralCode.code}</strong>
+                : <span>No active code yet</span>}
+            {activeReferralCode && (
+              <button
+                className="student-referrals__copy-current"
+                type="button"
+                aria-label={`Copy referral code ${activeReferralCode.code}`}
+                onClick={() => copyReferralCode(activeReferralCode.code)}
+              >
+                <Icon name="copy" size={18} />
+              </button>
+            )}
+          </div>
+          {activeReferralCode && (
+            <p className="student-referrals__code-expiry">
+              <span aria-hidden="true">✓</span>
+              Code generated on {formatReferralDay(activeReferralCode.createdAt)} · {getReferralExpiryLabel(activeReferralCode.expiresAt)}
+            </p>
+          )}
+          <div className="student-referrals__hero-actions">
+            {activeReferralCode ? (
+              <button
+                className="student-referrals__share"
+                type="button"
+                onClick={() => shareReferralCode(activeReferralCode.code)}
+              >
+                <Icon name="share" size={16} /> Share Code
+              </button>
+            ) : (
+              <button
+                className="student-referrals__share"
+                type="button"
+                onClick={generateReferralCode}
+                disabled={loading || !referralData || generating || stats.totalGenerated >= stats.totalLimit}
+              >
+                {generating ? 'Generating…' : 'Generate Referral Code'}
+              </button>
+            )}
+            {activeReferralCode && (
+              <button
+                className="student-referrals__generate"
+                type="button"
+                onClick={generateReferralCode}
+                disabled={loading || !referralData || generating || stats.totalGenerated >= stats.totalLimit}
+              >
+                {generating ? 'Generating…' : 'Generate another'}
+              </button>
+            )}
+          </div>
+          {stats.totalGenerated >= stats.totalLimit && (
+            <p className="student-referrals__limit" role="status">
+              You’ve reached your overall limit of 20 referral codes.
+            </p>
+          )}
+        </div>
+        <div className="student-referrals__hero-divider" aria-hidden="true" />
+        <div className="student-referrals__invite">
+          <div>
+            <h1>Invite Friends, Earn More!</h1>
+            <p>Share your referral code with friends. When they sign up, you’ll earn rewards and unlock more benefits.</p>
+          </div>
+          <svg className="student-referrals__gift-illustration" viewBox="0 0 180 145" fill="none" aria-hidden="true">
+            <circle cx="92" cy="68" r="52" fill="#F2EECF" />
+            <path d="M25 121c17-17 42-24 67-19 27-6 50 1 67 19" fill="#D9E8D9" />
+            <path d="M49 66h86v59H49z" fill="#FFFDF7" stroke="#D6CDB8" strokeWidth="2" />
+            <path d="M42 54h100v18H42z" fill="#F3D994" stroke="#D6CDB8" strokeWidth="2" />
+            <path d="M84 54v71h17V54z" fill="#6BA58E" />
+            <path d="M91 53c-23-1-31-13-24-20 8-7 22 3 24 20Zm2 0c1-21 17-28 24-19 7 9-8 19-24 19Z" fill="#4F967E" />
+            <path d="M91 53c-23-1-31-13-24-20 8-7 22 3 24 20Zm2 0c1-21 17-28 24-19 7 9-8 19-24 19Z" stroke="#397C68" strokeWidth="2" />
+            <path d="m151 35 9-8m-3 20 12-2m-26-23 2-11" stroke="#E2B74D" strokeWidth="3" strokeLinecap="round" />
+          </svg>
+        </div>
+      </section>
+
       <section className="student-referrals__summary" aria-label="Referral summary">
         {summary.map((item) => (
           <article className="student-stat" key={item.label}>
             <span className={`student-stat__icon is-${item.tone}`}><Icon name="users" size={18} /></span>
             <span className="student-stat__label">{item.label}</span>
-            <strong className="student-stat__value">{referralData ? item.value : '—'}</strong>
+            <strong className="student-stat__value">
+              {referralData
+                ? item.value
+                : loading
+                  ? <span className="student-page-skeleton" style={{ width: '48px', height: '16px' }} />
+                  : '—'}
+            </strong>
           </article>
         ))}
       </section>
 
       <section className="student-panel student-referrals__history" aria-labelledby="student-referral-history-title">
-        <div className="student-section-heading">
-          <div>
-            <span className="student-eyebrow">YOUR CODE ACTIVITY</span>
-            <h2 id="student-referral-history-title">Referral history</h2>
+        <header className="student-referrals__history-heading">
+          <h2 id="student-referral-history-title"><Icon name="clock" size={21} /> Referral History</h2>
+          {referralCodes.length > 3 && (
+            <button
+              className="student-referrals__view-all"
+              type="button"
+              onClick={() => setShowAllCodes((showAll) => !showAll)}
+            >
+              {showAllCodes ? 'Show Less ↑' : 'View All →'}
+            </button>
+          )}
+        </header>
+        {loading && !referralData ? (
+          <div className="student-referrals__loading" role="status" aria-label="Loading your referral history">
+            <span className="student-page-skeleton" />
+            <span className="student-page-skeleton" />
+            <span className="student-page-skeleton" />
           </div>
-          <span className="student-data-note">Codes expire 12 hours after they’re generated.</span>
-        </div>
-        {loading ? (
-          <p role="status">Loading your referral history…</p>
-        ) : referralData?.codes.length ? (
-          <div className="student-referrals__list">
-            {referralData.codes.map((code) => (
-              <article className="student-referral-card" key={code.code}>
-                <div className="student-referral-card__top">
-                  <strong className="student-referral-card__code">{code.code}</strong>
-                  <span className={`student-referral-card__status is-${code.status}`}>{code.status}</span>
-                  {code.status === 'active' && (
-                    <button className="student-button student-button--quiet" type="button" onClick={() => copyReferralCode(code.code)}>
-                      {copiedCode === code.code ? 'Copied' : 'Copy'}
-                    </button>
-                  )}
-                </div>
-                <dl>
-                  <div><dt>Generated</dt><dd>{formatReferralDate(code.createdAt)}</dd></div>
-                  <div><dt>Expires</dt><dd>{formatReferralDate(code.expiresAt)}</dd></div>
-                  <div><dt>Friend registered</dt><dd>{code.friendRegistered ? 'Yes' : 'No'}</dd></div>
-                  {code.usedAt && <div><dt>Used</dt><dd>{formatReferralDate(code.usedAt)}</dd></div>}
-                  {code.registrationStatus && (
-                    <div><dt>Registration status</dt><dd>{code.registrationStatus.replaceAll('_', ' ')}</dd></div>
-                  )}
-                </dl>
-              </article>
-            ))}
+        ) : referralCodes.length ? (
+          <div className="student-referrals__table-wrap">
+            <table className="student-referrals__table">
+              <thead>
+                <tr>
+                  <th scope="col">Code</th>
+                  <th scope="col">Generated On</th>
+                  <th scope="col">Expires On</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleReferralCodes.map((code) => (
+                  <tr key={code.code}>
+                    <td><strong className="student-referrals__history-code">{code.code}</strong></td>
+                    <td>{formatReferralDate(code.createdAt)}</td>
+                    <td>{formatReferralDate(code.expiresAt)}</td>
+                    <td><span className={`student-referral-card__status is-${code.status}`}>{code.status}</span></td>
+                    <td>
+                      {code.status === 'active' ? (
+                        <button
+                          className="student-referrals__copy-row"
+                          type="button"
+                          aria-label={`Copy referral code ${code.code}`}
+                          onClick={() => copyReferralCode(code.code)}
+                        >
+                          <Icon name="copy" size={15} /> {copiedCode === code.code ? 'Copied' : 'Copy'}
+                        </button>
+                      ) : <span className="student-referrals__no-action">—</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         ) : !error ? (
           <EmptyState
@@ -4893,7 +5066,6 @@ function StudentReferrals({ onLogout }) {
 
 function StudentCourseDetailsPage({ user, onLogout, onLearningDataChanged }) {
   const { courseId } = useParams()
-  const navigate = useNavigate()
   const [course, setCourse] = useState(null)
   const [loading, setLoading] = useState(true)
   const [enrolling, setEnrolling] = useState(false)
@@ -4931,7 +5103,7 @@ function StudentCourseDetailsPage({ user, onLogout, onLearningDataChanged }) {
       })
       .finally(() => { if (!controller.signal.aborted) setLoading(false) })
     return () => controller.abort()
-  }, [courseId, navigate, onLogout])
+  }, [courseId, onLogout])
 
   async function enroll() {
     setEnrolling(true)
@@ -4958,9 +5130,11 @@ function StudentCourseDetailsPage({ user, onLogout, onLearningDataChanged }) {
       }
       if (!response.ok) throw new Error(result.message || 'You could not be enrolled in this course.')
       if (!result.enrollment?._id) throw new Error('The server did not confirm your enrollment.')
+      const confirmedEnrollment = { ...result.enrollment, courseId: course }
       onLearningDataChanged()
-      seedStudentCourseLearning({ ...result.enrollment, courseId: course })
-      navigate(`/student/course/${encodeURIComponent(courseId)}/learn`, { replace: true })
+      seedStudentCourseLearning(confirmedEnrollment)
+      setCourseEnrollment(confirmedEnrollment)
+      setIsEnrolled(true)
     } catch (enrollError) {
       setError(enrollError instanceof Error ? enrollError.message : 'You could not be enrolled in this course.')
     } finally {
@@ -4999,12 +5173,12 @@ function StudentCourseDetailsPage({ user, onLogout, onLearningDataChanged }) {
                     to={`/student/course/${encodeURIComponent(courseId)}/learn`}
                     onClick={() => seedStudentCourseLearning(courseEnrollment)}
                   >
-                    Continue Learning
+                    Get Started
                   </Link>
                   : isCollegeStudent
                   ? <p>Enrollment for this course is managed by your college administrator.</p>
                   : <button type="button" className="student-enrolled-course__continue" disabled={enrolling} onClick={enroll}>
-                    {enrolling ? 'Enrolling…' : 'Enroll Now (Free)'}
+                    {enrolling ? 'Enrolling…' : 'Enroll Now'}
                   </button>}
               </div>
             </header>
@@ -5170,17 +5344,21 @@ function StudentCourseLearningPage({
 }
 
 function StudentCourses({ user, onLogout }) {
-  const [enrollments, setEnrollments] = useState([])
+  const [initialEnrollments] = useState(getCachedStudentPageEnrollments)
+  const [enrollments, setEnrollments] = useState(initialEnrollments || [])
   const [error, setError] = useState('')
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(initialEnrollments === null)
   const location = useLocation()
   const requestedFilter = new URLSearchParams(location.search).get('filter')
   const enrollmentFilter = ['enrolled', 'completed', 'active'].includes(requestedFilter) ? requestedFilter : ''
 
   useEffect(() => {
     let active = true
-    setLoading(true)
-    fetchMyEnrollments(onLogout)
+    const cachedEnrollments = getCachedStudentPageEnrollments()
+    if (cachedEnrollments) setEnrollments(cachedEnrollments)
+    setLoading(cachedEnrollments === null)
+    setError('')
+    fetchStudentPageEnrollments(onLogout)
       .then((loadedEnrollments) => {
         if (!active) return
         const cacheKey = getStudentPageCacheKey()
@@ -5820,7 +5998,6 @@ function StudentDashboard({
       Assignments: 'clipboardCheck',
       'Grades & Results': 'chartNoAxesCombined',
       'Learning Resources': 'folderOpen',
-      Messages: 'messageCircle',
       Certificates: 'award',
       'My Referrals': 'users',
       'My Profile': 'userRound',
@@ -5944,15 +6121,9 @@ function StudentDashboard({
             >
               <Icon name={item.icon} size={18} />
               <span>{item.label}</span>
-              {item.label === 'Messages' && <span className="student-sidebar__soon">Soon</span>}
             </Link>
           ))}
         </nav>
-        <div className="student-sidebar__bottom">
-          <button className="student-sidebar__logout" type="button" onClick={onLogout}>
-            <Icon name="logout" size={17} /> Logout
-          </button>
-        </div>
       </aside>
 
       <main className="student-main" id="student-overview">
@@ -6231,11 +6402,6 @@ function StudentDashboard({
               } />
               <Route path="/student/resources" element={
                 <StudentResourcesPage onLogout={onLogout} />
-              } />
-              <Route path="/student/messages" element={
-                <StudentRoutePage eyebrow="YOUR LEARNING COMMUNITY" title="Messages">
-                  <EmptyState icon="message" title="Messages are not connected yet" description="Course conversations and messages will appear here when messaging is available." />
-                </StudentRoutePage>
               } />
               <Route path="/student/certificates" element={
                 <StudentCertificatesPage onLogout={onLogout} />

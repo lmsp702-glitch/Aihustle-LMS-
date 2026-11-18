@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto'
+import { randomInt } from 'node:crypto'
 import mongoose from 'mongoose'
 import { Router } from 'express'
 import { authenticate, requireRoles } from '../middleware/auth.js'
@@ -9,6 +9,7 @@ import ReferralCodeUserLimit from '../models/ReferralCodeUserLimit.js'
 const router = Router()
 const userGenerationLimit = 20
 const codeLifetimeMs = 12 * 60 * 60 * 1000
+const referralCodeAlphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
 const requireExternalUser = [
   authenticate,
   requireRoles('student'),
@@ -24,6 +25,17 @@ function createRequestError(statusCode, message) {
   const error = new Error(message)
   error.statusCode = statusCode
   return error
+}
+
+function generateReferralCode() {
+  let code
+  do {
+    code = Array.from(
+      { length: 6 },
+      () => referralCodeAlphabet[randomInt(referralCodeAlphabet.length)],
+    ).join('')
+  } while (!/[A-Z]/.test(code) || !/[0-9]/.test(code))
+  return code
 }
 
 function registrationStatusForAccount(account) {
@@ -49,7 +61,7 @@ function serializeCode(code, registrationStatus = code.registrationStatus) {
 router.post('/validate', async (req, res, next) => {
   try {
     const rawCode = req.body?.code
-    if (typeof rawCode !== 'string' || rawCode.trim().length < 8 || rawCode.trim().length > 64) {
+    if (typeof rawCode !== 'string' || rawCode.trim().length < 6 || rawCode.trim().length > 64) {
       return res.status(400).json({ message: 'Enter a valid referral code.' })
     }
 
@@ -156,7 +168,18 @@ router.post('/generate', ...requireExternalUser, async (req, res, next) => {
         throw createRequestError(429, 'You have reached the overall limit of 20 referral codes.')
       }
 
-      const code = `LMS-${randomBytes(16).toString('hex').toUpperCase()}`
+      let code
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        const candidate = generateReferralCode()
+        const existingCode = await ReferralCode.findOne({ code: candidate }).session(session).lean()
+        if (!existingCode) {
+          code = candidate
+          break
+        }
+      }
+      if (!code) {
+        throw createRequestError(503, 'A unique referral code could not be generated. Please try again.')
+      }
       const [created] = await ReferralCode.create(
         [{
           code,
