@@ -3509,7 +3509,7 @@ function AdminDashboard({
                   This permanently deletes this student account, its login identity, and enrollment records.
                   Course records will remain.
                 </p>
-                <dl className="admin-student-delete-summary">
+                <dl className="admin-student-details admin-student-delete-summary">
                   <div><dt>Name</dt><dd>{studentToDelete.fullName || 'Unnamed student'}</dd></div>
                   <div><dt>ID / Username</dt><dd>{studentToDelete.studentId || studentToDelete.username || 'Not available'}</dd></div>
                   <div><dt>Email</dt><dd>{studentToDelete.email || 'Not available'}</dd></div>
