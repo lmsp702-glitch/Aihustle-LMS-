@@ -1749,7 +1749,7 @@ function StudentResultsPage({ onLogout }) {
         <div className="student-results__heading">
           <span className="student-results__hero-icon"><Icon name="award" size={27} /></span>
           <div>
-            <h1>Grades &amp; Results</h1>
+            <h1>Your Grades &amp; Results</h1>
             <p>Track your performance and view your results</p>
           </div>
         </div>
@@ -5876,7 +5876,7 @@ function StudentDashboard({
                 <span aria-hidden="true" />
                 <strong>{courseLearningTitle || 'Course learning'}</strong>
               </>
-            ) : isResultsPage ? null : (
+            ) : (
               <>
                 <Icon name={pageIcon} size={19} />
                 <strong>{pageTitle}</strong>
