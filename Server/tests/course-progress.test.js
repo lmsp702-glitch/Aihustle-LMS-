@@ -90,7 +90,7 @@ test('course progress excludes optional activities and notes and never rounds in
   })
 })
 
-test('activity progress uses each course structure and counts submitted work once', () => {
+test('activity progress uses each course structure and counts only latest approved work once', () => {
   const videoIds = Array.from({ length: 8 }, () => new mongoose.Types.ObjectId().toString())
   const quizIds = Array.from({ length: 2 }, () => new mongoose.Types.ObjectId().toString())
   const assignmentIds = Array.from({ length: 2 }, () => new mongoose.Types.ObjectId().toString())
@@ -118,8 +118,21 @@ test('activity progress uses each course structure and counts submitted work onc
       { quizId: quizIds[1], status: 'submitted' },
     ],
     [
-      { assignmentId: assignmentIds[0] },
-      { assignmentId: assignmentIds[0] },
+      {
+        assignmentId: assignmentIds[0],
+        reviewStatus: 'approved',
+        submittedAt: new Date('2026-01-02T00:00:00Z'),
+      },
+      {
+        assignmentId: assignmentIds[0],
+        reviewStatus: 'pending',
+        submittedAt: new Date('2026-01-01T00:00:00Z'),
+      },
+      {
+        assignmentId: assignmentIds[1],
+        reviewStatus: 'pending',
+        submittedAt: new Date('2026-01-03T00:00:00Z'),
+      },
     ],
   )
 
@@ -151,6 +164,32 @@ test('activity progress uses each course structure and counts submitted work onc
   assert.equal(otherProgress.totalActivities, 4)
   assert.equal(otherProgress.completedActivities, 2)
   assert.equal(otherProgress.percentage, 50)
+})
+
+test('activity progress keeps a submitted assignment incomplete until its latest submission is approved', () => {
+  const course = {
+    modules: [{
+      contentItems: [{ _id: ids.assignment, type: 'assignment' }],
+    }],
+  }
+  const enrollment = { completedLessonIds: [] }
+  const pendingSubmission = {
+    assignmentId: ids.assignment,
+    reviewStatus: 'pending',
+    submittedAt: new Date('2026-01-01T00:00:00Z'),
+  }
+  const pendingProgress = calculateCourseActivityProgress(course, enrollment, [], [pendingSubmission])
+
+  assert.equal(pendingProgress.completedActivities, 0)
+  assert.equal(pendingProgress.percentage, 0)
+  assert.equal(pendingProgress.isComplete, false)
+
+  const approvedProgress = calculateCourseActivityProgress(course, enrollment, [], [
+    { ...pendingSubmission, reviewStatus: 'approved', submittedAt: new Date('2026-01-02T00:00:00Z') },
+  ])
+  assert.equal(approvedProgress.completedActivities, 1)
+  assert.equal(approvedProgress.percentage, 100)
+  assert.equal(approvedProgress.isComplete, true)
 })
 
 test('activity progress for a course without videos, quizzes, or assignments is zero', () => {

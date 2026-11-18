@@ -110,13 +110,13 @@ export function calculateCourseActivityProgress(course, enrollment, quizAttempts
     .filter((attempt) => attempt.status === 'submitted')
     .map((attempt) => documentId(attempt.quizId))
     .filter(Boolean))
-  const submittedAssignmentIds = new Set(assignmentSubmissions
-    .map((submission) => documentId(submission.assignmentId))
-    .filter(Boolean))
+  const latestSubmissions = getLatestSubmissionsByAssignment(assignmentSubmissions)
 
   const completedVideos = activities.videos.filter(({ id }) => completedVideoIds.has(id)).length
   const completedQuizzes = activities.quizzes.filter(({ id }) => submittedQuizIds.has(id)).length
-  const completedAssignments = activities.assignments.filter(({ id }) => submittedAssignmentIds.has(id)).length
+  const completedAssignments = activities.assignments.filter(({ id }) => (
+    latestSubmissions.get(id)?.reviewStatus === 'approved'
+  )).length
   const totalActivities = activities.videos.length + activities.quizzes.length + activities.assignments.length
   const completedActivities = completedVideos + completedQuizzes + completedAssignments
   const isComplete = totalActivities > 0 && completedActivities === totalActivities

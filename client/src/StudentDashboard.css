@@ -5508,9 +5508,16 @@ button.student-category {
 .student-enrolled-course__actions {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 10px;
   margin-top: 12px;
+}
+
+.student-enrolled-course__statuses {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
 }
 
 .student-enrolled-course__continue {
@@ -5529,13 +5536,15 @@ button.student-category {
 }
 
 .student-enrolled-course__completed {
-  padding: 6px 10px;
+  transform: translateX(15px);
+  padding: 5px 8px;
   border: 1px solid #c9ddca;
   border-radius: 6px;
   background: #e6efe5;
   color: #376044;
-  font-size: 11px;
+  font-size: 9px;
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .student-enrolled-course__continue:hover {

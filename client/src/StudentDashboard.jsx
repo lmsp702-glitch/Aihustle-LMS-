@@ -30,6 +30,7 @@ const studentEnrollmentCache = new Map()
 const studentEnrollmentRequests = new Map()
 const studentCourseContentCache = new Map()
 const studentCourseContentRequests = new Map()
+const studentCourseLearningSeeds = new Map()
 const studentPageCertificateRequests = new Map()
 const studentResultsCache = new Map()
 const COURSE_NOTES_KEY = 'course-notes'
@@ -783,6 +784,39 @@ function getCachedStudentPageCourseContent(courseId) {
   return cacheKey ? studentCourseContentCache.get(cacheKey)?.content || null : null
 }
 
+function seedStudentCourseLearning(enrollment) {
+  const courseId = enrollment?.courseId?._id
+  const cacheKey = getStudentCourseContentCacheKey(courseId)
+  if (!cacheKey || !enrollment?._id || !courseId) return
+  studentCourseLearningSeeds.set(cacheKey, { enrollment, savedAt: Date.now() })
+}
+
+function getStudentCourseLearningSeed(courseId) {
+  const cacheKey = getStudentCourseContentCacheKey(courseId)
+  const seed = cacheKey ? studentCourseLearningSeeds.get(cacheKey) : null
+  if (!seed) return null
+  if (Date.now() - seed.savedAt >= studentLearningPageCacheTtlMs) {
+    studentCourseLearningSeeds.delete(cacheKey)
+    return null
+  }
+  return seed.enrollment
+}
+
+function getInitialStudentCourseLearningEnrollment(courseId) {
+  const cachedContent = getCachedStudentPageCourseContent(courseId)
+  if (cachedContent?.enrollment) {
+    return {
+      ...cachedContent.enrollment,
+      assignmentSubmissions: cachedContent.assignmentSubmissions,
+      quizAttempts: cachedContent.quizAttempts,
+    }
+  }
+  const enrollment = getStudentCourseLearningSeed(courseId)
+  return enrollment
+    ? { ...enrollment, assignmentSubmissions: [], quizAttempts: [] }
+    : null
+}
+
 async function fetchStudentPageCourseContent(courseId, onLogout) {
   const cacheKey = getStudentCourseContentCacheKey(courseId)
   if (!cacheKey) return fetchStudentCourseContent(courseId, onLogout)
@@ -839,6 +873,9 @@ function invalidateStudentLearningPageCaches() {
   const coursePrefix = `${cacheKey}:`
   studentCourseContentCache.forEach((_, key) => {
     if (key.startsWith(coursePrefix)) studentCourseContentCache.delete(key)
+  })
+  studentCourseLearningSeeds.forEach((_, key) => {
+    if (key.startsWith(coursePrefix)) studentCourseLearningSeeds.delete(key)
   })
 }
 
@@ -1643,7 +1680,7 @@ function StudentResultsPage({ onLogout }) {
         const latestEnrollments = getLatestEnrollmentsByCourse(enrollments)
         const [loadedCourseResults, loadedCertificates] = await Promise.all([
           Promise.all([...latestEnrollments.keys()].map(async (courseId) => {
-            const result = await fetchStudentPageCourseContent(courseId, onLogout)
+            const result = await fetchStudentCourseContent(courseId, onLogout)
             return {
               courseId,
               enrollment: result.enrollment,
@@ -1827,7 +1864,10 @@ function StudentResultsPage({ onLogout }) {
                         </td>
                         <td>
                           <div className="student-results__progress">
-                            <span><small>{course.progress}%</small><small>{course.progress}%</small></span>
+                            <span>
+                              <small>{course.progress}%</small>
+                              <small>{course.completedActivityCount} of {course.totalActivityCount} activities</small>
+                            </span>
                             <i><b className={course.status === 'completed' ? 'is-completed' : ''} style={{ width: `${course.progress}%` }} /></i>
                           </div>
                         </td>
@@ -1996,7 +2036,7 @@ function isValidLessonId(value) {
   return /^[a-f\d]{24}$/i.test(String(value || ''))
 }
 
-function getVideoCompletionDuration(video, lesson) {
+function getVideoCompletionDuration(video) {
   const duration = Number(video?.duration)
   if (Number.isFinite(duration) && duration > 0) return duration
 
@@ -2005,8 +2045,7 @@ function getVideoCompletionDuration(video, lesson) {
     if (Number.isFinite(seekableEnd) && seekableEnd > 0) return seekableEnd
   }
 
-  const storedDuration = Number(lesson?.durationSeconds)
-  return Number.isFinite(storedDuration) && storedDuration > 0 ? storedDuration : 0
+  return 0
 }
 
 function getCourseLessons(course) {
@@ -2057,16 +2096,17 @@ function getCourseProgress(enrollment) {
     || progress?.isComplete === true
     || (totalCount > 0 && completedCount === totalCount)
   const reportedPercentage = Number(progress?.percentage)
+  const percentage = isComplete
+    ? 100
+    : totalCount
+      ? Math.min(99, Math.floor((completedCount / totalCount) * 100))
+      : Number.isFinite(reportedPercentage)
+        ? Math.max(0, Math.min(99, reportedPercentage))
+        : 0
   return {
     completedCount,
     totalCount,
-    percentage: isComplete
-      ? 100
-      : Number.isFinite(reportedPercentage)
-        ? Math.max(0, Math.min(99, reportedPercentage))
-        : totalCount
-          ? Math.min(99, Math.floor((completedCount / totalCount) * 100))
-          : 0,
+    percentage,
   }
 }
 
@@ -2461,9 +2501,14 @@ function EnrollmentCourseCard({ enrollment }) {
             </p>
             <h3>{course.title}</h3>
           </div>
-          <span className="student-available-course__status">
-            {course.status === 'published' ? 'Published' : 'Enrolled'}
-          </span>
+          <div className="student-enrolled-course__statuses">
+            <span className="student-available-course__status">
+              {course.status === 'published' ? 'Published' : 'Enrolled'}
+            </span>
+            {enrollment.status === 'completed' && (
+              <span className="student-enrolled-course__completed">Completed</span>
+            )}
+          </div>
         </div>
         <p className="student-available-course__description">{course.description || course.detailedDescription || 'No course description is available.'}</p>
         <div className="student-available-course__meta">
@@ -2481,13 +2526,14 @@ function EnrollmentCourseCard({ enrollment }) {
           </div>
         </div>
         <div className="student-enrolled-course__actions">
-          <Link className="student-enrolled-course__continue" to={coursePath}>
+          <Link
+            className="student-enrolled-course__continue"
+            to={coursePath}
+            onClick={() => seedStudentCourseLearning(enrollment)}
+          >
             Continue Learning
             <Icon name="arrow" size={16} />
           </Link>
-          {enrollment.status === 'completed' && (
-            <span className="student-enrolled-course__completed">Completed</span>
-          )}
         </div>
       </div>
     </article>
@@ -2661,7 +2707,11 @@ function StudentDashboardCourseTable({
           return (
             <div className="student-dashboard-course-table__row" role="row" key={enrollment._id}>
               <div className="student-dashboard-course-table__course" role="cell">
-                <Link to={`/student/course/${encodeURIComponent(courseId)}/learn`} aria-label={`Continue learning ${course.title || 'course'}`}>
+                <Link
+                  to={`/student/course/${encodeURIComponent(courseId)}/learn`}
+                  aria-label={`Continue learning ${course.title || 'course'}`}
+                  onClick={() => seedStudentCourseLearning(enrollment)}
+                >
                   {course.thumbnailUrl
                     ? <img src={course.thumbnailUrl} alt="" />
                     : <span className="student-dashboard-course-table__thumbnail-fallback"><Icon name="book" size={20} /></span>}
@@ -2672,7 +2722,7 @@ function StudentDashboardCourseTable({
                 <span className="student-dashboard-course-table__mobile-label">Progress</span>
                 <div className="student-dashboard-course-table__progress-copy">
                   <strong>{percentage}%</strong>
-                  <small>{completedCount} of {totalCount} lessons</small>
+                  <small>{completedCount} of {totalCount} activities</small>
                 </div>
                 <div
                   className="student-dashboard-course-table__progress-track"
@@ -2754,7 +2804,11 @@ function StudentAvailableCourseCard({ course, enrollment }) {
           <span>{formatCourseDuration(course.estimatedDurationMinutes)}</span>
         </div>
         {enrollment
-          ? <Link className="student-available-course__action" to={`/student/course/${encodeURIComponent(course._id)}/learn`}>
+          ? <Link
+            className="student-available-course__action"
+            to={`/student/course/${encodeURIComponent(course._id)}/learn`}
+            onClick={() => seedStudentCourseLearning({ ...enrollment, courseId: course })}
+          >
             Continue Learning <Icon name="arrow" size={15} />
           </Link>
           : <Link className="student-available-course__action" to={`/student/course/${encodeURIComponent(course._id)}`}>
@@ -2930,6 +2984,7 @@ function StudentCourseLearning({
     course.modules?.length ? [String(course.modules[0]._id || `${course.modules[0].title}-0`)] : [],
   ))
   const [savingLessonId, setSavingLessonId] = useState('')
+  const [optimisticallyCompletedLessonIds, setOptimisticallyCompletedLessonIds] = useState(() => new Set())
   const [progressError, setProgressError] = useState('')
   const [autoplayBlockedLessonId, setAutoplayBlockedLessonId] = useState('')
   const [assignmentSubmissions, setAssignmentSubmissions] = useState(enrollment.assignmentSubmissions || [])
@@ -2939,6 +2994,7 @@ function StudentCourseLearning({
   const [courseCertificateError, setCourseCertificateError] = useState('')
   const [courseCertificateRefresh, setCourseCertificateRefresh] = useState(0)
   const [courseCertificatePdf, setCourseCertificatePdf] = useState({ certificateId: '', url: '' })
+
   const [courseCertificatePdfLoading, setCourseCertificatePdfLoading] = useState(false)
   const [courseCertificatePdfError, setCourseCertificatePdfError] = useState('')
   const [courseCertificatePdfRetry, setCourseCertificatePdfRetry] = useState(0)
@@ -2987,7 +3043,11 @@ function StudentCourseLearning({
   const activeContentItem = allContentItems.find((item) => item._learningKey === activeContentItemId)
   const showCourseCertificate = course.generateCertificate !== false
   const hasCurrentCourseCertificate = String(courseCertificate?.courseId || '') === String(course._id)
-  const completedLessonIds = new Set((enrollment.completedLessonIds || []).map(String))
+  const completedLessonIds = new Set([
+    ...(enrollment.completedLessonIds || []).map(String),
+    ...optimisticallyCompletedLessonIds,
+    ...(savingLessonId ? [savingLessonId] : []),
+  ])
   const hasPassedQuiz = (quizId) => Boolean(quizId) && quizAttempts.some((attempt) => (
     String(attempt.quizId) === String(quizId)
     && attempt.status === 'submitted'
@@ -3020,6 +3080,14 @@ function StudentCourseLearning({
     String(attempt.quizId) === String(activeContentItem.quiz?._id)
     && attempt.status === 'started'
   ))
+
+  useEffect(() => {
+    setAssignmentSubmissions(enrollment.assignmentSubmissions || [])
+  }, [enrollment.assignmentSubmissions])
+
+  useEffect(() => {
+    setQuizAttempts(enrollment.quizAttempts || [])
+  }, [enrollment.quizAttempts])
 
   useEffect(() => {
     if (activeTranscriptCueIndex < 0) return
@@ -3797,18 +3865,22 @@ function StudentCourseLearning({
 
   async function setLessonCompleted(entry, completed, video = videoPlayerRef.current) {
     const lessonId = String(entry.lesson._id || '')
-    const videoDuration = getVideoCompletionDuration(video, entry.lesson)
+    const positionSeconds = Number(video?.currentTime)
+    const playerDuration = getVideoCompletionDuration(video)
+    const videoDuration = playerDuration > 0 ? playerDuration : positionSeconds
     if (!isValidLessonId(lessonId)) {
       setProgressError('This lesson cannot be tracked because it has no saved lesson ID.')
       return
     }
     if (completed && (
-      !video?.ended
-      || videoDuration <= 0
-      || !Number.isFinite(video.currentTime)
+      videoDuration <= 0
+      || !Number.isFinite(positionSeconds)
     )) {
       setProgressError('Watch the entire video before completing this lesson.')
       return
+    }
+    if (completed) {
+      setOptimisticallyCompletedLessonIds((current) => new Set(current).add(lessonId))
     }
     setSavingLessonId(lessonId)
     setProgressError('')
@@ -3840,18 +3912,32 @@ function StudentCourseLearning({
         return
       }
       if (!response.ok) throw new Error(result.message || 'Lesson progress could not be saved.')
+      const savedCompletedLessonIds = (result.completedLessonIds || []).map(String)
+      if (completed && !savedCompletedLessonIds.includes(lessonId)) {
+        throw new Error('The server did not confirm this lesson completion.')
+      }
       onEnrollmentUpdated({
         ...enrollment,
         status: result.status || enrollment.status,
         courseProgress: result.courseProgress || enrollment.courseProgress,
-        completedLessonIds: result.completedLessonIds || [],
+        completedLessonIds: savedCompletedLessonIds,
         lessonPlaybackPositions: { ...lessonPlaybackPositionsRef.current },
       })
+      if (completed) {
+        setOptimisticallyCompletedLessonIds((current) => {
+          const next = new Set(current)
+          next.delete(lessonId)
+          return next
+        })
+      }
       startedLessonIds.current.add(lessonId)
       if (completed) setCourseCertificateRefresh((current) => current + 1)
       onLearningDataChanged()
     } catch (saveError) {
-      setProgressError(saveError instanceof Error ? saveError.message : 'Lesson progress could not be saved.')
+      const message = saveError instanceof Error ? saveError.message : 'Lesson progress could not be saved.'
+      setProgressError(completed
+        ? `Video finished, but completion could not be synced: ${message}`
+        : message)
     } finally {
       setSavingLessonId('')
     }
@@ -4812,6 +4898,7 @@ function StudentCourseDetailsPage({ user, onLogout, onLearningDataChanged }) {
   const [loading, setLoading] = useState(true)
   const [enrolling, setEnrolling] = useState(false)
   const [isEnrolled, setIsEnrolled] = useState(false)
+  const [courseEnrollment, setCourseEnrollment] = useState(null)
   const [error, setError] = useState('')
   const isCollegeStudent = user?.studentType === 'college' || Boolean(user?.collegeId)
   const courseCounts = course ? getCourseCounts(course) : { modules: 0, lessons: 0 }
@@ -4821,6 +4908,7 @@ function StudentCourseDetailsPage({ user, onLogout, onLearningDataChanged }) {
     setLoading(true)
     setCourse(null)
     setIsEnrolled(false)
+    setCourseEnrollment(null)
     setError('')
     Promise.all([
       fetchPublishedCourses(onLogout, controller.signal),
@@ -4829,9 +4917,11 @@ function StudentCourseDetailsPage({ user, onLogout, onLearningDataChanged }) {
       .then(([publishedCourses, enrollments]) => {
         const selectedCourse = publishedCourses.find((item) => String(item._id) === courseId)
         if (!selectedCourse) throw new Error('This course is not currently published or available.')
-        setIsEnrolled(enrollments.some((entry) => (
+        const selectedEnrollment = enrollments.find((entry) => (
           String(entry.courseId?._id || entry.courseId) === courseId && entry.status !== 'cancelled'
-        )))
+        ))
+        setIsEnrolled(Boolean(selectedEnrollment))
+        setCourseEnrollment(selectedEnrollment ? { ...selectedEnrollment, courseId: selectedCourse } : null)
         setCourse(selectedCourse)
       })
       .catch((loadError) => {
@@ -4869,6 +4959,7 @@ function StudentCourseDetailsPage({ user, onLogout, onLearningDataChanged }) {
       if (!response.ok) throw new Error(result.message || 'You could not be enrolled in this course.')
       if (!result.enrollment?._id) throw new Error('The server did not confirm your enrollment.')
       onLearningDataChanged()
+      seedStudentCourseLearning({ ...result.enrollment, courseId: course })
       navigate(`/student/course/${encodeURIComponent(courseId)}/learn`, { replace: true })
     } catch (enrollError) {
       setError(enrollError instanceof Error ? enrollError.message : 'You could not be enrolled in this course.')
@@ -4906,6 +4997,7 @@ function StudentCourseDetailsPage({ user, onLogout, onLearningDataChanged }) {
                   ? <Link
                     className="student-enrolled-course__continue"
                     to={`/student/course/${encodeURIComponent(courseId)}/learn`}
+                    onClick={() => seedStudentCourseLearning(courseEnrollment)}
                   >
                     Continue Learning
                   </Link>
@@ -5014,8 +5106,9 @@ function StudentCourseLearningPage({
   contentSearch,
 }) {
   const { courseId } = useParams()
-  const [enrollment, setEnrollment] = useState(null)
-  const [loading, setLoading] = useState(true)
+  const [initialEnrollment] = useState(() => getInitialStudentCourseLearningEnrollment(courseId))
+  const [enrollment, setEnrollment] = useState(initialEnrollment)
+  const [loading, setLoading] = useState(!initialEnrollment)
   const [error, setError] = useState('')
   const location = useLocation()
   const searchParams = new URLSearchParams(location.search)
@@ -5028,11 +5121,16 @@ function StudentCourseLearningPage({
   }, [enrollment?.courseId?.title, onCourseTitleChange])
 
   useEffect(() => {
-    const controller = new AbortController()
-    setLoading(true)
+    let active = true
+    const initialCourseEnrollment = getInitialStudentCourseLearningEnrollment(courseId)
+    setEnrollment(initialCourseEnrollment)
+    setLoading(!initialCourseEnrollment)
     setError('')
-    fetchStudentCourseContent(courseId, onLogout, controller.signal)
+    fetchStudentPageCourseContent(courseId, onLogout)
       .then(({ enrollment: courseEnrollment, assignmentSubmissions, quizAttempts }) => {
+        if (!active) return
+        const cacheKey = getStudentCourseContentCacheKey(courseId)
+        if (cacheKey) studentCourseLearningSeeds.delete(cacheKey)
         setEnrollment({
           ...courseEnrollment,
           assignmentSubmissions,
@@ -5040,12 +5138,12 @@ function StudentCourseLearningPage({
         })
       })
       .catch((loadError) => {
-        if (loadError.name !== 'AbortError') {
+        if (active) {
           setError(loadError instanceof Error ? loadError.message : 'Your course could not be loaded.')
         }
       })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false) })
-    return () => controller.abort()
+      .finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
   }, [courseId, onLogout])
 
   return (

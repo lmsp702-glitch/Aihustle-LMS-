@@ -5486,13 +5486,13 @@ test('student learning content returns the enrolled course with every published 
     assert.equal(result.enrollment._id, enrollmentId)
     assert.deepEqual(result.enrollment.lessonPlaybackPositions, { '68a000000000000000000054': 42 })
     assert.deepEqual(result.enrollment.courseProgress, {
-      completedActivities: 1,
+      completedActivities: 0,
       totalActivities: 3,
-      percentage: 33,
+      percentage: 0,
       isComplete: false,
       videos: { completed: 0, total: 1 },
       quizzes: { completed: 0, total: 1 },
-      assignments: { completed: 1, total: 1 },
+      assignments: { completed: 0, total: 1 },
     })
     assert.deepEqual(result.enrollment.courseId.modules[0].contentItems.map((item) => item.type), [
       'video-lesson',
@@ -6508,13 +6508,14 @@ test('student lesson progress updates only a lesson in the student enrollment', 
   const restoreQuizAttempts = stub(QuizAttempt, 'find', () => queryResult([]))
 
   try {
-    const spoofedDurationResponse = await request(`/enrollments/${enrollmentId}/progress`, {
+    const actualVideoDurationResponse = await request(`/enrollments/${enrollmentId}/progress`, {
       role: 'student',
       subject: studentId,
       method: 'PATCH',
-      body: { lessonId, completed: true, positionSeconds: 30, videoDurationSeconds: 25 },
+      body: { lessonId, completed: true, positionSeconds: 25, videoDurationSeconds: 25 },
     })
-    assert.equal(spoofedDurationResponse.status, 400)
+    assert.equal(actualVideoDurationResponse.status, 200)
+    assert.equal(updateDocument.$addToSet.completedLessonIds, lessonId)
 
     const incompleteVideoResponse = await request(`/enrollments/${enrollmentId}/progress`, {
       role: 'student',

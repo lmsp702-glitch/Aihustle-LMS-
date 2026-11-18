@@ -1039,7 +1039,7 @@ router.get('/learning/summary', ...requireStudent, async (req, res, next) => {
         AssignmentSubmission.find({
           userId: req.auth.id,
           enrollmentId: { $in: enrollments.map((enrollment) => enrollment._id) },
-        }).select('enrollmentId assignmentId submittedAt').lean(),
+        }).select('enrollmentId assignmentId submittedAt reviewStatus').lean(),
         QuizAttempt.find({
           userId: req.auth.id,
           enrollmentId: { $in: enrollments.map((enrollment) => enrollment._id) },
@@ -1875,7 +1875,7 @@ router.get('/enrollments/me', ...requireStudent, async (req, res, next) => {
         AssignmentSubmission.find({
           userId: req.auth.id,
           enrollmentId: { $in: enrollmentIds },
-        }).select('enrollmentId assignmentId submittedAt').lean(),
+        }).select('enrollmentId assignmentId submittedAt reviewStatus').lean(),
         QuizAttempt.find({
           userId: req.auth.id,
           enrollmentId: { $in: enrollmentIds },
@@ -2094,15 +2094,11 @@ router.patch('/enrollments/:enrollmentId/progress', ...requireStudent, async (re
       return res.status(404).json({ message: 'The lesson was not found in this course.' })
     }
     if (completed === true) {
-      const savedVideoDuration = Number(courseLesson.durationSeconds)
-      const requiredDuration = Number.isFinite(savedVideoDuration) && savedVideoDuration > 0
-        ? savedVideoDuration
-        : videoDurationSeconds
+      const completionToleranceSeconds = 1
       if (
         !hasPositionSeconds
         || !hasVideoDurationSeconds
-        || videoDurationSeconds < requiredDuration
-        || positionSeconds < requiredDuration
+        || positionSeconds + completionToleranceSeconds < videoDurationSeconds
       ) {
         return res.status(400).json({ message: 'Watch the entire video before completing this lesson.' })
       }
@@ -2186,7 +2182,7 @@ router.patch('/enrollments/:enrollmentId/progress', ...requireStudent, async (re
         AssignmentSubmission.find({
           userId: req.auth.id,
           enrollmentId: enrollment._id,
-        }).select('assignmentId submittedAt').lean(),
+        }).select('assignmentId submittedAt reviewStatus').lean(),
       ])
       courseProgress = {
         ...calculateCourseActivityProgress(
