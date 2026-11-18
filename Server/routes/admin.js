@@ -20,6 +20,7 @@ import QuizAttempt from '../models/QuizAttempt.js'
 import ReferralCode from '../models/ReferralCode.js'
 import CertificateTemplate from '../models/CertificateTemplate.js'
 import VideoAttentionResponse from '../models/VideoAttentionResponse.js'
+import RefreshSession from '../models/RefreshSession.js'
 import {
   CollegeAdmin,
   CollegeStudent,
@@ -47,6 +48,7 @@ import { getActiveCertificateTemplateId, issueCertificateIfEligible } from '../u
 import {
   calculateCourseActivityProgress,
   recalculateEnrollmentCourseProgress,
+  summarizeCourseProgress,
 } from '../utils/course-progress.js'
 import { createStudentNotification } from '../utils/student-notifications.js'
 
@@ -364,7 +366,9 @@ router.get('/assignment-submissions', ...requireAdmin, async (req, res, next) =>
     const studentsById = new Map([...independentStudents, ...collegeStudents].map((student) => [String(student._id), student]))
     const coursesById = new Map(courses.map((course) => [String(course._id), course]))
     return res.json({
-      submissions: submissions.map((submission) => {
+      submissions: submissions.filter((submission) => (
+        studentsById.has(String(submission.userId))
+      )).map((submission) => {
         const student = studentsById.get(String(submission.userId))
         const course = coursesById.get(String(submission.courseId))
         return {
@@ -982,7 +986,14 @@ router.post('/college-admins/:id/activation', ...requireAdmin, async (req, res, 
 
 router.get('/courses', ...requireAdmin, async (req, res, next) => {
   try {
-    const [courses, totalCourses, publishedCourses, draftCourses, totalEnrolledStudents] = await Promise.all([
+    const [
+      courses,
+      totalCourses,
+      publishedCourses,
+      draftCourses,
+      activeIndependentStudents,
+      activeCollegeStudents,
+    ] = await Promise.all([
       Course.find({})
         .select(`
           title description detailedDescription category difficulty thumbnailUrl thumbnailPublicId
@@ -1040,19 +1051,75 @@ router.get('/courses', ...requireAdmin, async (req, res, next) => {
       Course.countDocuments({}),
       Course.countDocuments({ status: 'published' }),
       Course.countDocuments({ status: 'draft' }),
-      Enrollment.aggregate([
-        { $match: { status: { $ne: 'cancelled' } } },
-        { $group: { _id: { userId: '$userId', collegeId: { $ifNull: ['$collegeId', null] } } } },
-        { $count: 'total' },
-      ]),
+      Student.find({
+        role: 'student',
+        studentType: 'independent',
+        status: 'active',
+        isActive: { $ne: false },
+        $or: [
+          { approvalStatus: 'approved' },
+          { approvalStatus: { $exists: false } },
+        ],
+      }).select('_id').lean(),
+      CollegeStudent.find({
+        role: 'student',
+        studentType: 'college',
+        status: 'active',
+        isActive: { $ne: false },
+      }).select('_id').lean(),
     ])
+    const activeStudentIds = [
+      ...new Map([
+        ...activeIndependentStudents,
+        ...activeCollegeStudents,
+      ].map((student) => [String(student._id), student._id])).values(),
+    ]
+    const publishedCourseIds = courses
+      .filter((course) => course.status === 'published')
+      .map((course) => course._id)
+    const enrollmentSummary = activeStudentIds.length && publishedCourseIds.length
+      ? await Enrollment.aggregate([
+        {
+          $match: {
+            userId: { $in: activeStudentIds },
+            courseId: { $in: publishedCourseIds },
+            status: { $in: ['active', 'completed'] },
+            deletedAt: null,
+          },
+        },
+        {
+          $facet: {
+            courseCounts: [
+              {
+                $group: {
+                  _id: { courseId: '$courseId', userId: '$userId' },
+                },
+              },
+              { $group: { _id: '$_id.courseId', total: { $sum: 1 } } },
+            ],
+            enrollmentCount: [{ $count: 'total' }],
+          },
+        },
+      ])
+      : []
+    const courseCounts = new Map(
+      (enrollmentSummary[0]?.courseCounts || []).map((entry) => [
+        String(entry._id),
+        entry.total,
+      ]),
+    )
+    const coursesWithEnrollmentCounts = courses.map((course) => ({
+      ...course,
+      activeEnrolledStudents: courseCounts.get(String(course._id)) || 0,
+    }))
+    const totalEnrolledStudents = enrollmentSummary[0]?.enrollmentCount?.[0]?.total || 0
     return res.json({
-      courses,
+      courses: coursesWithEnrollmentCounts,
       stats: {
         totalCourses,
         publishedCourses,
         draftCourses,
-        totalEnrolledStudents: totalEnrolledStudents[0]?.total || 0,
+        totalEnrolledStudents,
       },
     })
   } catch (error) {
@@ -2097,6 +2164,68 @@ router.get('/overview', ...requireAdmin, async (req, res, next) => {
           },
           {
             $lookup: {
+              from: Student.collection.name,
+              let: { userId: '$userId' },
+              pipeline: [
+                {
+                  $match: {
+                    $expr: {
+                      $and: [
+                        { $eq: ['$_id', '$$userId'] },
+                        { $eq: ['$role', 'student'] },
+                        { $eq: ['$status', 'active'] },
+                        { $ne: ['$isActive', false] },
+                        {
+                          $or: [
+                            { $eq: ['$approvalStatus', 'approved'] },
+                            { $eq: [{ $type: '$approvalStatus' }, 'missing'] },
+                          ],
+                        },
+                      ],
+                    },
+                  },
+                },
+                { $limit: 1 },
+                { $project: { _id: 1, status: 1, isActive: 1 } },
+              ],
+              as: '_independentStudent',
+            },
+          },
+          {
+            $lookup: {
+              from: CollegeStudent.collection.name,
+              let: { userId: '$userId' },
+              pipeline: [
+                {
+                  $match: {
+                    $expr: {
+                      $and: [
+                        { $eq: ['$_id', '$$userId'] },
+                        { $eq: ['$role', 'student'] },
+                        { $eq: ['$status', 'active'] },
+                        { $ne: ['$isActive', false] },
+                      ],
+                    },
+                  },
+                },
+                { $limit: 1 },
+                { $project: { _id: 1, status: 1, isActive: 1 } },
+              ],
+              as: '_collegeStudent',
+            },
+          },
+          {
+            $match: {
+              $expr: {
+                $or: [
+                  { $gt: [{ $size: '$_independentStudent' }, 0] },
+                  { $gt: [{ $size: '$_collegeStudent' }, 0] },
+                ],
+              },
+            },
+          },
+          {
+            $lookup: {
               from: 'courses',
               localField: 'courseId',
               foreignField: '_id',
@@ -2319,6 +2448,31 @@ router.get('/overview', ...requireAdmin, async (req, res, next) => {
                   ],
                 },
               },
+              _startedPlaybackCount: {
+                $size: {
+                  $setIntersection: [
+                    {
+                      $map: {
+                        input: {
+                          $filter: {
+                            input: { $objectToArray: { $ifNull: ['$lessonPlaybackPositions', {}] } },
+                            as: 'position',
+                            cond: {
+                              $and: [
+                                { $in: ['$$position.k', { $map: { input: '$_courseLessonIds', as: 'lessonId', in: { $toString: '$$lessonId' } } }] },
+                                { $gt: ['$$position.v', 0] },
+                              ],
+                            },
+                          },
+                        },
+                        as: 'position',
+                        in: '$$position.k',
+                      },
+                    },
+                    { $map: { input: '$_courseLessonIds', as: 'lessonId', in: { $toString: '$$lessonId' } } },
+                  ],
+                },
+              },
             },
           },
           {
@@ -2328,7 +2482,6 @@ router.get('/overview', ...requireAdmin, async (req, res, next) => {
                 enrollmentId: '$_id',
                 userId: '$userId',
                 courseId: '$courseId',
-                quizIds: '$_courseQuizIds',
               },
               pipeline: [
                 {
@@ -2339,12 +2492,11 @@ router.get('/overview', ...requireAdmin, async (req, res, next) => {
                         { $eq: ['$userId', '$$userId'] },
                         { $eq: ['$courseId', '$$courseId'] },
                         { $eq: ['$status', 'submitted'] },
-                        { $in: ['$quizId', '$$quizIds'] },
                       ],
                     },
                   },
                 },
-                { $project: { _id: 0, quizId: 1 } },
+                { $project: { _id: 0, enrollmentId: 1, userId: 1, courseId: 1, quizId: 1, status: 1, passed: 1 } },
               ],
               as: '_submittedQuizAttempts',
             },
@@ -2385,7 +2537,6 @@ router.get('/overview', ...requireAdmin, async (req, res, next) => {
                 enrollmentId: '$_id',
                 userId: '$userId',
                 courseId: '$courseId',
-                assignmentIds: '$_courseAssignmentIds',
               },
               pipeline: [
                 {
@@ -2395,12 +2546,11 @@ router.get('/overview', ...requireAdmin, async (req, res, next) => {
                         { $eq: ['$enrollmentId', '$$enrollmentId'] },
                         { $eq: ['$userId', '$$userId'] },
                         { $eq: ['$courseId', '$$courseId'] },
-                        { $in: ['$assignmentId', '$$assignmentIds'] },
                       ],
                     },
                   },
                 },
-                { $project: { _id: 0, assignmentId: 1 } },
+                { $project: { _id: 1, enrollmentId: 1, userId: 1, courseId: 1, assignmentId: 1, reviewStatus: 1, submittedAt: 1 } },
               ],
               as: '_submittedAssignments',
             },
@@ -2456,6 +2606,7 @@ router.get('/overview', ...requireAdmin, async (req, res, next) => {
                 $or: [
                   { $gt: ['$_completedActivityCount', 0] },
                   { $gt: ['$_startedLessonCount', 0] },
+                  { $gt: ['$_startedPlaybackCount', 0] },
                   { $gt: ['$_startedQuizCount', 0] },
                 ],
               },
@@ -2534,6 +2685,54 @@ router.get('/overview', ...requireAdmin, async (req, res, next) => {
                   },
                 },
               ],
+              courseEnrollments: [
+                {
+                  $match: {
+                    status: { $in: ['active', 'completed'] },
+                    'course.status': 'published',
+                    $expr: {
+                      $or: [
+                        { $gt: [{ $size: '$_independentStudent' }, 0] },
+                        { $gt: [{ $size: '$_collegeStudent' }, 0] },
+                      ],
+                    },
+                  },
+                },
+                {
+                  $project: {
+                    _id: 1,
+                    userId: 1,
+                    courseId: 1,
+                    status: 1,
+                    completedLessonIds: 1,
+                    studentType: {
+                      $cond: [{ $gt: [{ $size: '$_collegeStudent' }, 0] }, 'college', 'independent'],
+                    },
+                    studentStatus: {
+                      $cond: [
+                        { $gt: [{ $size: '$_collegeStudent' }, 0] },
+                        { $arrayElemAt: ['$_collegeStudent.status', 0] },
+                        { $arrayElemAt: ['$_independentStudent.status', 0] },
+                      ],
+                    },
+                    studentIsActive: {
+                      $cond: [
+                        { $gt: [{ $size: '$_collegeStudent' }, 0] },
+                        { $arrayElemAt: ['$_collegeStudent.isActive', 0] },
+                        { $arrayElemAt: ['$_independentStudent.isActive', 0] },
+                      ],
+                    },
+                    courseStatus: '$course.status',
+                    course: {
+                      modules: '$course.modules',
+                      quizzes: '$course.quizzes',
+                      assignments: '$course.assignments',
+                    },
+                    _submittedQuizAttempts: 1,
+                    _submittedAssignments: 1,
+                  },
+                },
+              ],
             },
           },
         ]),
@@ -2558,7 +2757,13 @@ router.get('/overview', ...requireAdmin, async (req, res, next) => {
       .slice(0, 20)
     const studentSummary = enrollmentProgressSummary[0]?.studentSummary[0]
     const enrollmentSummary = enrollmentProgressSummary[0]?.enrollmentSummary[0]
-    const totalActivities = enrollmentSummary?.totalActivities || 0
+    const courseEnrollmentRows = enrollmentProgressSummary[0]?.courseEnrollments || []
+    const courseProgressSummary = summarizeCourseProgress(
+      courseEnrollmentRows,
+      courseEnrollmentRows.flatMap(({ _submittedQuizAttempts = [] }) => _submittedQuizAttempts),
+      courseEnrollmentRows.flatMap(({ _submittedAssignments = [] }) => _submittedAssignments),
+    )
+    const totalActivities = courseProgressSummary.totalActivities
 
     return res.json({
       stats: {
@@ -2566,31 +2771,32 @@ router.get('/overview', ...requireAdmin, async (req, res, next) => {
         pendingIndependentStudents,
         totalColleges,
         totalCourses,
-        totalEnrollments,
+        totalEnrollments: enrollmentSummary?.totalEnrollments || 0,
         enrolledStudents: studentSummary?.enrolledStudents || 0,
       },
       recentRegistrations,
       recentCourses,
       courseCompletion: {
-        completed: enrollmentSummary?.completedEnrollments || 0,
-        inProgress: enrollmentSummary?.inProgressEnrollments || 0,
-        enrolledStudents: studentSummary?.enrolledStudents || 0,
-        totalEnrollments: enrollmentSummary?.totalEnrollments || 0,
-        completedEnrollments: enrollmentSummary?.completedEnrollments || 0,
-        inProgressEnrollments: enrollmentSummary?.inProgressEnrollments || 0,
-        notStartedEnrollments: enrollmentSummary?.notStartedEnrollments || 0,
-        completedActivities: enrollmentSummary?.completedActivities || 0,
-        inProgressActivities: enrollmentSummary?.inProgressActivities || 0,
-        notStartedActivities: enrollmentSummary?.notStartedActivities || 0,
+        completed: courseProgressSummary.completed,
+        inProgress: courseProgressSummary.inProgress,
+        notStarted: courseProgressSummary.notStarted,
+        enrolledStudents: courseProgressSummary.enrolledStudents,
+        totalEnrollments: courseProgressSummary.totalEnrollments,
+        completedEnrollments: courseProgressSummary.completed,
+        inProgressEnrollments: courseProgressSummary.inProgress,
+        notStartedEnrollments: courseProgressSummary.notStarted,
+        completedActivities: courseProgressSummary.completedActivities,
+        inProgressActivities: courseProgressSummary.inProgressActivities,
+        notStartedActivities: courseProgressSummary.notStartedActivities,
         totalActivities,
         activityCompletionPercentage: totalActivities
-          ? Math.round((enrollmentSummary.completedActivities / totalActivities) * 100)
+          ? Math.round((courseProgressSummary.completedActivities / totalActivities) * 100)
           : 0,
       },
       dataAvailability: {
         courses: true,
         enrollmentActivity: Boolean(await Enrollment.exists({})),
-        courseCompletion: (enrollmentSummary?.totalEnrollments || 0) > 0,
+        courseCompletion: courseProgressSummary.totalEnrollments > 0,
       },
     })
   } catch (error) {
@@ -3387,6 +3593,24 @@ router.delete('/students/bulk', ...requireAdmin, async (req, res, next) => {
           accountId: { $in: selectedIds },
         }, { session })
         await Enrollment.deleteMany({ userId: { $in: selectedIds } }, { session })
+        await AssignmentSubmission.deleteMany({ userId: { $in: selectedIds } }, { session })
+        await QuizAttempt.deleteMany({ userId: { $in: selectedIds } }, { session })
+        await Certificate.deleteMany({ userId: { $in: selectedIds } }, { session })
+        await Notification.deleteMany({ recipientRole: 'student', recipientId: { $in: selectedIds } }, { session })
+        await VideoAttentionResponse.deleteMany({ userId: { $in: selectedIds } }, { session })
+        await RefreshSession.deleteMany({ userId: { $in: selectedIds } }, { session })
+        await ReferralCode.updateMany(
+          { usedBy: { $in: selectedIds } },
+          {
+            $set: {
+              usedBy: null,
+              usedAt: null,
+              status: 'active',
+              registrationStatus: null,
+            },
+          },
+          { session },
+        )
         await CollegeStudent.deleteMany({
           _id: { $in: selectedIds },
           collegeId: selectedCollegeId,
@@ -3443,6 +3667,24 @@ router.delete('/students/:studentId', ...requireAdmin, async (req, res, next) =>
           accountId,
         }, { session })
         await Enrollment.deleteMany({ userId: accountId }, { session })
+        await AssignmentSubmission.deleteMany({ userId: accountId }, { session })
+        await QuizAttempt.deleteMany({ userId: accountId }, { session })
+        await Certificate.deleteMany({ userId: accountId }, { session })
+        await Notification.deleteMany({ recipientRole: 'student', recipientId: accountId }, { session })
+        await VideoAttentionResponse.deleteMany({ userId: accountId }, { session })
+        await RefreshSession.deleteMany({ userId: accountId }, { session })
+        await ReferralCode.updateMany(
+          { usedBy: accountId },
+          {
+            $set: {
+              usedBy: null,
+              usedAt: null,
+              status: 'active',
+              registrationStatus: null,
+            },
+          },
+          { session },
+        )
         await AccountModel.deleteOne({ _id: accountId, role: 'student', studentType }, { session })
       })
     } finally {
@@ -3687,7 +3929,7 @@ router.get('/students/:studentId/details', ...requireAdmin, async (req, res, nex
     const student = await studentQuery.lean()
     if (!student) return res.status(404).json({ message: 'The student was not found.' })
 
-    const [college, enrollmentRecords, ownedReferralCodes] = await Promise.all([
+    const [college, enrollmentRecords, ownedReferralCodes, usedReferralCode] = await Promise.all([
       studentType === 'college' ? College.findById(student.collegeId).select('name').lean() : null,
       Enrollment.find({ userId: student._id, status: { $ne: 'cancelled' } })
         .select('_id courseId assignedBy status completedLessonIds startedLessonIds lessonCompletionDates collegeId createdAt')
@@ -3699,6 +3941,12 @@ router.get('/students/:studentId/details', ...requireAdmin, async (req, res, nex
           .sort({ createdAt: -1 })
           .lean()
         : [],
+      studentType === 'independent'
+        ? ReferralCode.findOne({ usedBy: student._id })
+          .select('code generatedBy')
+          .populate('generatedBy', 'fullName studentId email')
+          .lean()
+        : null,
     ])
     const referralCodes = ownedReferralCodes.map((code) => code.code)
     const referredStudents = referralCodes.length
@@ -3867,7 +4115,14 @@ router.get('/students/:studentId/details', ...requireAdmin, async (req, res, nex
         createdAt: student.createdAt || null,
         status: student.status || 'unknown',
         referralCodeUsed: studentType === 'independent'
-          ? student.registrationDetails?.referralCode || null
+          ? usedReferralCode?.code || student.registrationDetails?.referralCode || null
+          : null,
+        referralCodeOwner: studentType === 'independent' && usedReferralCode?.generatedBy
+          ? {
+            fullName: usedReferralCode.generatedBy.fullName || '',
+            studentId: usedReferralCode.generatedBy.studentId || '',
+            email: usedReferralCode.generatedBy.email || '',
+          }
           : null,
       },
       summary: {

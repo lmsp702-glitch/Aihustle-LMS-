@@ -1947,6 +1947,17 @@ test('Main Admin student details returns owned referral codes and their actual r
         approvalStatus: 'approved',
       })
     }),
+    stub(ReferralCode, 'findOne', (filter) => {
+      assert.deepEqual(filter, { usedBy: ownerId })
+      return queryResult({
+        code: 'CODE-USED-AT-REGISTRATION',
+        generatedBy: {
+          fullName: 'Code Creator',
+          studentId: 'CREATOR-01',
+          email: 'creator@example.invalid',
+        },
+      })
+    }),
     stub(ReferralCode, 'find', (filter) => {
       referralQuery = filter
       return queryResult([
@@ -2047,6 +2058,11 @@ test('Main Admin student details returns owned referral codes and their actual r
     assert.equal(referredStudentQuery['registrationDetails.referralCode'].$in.length, 5)
     assert.equal(result.student.studentId, 'OWNER-01')
     assert.equal(result.student.referralCodeUsed, 'CODE-USED-AT-REGISTRATION')
+    assert.deepEqual(result.student.referralCodeOwner, {
+      fullName: 'Code Creator',
+      studentId: 'CREATOR-01',
+      email: 'creator@example.invalid',
+    })
     assert.deepEqual(result.referralDetails.codes.map(({ code, status }) => ({ code, status })), [
       { code: 'ACTIVE-REFERRAL', status: 'Active' },
       { code: 'USED-APPROVED', status: 'Used' },
@@ -3128,10 +3144,13 @@ test('admin course creation rejects malformed lesson resources', async () => {
   }
 })
 
-test('admin course listing uses a non-conflicting projection for lessons and quiz fields', async () => {
+test('admin course listing counts valid student-course enrollments separately', async () => {
+  const publishedCourseId = new mongoose.Types.ObjectId('68a000000000000000000030')
+  const archivedCourseId = new mongoose.Types.ObjectId('68a000000000000000000031')
   let projection
   let listLimit
   let enrollmentPipeline
+  let independentStudentFilter
   const query = {
     select(value) {
       projection = value
@@ -3144,7 +3163,10 @@ test('admin course listing uses a non-conflicting projection for lessons and qui
       listLimit = value
       return this
     },
-    lean: async () => [],
+    lean: async () => [
+      { _id: publishedCourseId, title: 'Published course', status: 'published' },
+      { _id: archivedCourseId, title: 'Archived course', status: 'archived' },
+    ],
   }
   const restores = [
     stub(Admin, 'findById', () => queryResult({
@@ -3155,9 +3177,17 @@ test('admin course listing uses a non-conflicting projection for lessons and qui
     })),
     stub(Course, 'find', () => query),
     stub(Course, 'countDocuments', async (filter) => filter.status === 'published' ? 2 : filter.status === 'draft' ? 1 : 3),
+    stub(Student, 'find', (filter) => {
+      independentStudentFilter = filter
+      return queryResult([{ _id: '68a000000000000000000020' }])
+    }),
+    stub(CollegeStudent, 'find', () => queryResult([{ _id: '68a000000000000000000021' }])),
     stub(Enrollment, 'aggregate', (pipeline) => {
       enrollmentPipeline = pipeline
-      return Promise.resolve([{ total: 12 }])
+      return Promise.resolve([{
+        courseCounts: [{ _id: publishedCourseId, total: 2 }],
+        enrollmentCount: [{ total: 3 }],
+      }])
     }),
   ]
   try {
@@ -3167,8 +3197,11 @@ test('admin course listing uses a non-conflicting projection for lessons and qui
     })
     assert.equal(response.status, 200)
     assert.deepEqual(await response.json(), {
-      courses: [],
-      stats: { totalCourses: 3, publishedCourses: 2, draftCourses: 1, totalEnrolledStudents: 12 },
+      courses: [
+        { _id: String(publishedCourseId), title: 'Published course', status: 'published', activeEnrolledStudents: 2 },
+        { _id: String(archivedCourseId), title: 'Archived course', status: 'archived', activeEnrolledStudents: 0 },
+      ],
+      stats: { totalCourses: 3, publishedCourses: 2, draftCourses: 1, totalEnrolledStudents: 3 },
     })
     assert.ok(projection.includes('quizzes.questions.correctOptionIndex'))
     assert.equal(projection.split(/\s+/).includes('quizzes'), false)
@@ -3198,11 +3231,22 @@ test('admin course listing uses a non-conflicting projection for lessons and qui
     assert.ok(projection.includes('+modules.contentItems.quiz.questions.correctOptionIndices'))
     assert.equal(projection.split(/\s+/).includes('modules'), false)
     assert.equal(listLimit, undefined)
-    assert.deepEqual(enrollmentPipeline, [
-      { $match: { status: { $ne: 'cancelled' } } },
-      { $group: { _id: { userId: '$userId', collegeId: { $ifNull: ['$collegeId', null] } } } },
-      { $count: 'total' },
+    assert.equal(independentStudentFilter.status, 'active')
+    assert.deepEqual(independentStudentFilter.isActive, { $ne: false })
+    assert.deepEqual(independentStudentFilter.$or, [
+      { approvalStatus: 'approved' },
+      { approvalStatus: { $exists: false } },
     ])
+    assert.deepEqual(enrollmentPipeline[0].$match.status, { $in: ['active', 'completed'] })
+    assert.equal(enrollmentPipeline[0].$match.deletedAt, null)
+    assert.equal(enrollmentPipeline[0].$match.userId.$in.length, 2)
+    assert.deepEqual(enrollmentPipeline[0].$match.courseId.$in, [publishedCourseId])
+    assert.ok(enrollmentPipeline[1].$facet)
+    assert.deepEqual(enrollmentPipeline[1].$facet.enrollmentCount, [{ $count: 'total' }])
+    assert.deepEqual(enrollmentPipeline[1].$facet.courseCounts[0].$group._id, {
+      courseId: '$courseId',
+      userId: '$userId',
+    })
   } finally {
     for (const restore of restores.reverse()) restore()
   }
@@ -7971,6 +8015,13 @@ test('main admin permanent deletion removes the student, identity, and enrollmen
     stub(Student, 'findOne', () => queryResult({ _id: new mongoose.Types.ObjectId(studentId) })),
     stub(AccountIdentity, 'deleteOne', async (filter) => { operations.push(['identity', filter]) }),
     stub(Enrollment, 'deleteMany', async (filter) => { operations.push(['enrollments', filter]) }),
+    stub(AssignmentSubmission, 'deleteMany', async (filter) => { operations.push(['assignment-submissions', filter]) }),
+    stub(QuizAttempt, 'deleteMany', async (filter) => { operations.push(['quiz-attempts', filter]) }),
+    stub(Certificate, 'deleteMany', async (filter) => { operations.push(['certificates', filter]) }),
+    stub(Notification, 'deleteMany', async (filter) => { operations.push(['notifications', filter]) }),
+    stub(VideoAttentionResponse, 'deleteMany', async (filter) => { operations.push(['video-attention-responses', filter]) }),
+    stub(RefreshSession, 'deleteMany', async (filter) => { operations.push(['refresh-sessions', filter]) }),
+    stub(ReferralCode, 'updateMany', async (filter) => { operations.push(['referral-codes', filter]) }),
     stub(Student, 'deleteOne', async (filter) => { operations.push(['student', filter]) }),
     stub(mongoose, 'startSession', async () => session),
   ]
@@ -7981,9 +8032,20 @@ test('main admin permanent deletion removes the student, identity, and enrollmen
       method: 'DELETE',
     })
     assert.equal(response.status, 200)
-    assert.deepEqual(operations.map(([name]) => name), ['identity', 'enrollments', 'student'])
+    assert.deepEqual(operations.map(([name]) => name), [
+      'identity',
+      'enrollments',
+      'assignment-submissions',
+      'quiz-attempts',
+      'certificates',
+      'notifications',
+      'video-attention-responses',
+      'refresh-sessions',
+      'referral-codes',
+      'student',
+    ])
     assert.equal(String(operations[1][1].userId), studentId)
-    assert.equal(String(operations[2][1]._id), studentId)
+    assert.equal(String(operations[9][1]._id), studentId)
   } finally {
     restores.reverse().forEach((restore) => restore())
   }
@@ -8011,6 +8073,13 @@ test('bulk college student deletion handles one student and routes to the bulk e
     }),
     stub(AccountIdentity, 'deleteMany', async (filter) => { operations.push(['identity', filter]) }),
     stub(Enrollment, 'deleteMany', async (filter) => { operations.push(['enrollments', filter]) }),
+    stub(AssignmentSubmission, 'deleteMany', async (filter) => { operations.push(['assignment-submissions', filter]) }),
+    stub(QuizAttempt, 'deleteMany', async (filter) => { operations.push(['quiz-attempts', filter]) }),
+    stub(Certificate, 'deleteMany', async (filter) => { operations.push(['certificates', filter]) }),
+    stub(Notification, 'deleteMany', async (filter) => { operations.push(['notifications', filter]) }),
+    stub(VideoAttentionResponse, 'deleteMany', async (filter) => { operations.push(['video-attention-responses', filter]) }),
+    stub(RefreshSession, 'deleteMany', async (filter) => { operations.push(['refresh-sessions', filter]) }),
+    stub(ReferralCode, 'updateMany', async (filter) => { operations.push(['referral-codes', filter]) }),
     stub(CollegeStudent, 'deleteMany', async (filter) => { operations.push(['students', filter]) }),
     stub(mongoose, 'startSession', async () => session),
   ]
@@ -8025,11 +8094,22 @@ test('bulk college student deletion handles one student and routes to the bulk e
     const result = await response.json()
     assert.equal(result.deleted, 1)
     assert.match(result.message, /Deleted 1 college students/)
-    assert.deepEqual(operations.map(([name]) => name), ['identity', 'enrollments', 'students'])
+    assert.deepEqual(operations.map(([name]) => name), [
+      'identity',
+      'enrollments',
+      'assignment-submissions',
+      'quiz-attempts',
+      'certificates',
+      'notifications',
+      'video-attention-responses',
+      'refresh-sessions',
+      'referral-codes',
+      'students',
+    ])
     assert.equal(operations[0][1].accountCollection, 'clg_students')
     assert.deepEqual(operations[0][1].accountId.$in.map(String), [studentId.toString()])
     assert.deepEqual(operations[1][1].userId.$in.map(String), [studentId.toString()])
-    assert.deepEqual(operations[2][1]._id.$in.map(String), [studentId.toString()])
+    assert.deepEqual(operations[9][1]._id.$in.map(String), [studentId.toString()])
   } finally {
     restores.reverse().forEach((restore) => restore())
   }
@@ -8058,6 +8138,13 @@ test('bulk college student deletion handles multiple/all selected students in th
     }),
     stub(AccountIdentity, 'deleteMany', async () => ({})),
     stub(Enrollment, 'deleteMany', async () => ({})),
+    stub(AssignmentSubmission, 'deleteMany', async () => ({})),
+    stub(QuizAttempt, 'deleteMany', async () => ({})),
+    stub(Certificate, 'deleteMany', async () => ({})),
+    stub(Notification, 'deleteMany', async () => ({})),
+    stub(VideoAttentionResponse, 'deleteMany', async () => ({})),
+    stub(RefreshSession, 'deleteMany', async () => ({})),
+    stub(ReferralCode, 'updateMany', async () => ({})),
     stub(CollegeStudent, 'deleteMany', async () => ({})),
     stub(mongoose, 'startSession', async () => session),
   ]
@@ -8841,6 +8928,7 @@ test('main admin student details resolve college, deduplicate courses, and calcu
       createdAt: '2026-01-02T00:00:00.000Z',
       status: 'active',
       referralCodeUsed: null,
+      referralCodeOwner: null,
     })
     assert.equal(String(enrollmentQuery.userId), studentId)
     assert.deepEqual(enrollmentQuery.status, { $ne: 'cancelled' })
@@ -8896,6 +8984,10 @@ test('main admin independent student details do not query or expose college reco
       })
     }),
     stub(ReferralCode, 'find', () => queryResult([])),
+    stub(ReferralCode, 'findOne', (filter) => {
+      assert.deepEqual(filter, { usedBy: new mongoose.Types.ObjectId(studentId) })
+      return queryResult(null)
+    }),
     stub(CollegeStudent, 'findOne', () => {
       assert.fail('Independent student details must use the students collection.')
     }),
@@ -8916,6 +9008,8 @@ test('main admin independent student details do not query or expose college reco
     const result = await response.json()
     assert.equal(result.student.collegeName, null)
     assert.equal(result.student.collegeId, null)
+    assert.equal(result.student.referralCodeUsed, null)
+    assert.equal(result.student.referralCodeOwner, null)
     assert.deepEqual(result.summary, {
       coursesAssigned: 0,
       coursesEnrolled: 0,
@@ -8962,12 +9056,24 @@ test('main admin overview returns database-backed statistics and chart records',
         status: { $ne: 'cancelled' },
       },
     })
-    assert.deepEqual(pipeline[1].$lookup, {
+    assert.deepEqual(pipeline.find((stage) => stage.$lookup?.as === 'course').$lookup, {
       from: 'courses',
       localField: 'courseId',
       foreignField: '_id',
       as: 'course',
     })
+    for (const as of ['_independentStudent', '_collegeStudent']) {
+      const lookup = pipeline.find((stage) => stage.$lookup?.as === as).$lookup
+      const conditions = lookup.pipeline[0].$match.$expr.$and
+      assert.ok(conditions.some((condition) => condition.$eq?.[0] === '$status' && condition.$eq?.[1] === 'active'))
+      assert.ok(conditions.some((condition) => condition.$ne?.[0] === '$isActive' && condition.$ne?.[1] === false))
+      if (as === '_independentStudent') {
+        assert.ok(conditions.some((condition) => condition.$or?.some(
+          (approvalCondition) => approvalCondition.$eq?.[0] === '$approvalStatus'
+            && approvalCondition.$eq?.[1] === 'approved',
+        )))
+      }
+    }
     assert.ok(pipeline.some((stage) => stage.$addFields?._courseLessonIds))
     assert.ok(pipeline.some((stage) => stage.$addFields?._courseQuizIds))
     assert.ok(pipeline.some((stage) => stage.$addFields?._courseAssignmentIds))
@@ -8984,6 +9090,9 @@ test('main admin overview returns database-backed statistics and chart records',
     })
     const summary = pipeline[pipeline.length - 1].$facet
     assert.ok(summary)
+    assert.deepEqual(summary.courseEnrollments[0].$match.status, { $in: ['active', 'completed'] })
+    assert.equal(summary.courseEnrollments[0].$match['course.status'], 'published')
+    assert.ok(summary.courseEnrollments[0].$match.$expr.$or.length === 2)
     assert.deepEqual(summary.studentSummary[0].$group._id, {
       userId: '$userId',
       collegeId: { $ifNull: ['$collegeId', null] },
@@ -9003,20 +9112,98 @@ test('main admin overview returns database-backed statistics and chart records',
       $or: [
         { $gt: ['$_completedActivityCount', 0] },
         { $gt: ['$_startedLessonCount', 0] },
+        { $gt: ['$_startedPlaybackCount', 0] },
         { $gt: ['$_startedQuizCount', 0] },
       ],
     })
     return [{
       studentSummary: [{ enrolledStudents: 7 }],
+      courseEnrollments: [
+        {
+          _id: 'enrollment-completed',
+          userId: 'student-completed',
+          courseId: 'course-completed',
+          status: 'completed',
+          studentType: 'independent',
+          studentStatus: 'active',
+          studentIsActive: true,
+          courseStatus: 'published',
+          completedLessonIds: ['lesson-completed'],
+          course: { modules: [{ contentItems: [{ _id: 'lesson-completed', type: 'video-lesson' }] }] },
+        },
+        {
+          _id: 'enrollment-in-progress',
+          userId: 'student-in-progress',
+          courseId: 'course-in-progress',
+          status: 'active',
+          studentType: 'college',
+          studentStatus: 'active',
+          studentIsActive: true,
+          courseStatus: 'published',
+          completedLessonIds: ['lesson-started'],
+          course: { modules: [{ contentItems: [
+            { _id: 'lesson-started', type: 'video-lesson' },
+            { _id: 'lesson-pending', type: 'video-lesson' },
+          ] }] },
+        },
+        {
+          _id: 'enrollment-not-started',
+          userId: 'student-not-started',
+          courseId: 'course-not-started',
+          status: 'active',
+          studentType: 'independent',
+          studentStatus: 'active',
+          studentIsActive: true,
+          courseStatus: 'published',
+          completedLessonIds: [],
+          course: { modules: [{ contentItems: [{ _id: 'lesson-not-started', type: 'video-lesson' }] }] },
+        },
+        {
+          _id: 'enrollment-cancelled',
+          userId: 'student-cancelled',
+          courseId: 'course-cancelled',
+          status: 'cancelled',
+          studentType: 'independent',
+          studentStatus: 'active',
+          studentIsActive: true,
+          courseStatus: 'published',
+          completedLessonIds: [],
+          course: { modules: [{ contentItems: [{ _id: 'lesson-cancelled', type: 'video-lesson' }] }] },
+        },
+        {
+          _id: 'enrollment-deleted-student',
+          userId: 'student-deleted',
+          courseId: 'course-deleted-student',
+          status: 'active',
+          studentType: 'independent',
+          studentStatus: 'deleted',
+          studentIsActive: false,
+          courseStatus: 'published',
+          completedLessonIds: [],
+          course: { modules: [{ contentItems: [{ _id: 'lesson-deleted-student', type: 'video-lesson' }] }] },
+        },
+        {
+          _id: 'enrollment-archived-course',
+          userId: 'student-archived-course',
+          courseId: 'course-archived',
+          status: 'active',
+          studentType: 'independent',
+          studentStatus: 'active',
+          studentIsActive: true,
+          courseStatus: 'archived',
+          completedLessonIds: [],
+          course: { modules: [{ contentItems: [{ _id: 'lesson-archived', type: 'video-lesson' }] }] },
+        },
+      ],
       enrollmentSummary: [{
         totalEnrollments: 10,
         totalActivities: 20,
         completedActivities: 9,
         inProgressActivities: 6,
         notStartedActivities: 5,
-        completedEnrollments: 4,
+        completedEnrollments: 10,
         inProgressEnrollments: 4,
-        notStartedEnrollments: 2,
+        notStartedEnrollments: 3,
       }],
     }]
   })
@@ -9047,24 +9234,31 @@ test('main admin overview returns database-backed statistics and chart records',
       pendingIndependentStudents: 12,
       totalColleges: 3,
       totalCourses: 5,
-      totalEnrollments: 11,
+      totalEnrollments: 10,
       enrolledStudents: 7,
     })
     assert.deepEqual(result.recentCourses.map(({ title }) => title), ['Database-backed course'])
     assert.deepEqual(result.courseCompletion, {
-      completed: 4,
-      inProgress: 4,
-      enrolledStudents: 7,
-      totalEnrollments: 10,
-      completedEnrollments: 4,
-      inProgressEnrollments: 4,
-      notStartedEnrollments: 2,
-      completedActivities: 9,
-      inProgressActivities: 6,
-      notStartedActivities: 5,
-      totalActivities: 20,
-      activityCompletionPercentage: 45,
+      completed: 1,
+      inProgress: 1,
+      notStarted: 1,
+      enrolledStudents: 3,
+      totalEnrollments: 3,
+      completedEnrollments: 1,
+      inProgressEnrollments: 1,
+      notStartedEnrollments: 1,
+      completedActivities: 2,
+      inProgressActivities: 1,
+      notStartedActivities: 1,
+      totalActivities: 4,
+      activityCompletionPercentage: 50,
     })
+    assert.equal(
+      result.courseCompletion.completedEnrollments
+      + result.courseCompletion.inProgressEnrollments
+      + result.courseCompletion.notStartedEnrollments,
+      result.courseCompletion.totalEnrollments,
+    )
     assert.equal(result.dataAvailability.courseCompletion, true)
   } finally {
     restoreCourses()

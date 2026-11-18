@@ -7918,22 +7918,6 @@ button.student-category {
   gap: 16px;
 }
 
-.student-course-learning-topbar__identity a {
-  flex: 0 0 auto;
-  color: #173c2c;
-  font-size: 12px;
-  font-weight: 650;
-  text-decoration: none;
-  white-space: nowrap;
-}
-
-.student-course-learning-topbar__identity > span {
-  width: 1px;
-  height: 28px;
-  flex: 0 0 1px;
-  background: #9caa9e;
-}
-
 .student-course-learning-topbar__identity strong {
   color: #173c2c;
   font-size: 23px;
@@ -8361,10 +8345,6 @@ button.student-category {
   .student-course-learning-topbar__identity {
     flex: 1 1 auto;
     gap: 8px;
-  }
-
-  .student-course-learning-topbar__identity a {
-    font-size: 10px;
   }
 
   .student-course-learning-topbar__identity strong {

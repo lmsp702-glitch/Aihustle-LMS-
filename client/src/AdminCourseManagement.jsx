@@ -518,7 +518,7 @@ function CourseStats({ stats }) {
     ['Total courses', stats.totalCourses, '▤'],
     ['Published', stats.publishedCourses, '✓'],
     ['Drafts', stats.draftCourses, '◷'],
-    ['Enrolled students', stats.totalEnrolledStudents, '♙'],
+    ['Course enrollments', stats.totalEnrolledStudents, '♙'],
   ]
   return (
     <div className="ac-stats" aria-label="Course statistics">
@@ -548,7 +548,7 @@ function CourseCard({ course, onEdit, onPreview, onToggleStatus, onDelete }) {
         </div>
         <p className="ac-course-card__description">{course.description || course.detailedDescription || 'No course description added yet.'}</p>
         <div className="ac-course-card__meta">
-          <span>{counts.modules} modules</span><span>{counts.lessons} lessons</span><span>{formatDuration(course.estimatedDurationMinutes)}</span>
+          <span>{counts.modules} modules</span><span>{counts.lessons} lessons</span><span>{formatDuration(course.estimatedDurationMinutes)}</span><span>{Number(course.activeEnrolledStudents) || 0} active students enrolled</span>
         </div>
         <div className="ac-course-card__actions">
           <button type="button" className="ac-button ac-button--quiet" onClick={() => onPreview(course)} aria-label={`Preview ${course.title}`}>

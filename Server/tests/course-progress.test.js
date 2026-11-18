@@ -7,6 +7,7 @@ import {
   calculateCourseActivityProgress,
   calculateCourseProgress,
   recalculateEnrollmentsCourseProgress,
+  summarizeCourseProgress,
 } from '../utils/course-progress.js'
 import AssignmentSubmission from '../models/AssignmentSubmission.js'
 import QuizAttempt from '../models/QuizAttempt.js'
@@ -337,6 +338,77 @@ test('required activities count without title or loaded quiz question data', () 
   assert.equal(progress.completedActivities, 3)
   assert.equal(progress.percentage, 100)
   assert.equal(progress.isComplete, true)
+})
+
+test('course completion summary counts eligible enrollments once and excludes invalid records', () => {
+  const completedVideoId = '68a000000000000000000201'
+  const inProgressVideoIds = ['68a000000000000000000202', '68a000000000000000000203']
+  const notStartedVideoId = '68a000000000000000000204'
+  const videoCourse = (videoIds) => ({
+    modules: [{
+      contentItems: videoIds.map((_id) => ({ _id, type: 'video-lesson' })),
+    }],
+  })
+  const enrollment = (overrides) => ({
+    _id: new mongoose.Types.ObjectId(),
+    userId: new mongoose.Types.ObjectId(),
+    courseId: new mongoose.Types.ObjectId(),
+    status: 'active',
+    studentType: 'independent',
+    studentStatus: 'active',
+    studentIsActive: true,
+    courseStatus: 'published',
+    completedLessonIds: [],
+    ...overrides,
+  })
+  const enrollments = [
+    enrollment({
+      status: 'completed',
+      completedLessonIds: [completedVideoId],
+      course: videoCourse([completedVideoId]),
+    }),
+    enrollment({
+      completedLessonIds: [inProgressVideoIds[0]],
+      course: videoCourse(inProgressVideoIds),
+    }),
+    enrollment({
+      course: videoCourse([notStartedVideoId]),
+    }),
+    enrollment({
+      status: 'cancelled',
+      course: videoCourse([notStartedVideoId]),
+    }),
+    enrollment({
+      studentStatus: 'deleted',
+      studentIsActive: false,
+      course: videoCourse([notStartedVideoId]),
+    }),
+    enrollment({
+      studentStatus: 'pending',
+      course: videoCourse([notStartedVideoId]),
+    }),
+    enrollment({
+      courseStatus: 'archived',
+      course: videoCourse([notStartedVideoId]),
+    }),
+    enrollment({
+      course: null,
+    }),
+  ]
+
+  const summary = summarizeCourseProgress(enrollments)
+  assert.deepEqual(summary, {
+    completed: 1,
+    inProgress: 1,
+    notStarted: 1,
+    totalEnrollments: 3,
+    completedActivities: 2,
+    inProgressActivities: 1,
+    notStartedActivities: 1,
+    totalActivities: 4,
+    enrolledStudents: 3,
+  })
+  assert.equal(summary.completed + summary.inProgress + summary.notStarted, summary.totalEnrollments)
 })
 
 test('batch recalculation loads the course when enrollment courseId is an unpopulated ObjectId', async () => {

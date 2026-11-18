@@ -6199,7 +6199,7 @@ function StudentDashboard({
 
       <main className="student-main" id="student-overview">
         <header className="student-topbar">
-          {(!isCourseLearningPage || sidebarOpen) && <button
+          <button
             className="student-icon-button student-menu-toggle"
             type="button"
             aria-label={sidebarOpen ? 'Close navigation' : 'Open navigation'}
@@ -6208,14 +6208,10 @@ function StudentDashboard({
             onClick={() => setSidebarOpen((open) => !open)}
           >
             <Icon name="menu" />
-          </button>}
+          </button>
           <div className={`student-breadcrumb student-page-heading${isCourseLearningPage ? ' student-course-learning-topbar__identity' : ''}`}>
             {isCourseLearningPage ? (
-              <>
-                <Link to="/student/courses">← Back to My Courses</Link>
-                <span aria-hidden="true" />
-                <strong>{courseLearningTitle || 'Course learning'}</strong>
-              </>
+              <strong>{courseLearningTitle || 'Course learning'}</strong>
             ) : (
               <>
                 <Icon name={pageIcon} size={19} />

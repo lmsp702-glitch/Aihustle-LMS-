@@ -103,6 +103,69 @@ export function calculateCourseProgress({
   }
 }
 
+export function summarizeCourseProgress(enrollments, quizAttempts = [], assignmentSubmissions = []) {
+  const attemptsByEnrollmentId = new Map()
+  const submissionsByEnrollmentId = new Map()
+  for (const attempt of quizAttempts) {
+    const key = documentId(attempt.enrollmentId)
+    if (key) attemptsByEnrollmentId.set(key, [...(attemptsByEnrollmentId.get(key) || []), attempt])
+  }
+  for (const submission of assignmentSubmissions) {
+    const key = documentId(submission.enrollmentId)
+    if (key) submissionsByEnrollmentId.set(key, [...(submissionsByEnrollmentId.get(key) || []), submission])
+  }
+
+  const summary = {
+    completed: 0,
+    inProgress: 0,
+    notStarted: 0,
+    totalEnrollments: 0,
+    completedActivities: 0,
+    inProgressActivities: 0,
+    notStartedActivities: 0,
+    totalActivities: 0,
+  }
+  const eligibleStudentKeys = new Set()
+  for (const enrollment of enrollments) {
+    if (
+      !['active', 'completed'].includes(enrollment.status)
+      || enrollment.studentStatus !== 'active'
+      || enrollment.studentIsActive === false
+      || enrollment.courseStatus !== 'published'
+      || !enrollment.course
+      || !enrollment.courseId
+      || !enrollment.userId
+    ) continue
+
+    eligibleStudentKeys.add(`${enrollment.studentType}:${documentId(enrollment.userId)}`)
+    const enrollmentId = documentId(enrollment._id)
+    const matchesEnrollment = (record) => (
+      documentId(record.userId) === documentId(enrollment.userId)
+      && documentId(record.courseId) === documentId(enrollment.courseId)
+    )
+    const progress = calculateCourseProgress({
+      course: enrollment.course,
+      enrollment,
+      quizAttempts: (attemptsByEnrollmentId.get(enrollmentId) || []).filter(matchesEnrollment),
+      assignmentSubmissions: (submissionsByEnrollmentId.get(enrollmentId) || []).filter(matchesEnrollment),
+    })
+    summary.totalEnrollments += 1
+    summary.totalActivities += progress.totalActivities
+    summary.completedActivities += progress.completedActivities
+    if (progress.isComplete) {
+      summary.completed += 1
+    } else if (progress.completedActivities > 0) {
+      summary.inProgress += 1
+      summary.inProgressActivities += progress.totalActivities - progress.completedActivities
+    } else {
+      summary.notStarted += 1
+      summary.notStartedActivities += progress.totalActivities
+    }
+  }
+  summary.enrolledStudents = eligibleStudentKeys.size
+  return summary
+}
+
 export function calculateCourseActivityProgress(course, enrollment, quizAttempts = [], assignmentSubmissions = []) {
   return calculateCourseProgress({ course, enrollment, quizAttempts, assignmentSubmissions })
 }

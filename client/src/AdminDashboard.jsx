@@ -174,27 +174,6 @@ function formatDateTime(value) {
     }).format(date)
 }
 
-function groupReferralCodesByDate(codes = []) {
-  const groups = new Map()
-  for (const code of codes) {
-    const date = code.createdAt ? new Date(code.createdAt) : null
-    const validDate = date && !Number.isNaN(date.getTime()) ? date : null
-    const key = validDate
-      ? `${validDate.getFullYear()}-${validDate.getMonth()}-${validDate.getDate()}`
-      : 'unavailable'
-    if (!groups.has(key)) groups.set(key, { label: validDate ? formatDate(validDate) : 'Date unavailable', codes: [] })
-    groups.get(key).codes.push(code)
-  }
-  return [...groups.values()]
-}
-
-function createReferralUrl(code) {
-  const url = new URL('/', window.location.origin)
-  url.searchParams.set('mode', 'register')
-  url.searchParams.set('referralCode', code)
-  return url.toString()
-}
-
 function StatusBadge({ status }) {
   const normalizedStatus = String(status || 'unknown').toLowerCase()
   const badgeStatus = ['invitation_pending', 'pending approval'].includes(normalizedStatus)
@@ -362,45 +341,46 @@ function EngagementChart({ engagement, period }) {
 
 function CourseCompletionChart({ courseCompletion }) {
   const metrics = [
-    { label: 'Completed activities', value: courseCompletion?.completedActivities, tone: 'completed' },
-    { label: 'In-progress activities', value: courseCompletion?.inProgressActivities, tone: 'in-progress' },
-    { label: 'Not-started activities', value: courseCompletion?.notStartedActivities, tone: 'not-started' },
+    { label: 'Completed Courses', value: courseCompletion?.completedEnrollments, tone: 'completed' },
+    { label: 'In-Progress Courses', value: courseCompletion?.inProgressEnrollments, tone: 'in-progress' },
+    { label: 'Not-Started Courses', value: courseCompletion?.notStartedEnrollments, tone: 'not-started' },
   ].map((metric) => ({
     ...metric,
     value: Number.isSafeInteger(metric.value) && metric.value >= 0 ? metric.value : null,
   }))
+  const totalEligibleEnrollments = courseCompletion?.totalEnrollments
   const hasCompleteData = metrics.every(({ value }) => value !== null)
-  const totalActivities = Number.isSafeInteger(courseCompletion?.totalActivities)
-    ? courseCompletion.totalActivities
-    : hasCompleteData ? metrics.reduce((total, { value }) => total + value, 0) : 0
-  const completionPercentage = hasCompleteData && totalActivities
-    ? (metrics[0].value / totalActivities) * 100
+    && Number.isSafeInteger(totalEligibleEnrollments)
+    && totalEligibleEnrollments >= 0
+    && metrics.reduce((total, { value }) => total + value, 0) === totalEligibleEnrollments
+  const completionPercentage = hasCompleteData && totalEligibleEnrollments
+    ? (metrics[0].value / totalEligibleEnrollments) * 100
     : hasCompleteData ? 0 : null
-  const completionAngle = totalActivities ? (metrics[0].value / totalActivities) * 360 : 0
-  const progressAngle = totalActivities
-    ? ((metrics[0].value + metrics[1].value) / totalActivities) * 360
+  const completionAngle = totalEligibleEnrollments ? (metrics[0].value / totalEligibleEnrollments) * 360 : 0
+  const progressAngle = totalEligibleEnrollments
+    ? ((metrics[0].value + metrics[1].value) / totalEligibleEnrollments) * 360
     : 0
   const formatPercentage = (value) => value === null ? '—' : `${Number(value.toFixed(1))}%`
 
   return (
-    <div className="admin-completion" role="group" aria-label="Course activity progress">
+    <div className="admin-completion" role="group" aria-label="Enrolled course progress">
       <div
-        className={`admin-completion__donut${hasCompleteData && totalActivities ? '' : ' is-empty'}`}
-        style={hasCompleteData && totalActivities ? {
+        className={`admin-completion__donut${hasCompleteData && totalEligibleEnrollments ? '' : ' is-empty'}`}
+        style={hasCompleteData && totalEligibleEnrollments ? {
           '--completion-completed-angle': `${completionAngle}deg`,
           '--completion-progress-angle': `${progressAngle}deg`,
         } : undefined}
         role="img"
-        aria-label={`Overall activity completion ${formatPercentage(completionPercentage)}. ${metrics
+        aria-label={`Overall course completion ${formatPercentage(completionPercentage)}. ${metrics
           .map(({ label, value }) => `${label}: ${value === null ? 'Unavailable' : value}`)
           .join(', ')}`}
       >
         <div className="admin-completion__center">
           <strong>{formatPercentage(completionPercentage)}</strong>
-          <span>activities</span>
+          <span>courses</span>
         </div>
       </div>
-      <ul className="admin-completion__legend" aria-label="Activity progress breakdown">
+      <ul className="admin-completion__legend" aria-label="Course progress breakdown">
         {metrics.map(({ label, value, tone }) => (
           <li className={`admin-completion__legend-item is-${tone}`} key={label}>
             <span className="admin-completion__swatch" aria-hidden="true" />
@@ -410,7 +390,7 @@ function CourseCompletionChart({ courseCompletion }) {
               {formatPercentage(
                 value === null || completionPercentage === null
                   ? null
-                  : totalActivities ? (value / totalActivities) * 100 : 0,
+                  : totalEligibleEnrollments ? (value / totalEligibleEnrollments) * 100 : 0,
               )}
             </span>
           </li>
@@ -582,9 +562,6 @@ function AdminDashboard({
   const [studentDetailsError, setStudentDetailsError] = useState('')
   const [studentDetailsLoading, setStudentDetailsLoading] = useState(false)
   const [studentDetailsRetry, setStudentDetailsRetry] = useState(0)
-  const [selectedReferralCode, setSelectedReferralCode] = useState(null)
-  const [copiedReferralCode, setCopiedReferralCode] = useState('')
-  const [referralLinkError, setReferralLinkError] = useState('')
   const [referralCodesStudent, setReferralCodesStudent] = useState(null)
   const [referralCodes, setReferralCodes] = useState([])
   const [referralCodesLoading, setReferralCodesLoading] = useState(false)
@@ -1181,9 +1158,6 @@ function AdminDashboard({
       setStudentDetails(null)
       setStudentDetailsError('')
       setStudentDetailsLoading(false)
-      setSelectedReferralCode(null)
-      setCopiedReferralCode('')
-      setReferralLinkError('')
       return undefined
     }
 
@@ -1234,7 +1208,6 @@ function AdminDashboard({
   }, [onLogout, selectedStudent, studentDetailsRetry])
 
   function openStudentDetails(student) {
-    setSelectedReferralCode(null)
     setSelectedStudent(student)
   }
 
@@ -1270,17 +1243,6 @@ function AdminDashboard({
       }
     } finally {
       if (requestId === referralCodesRequestRef.current) setReferralCodesLoading(false)
-    }
-  }
-
-  async function copyReferralUrl(code) {
-    try {
-      await navigator.clipboard.writeText(createReferralUrl(code))
-      setCopiedReferralCode(code)
-      setReferralLinkError('')
-    } catch {
-      setCopiedReferralCode('')
-      setReferralLinkError('The referral link could not be copied. Please copy the link manually.')
     }
   }
 
@@ -1696,6 +1658,9 @@ function AdminDashboard({
       const result = await readResponse(response, onLogout)
       setStudentToDelete(null)
       if (selectedStudent?._id === studentToDelete._id) setSelectedStudent(null)
+      setStudents((current) => current.filter((student) => String(student._id) !== String(studentToDelete._id)))
+      setStudentManageStudents((current) => current.filter((student) => String(student._id) !== String(studentToDelete._id)))
+      setStudentTotal((current) => Math.max(0, current - 1))
       setStudentActionMessage(result.message || 'Student and related records deleted.')
       setStudentPage(1)
       setStudentsRetry((retry) => retry + 1)
@@ -2247,7 +2212,7 @@ function AdminDashboard({
                 </article>
                 <article className="admin-panel">
                   <div className="admin-panel__heading">
-                    <div><h2>Course Completion</h2><p>Progress across enrolled students</p></div>
+                    <div><h2>Course Completion</h2><p>Progress across eligible course enrollments</p></div>
                     <span className="admin-panel__period">All courses</span>
                   </div>
                   {isLoading
@@ -3193,130 +3158,44 @@ function AdminDashboard({
                   <div className="admin-student-detail-section__heading">
                     <h3 id="admin-student-referral-title">Referral Details</h3>
                   </div>
-                  {selectedReferralCode ? (
-                    <div className="admin-referral-detail">
-                      <div className="admin-referral-detail__actions">
-                        <button
-                          type="button"
-                          className="admin-button admin-button--secondary"
-                          onClick={() => {
-                            setSelectedReferralCode(null)
-                            setReferralLinkError('')
-                          }}
-                        >Back to referral codes</button>
-                        <StatusBadge status={selectedReferralCode.status} />
-                      </div>
-                      <h4>Referral Information</h4>
-                      <dl className="admin-student-details">
-                        <div><dt>Referral Code</dt><dd><code>{selectedReferralCode.code}</code></dd></div>
-                        <div><dt>Generated By - Student Name</dt><dd>{selectedReferralCode.generatedBy.fullName || 'Not provided'}</dd></div>
-                        <div><dt>Generated By - Student ID</dt><dd>{selectedReferralCode.generatedBy.studentId || 'Not provided'}</dd></div>
-                        <div><dt>Generated Date and Time</dt><dd>{formatDateTime(selectedReferralCode.createdAt)}</dd></div>
-                        <div><dt>Expiry Date and Time</dt><dd>{formatDateTime(selectedReferralCode.expiresAt)}</dd></div>
-                        <div><dt>Referral Status</dt><dd><StatusBadge status={selectedReferralCode.status} /></dd></div>
-                      </dl>
+                  <div className="admin-student-course-summary">
+                    {[
+                      ['Total Students Referred', studentDetails.summary.studentsReferred ?? 0, 'sage'],
+                      ['Successful Registrations', studentDetails.summary.successfulReferrals ?? 0, 'teal'],
+                      ['Pending Registrations', studentDetails.summary.pendingReferrals ?? 0, 'gold'],
+                    ].map(([label, count, tone]) => (
+                      <article className={`admin-student-course-summary__card is-${tone}`} key={label}>
+                        <span>{label}</span>
+                        <strong>{count}</strong>
+                      </article>
+                    ))}
+                  </div>
 
-                      <h4>Referral Link</h4>
-                      <div className="admin-referral-link">
-                        <a href={createReferralUrl(selectedReferralCode.code)} target="_blank" rel="noreferrer">
-                          {createReferralUrl(selectedReferralCode.code)}
-                        </a>
-                        <button
-                          type="button"
-                          className="admin-button admin-button--secondary"
-                          onClick={() => copyReferralUrl(selectedReferralCode.code)}
-                        >{copiedReferralCode === selectedReferralCode.code ? 'Copied' : 'Copy Link'}</button>
+                  <h4>Referral Code Used</h4>
+                  {studentDetails.student.referralCodeUsed ? (
+                    <dl className="admin-student-details">
+                      <div>
+                        <dt>Referral Code</dt>
+                        <dd><code>{studentDetails.student.referralCodeUsed}</code></dd>
                       </div>
-                      {referralLinkError && <p className="admin-inline-error" role="alert">{referralLinkError}</p>}
-
-                      <h4>Referral Summary</h4>
-                      <div className="admin-student-course-summary">
-                        {[
-                          ['Total Referrals', selectedReferralCode.referredStudents.length, 'sage'],
-                          ['Successful Registrations', selectedReferralCode.referredStudents.filter(({ status }) => status === 'Approved').length, 'teal'],
-                          ['Pending Registrations', selectedReferralCode.referredStudents.filter(({ status }) => status === 'Pending').length, 'gold'],
-                        ].map(([label, count, tone]) => (
-                          <article className={`admin-student-course-summary__card is-${tone}`} key={label}>
-                            <span>{label}</span>
-                            <strong>{count}</strong>
-                          </article>
-                        ))}
+                      <div>
+                        <dt>Referred By</dt>
+                        <dd>{studentDetails.student.referralCodeOwner?.fullName || 'Referrer information unavailable'}</dd>
                       </div>
-
-                      <h4>Students Joined Through This Code</h4>
-                      {selectedReferralCode.referredStudents.length ? (
-                        <div className="admin-table-wrap">
-                          <table className="admin-table">
-                            <thead>
-                              <tr><th>Student Name</th><th>Student ID</th><th>Email Address</th><th>Registration Date</th><th>Account Status</th></tr>
-                            </thead>
-                            <tbody>
-                              {selectedReferralCode.referredStudents.map((referredStudent) => (
-                                <tr key={referredStudent.id}>
-                                  <td>{referredStudent.fullName || 'Student record unavailable'}</td>
-                                  <td>{referredStudent.studentId || 'Not provided'}</td>
-                                  <td>{referredStudent.email || 'Not provided'}</td>
-                                  <td>{formatDateTime(referredStudent.registeredAt)}</td>
-                                  <td><StatusBadge status={referredStudent.status} /></td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
+                      {studentDetails.student.referralCodeOwner?.studentId && (
+                        <div>
+                          <dt>Referrer Student ID</dt>
+                          <dd>{studentDetails.student.referralCodeOwner.studentId}</dd>
                         </div>
-                      ) : <p className="admin-student-no-data">No students referred yet</p>}
-                    </div>
-                  ) : (
-                    <>
-                      <div className="admin-student-course-summary">
-                        {[
-                          ['Total Students Referred', studentDetails.summary.studentsReferred ?? 0, 'sage'],
-                          ['Successful Registrations', studentDetails.summary.successfulReferrals ?? 0, 'teal'],
-                          ['Pending Registrations', studentDetails.summary.pendingReferrals ?? 0, 'gold'],
-                        ].map(([label, count, tone]) => (
-                          <article className={`admin-student-course-summary__card is-${tone}`} key={label}>
-                            <span>{label}</span>
-                            <strong>{count}</strong>
-                          </article>
-                        ))}
-                      </div>
-
-                      <h4>Referral Codes Generated</h4>
-                      {studentDetails.referralDetails?.codes?.length ? (
-                        groupReferralCodesByDate(studentDetails.referralDetails.codes).map(({ label, codes }) => (
-                          <div className="admin-referral-group" key={label}>
-                            <h4>{label}</h4>
-                            <div className="admin-table-wrap">
-                              <table className="admin-table">
-                                <thead>
-                                  <tr><th>Referral Code</th><th>Date Generated</th><th>Expires</th><th>Status</th></tr>
-                                </thead>
-                                <tbody>
-                                  {codes.map((code) => (
-                                    <tr key={code.code}>
-                                      <td>
-                                        <a
-                                          className="admin-referral-code-link"
-                                          href={`#referral-${encodeURIComponent(code.code)}`}
-                                          onClick={(event) => {
-                                            event.preventDefault()
-                                            setSelectedReferralCode(code)
-                                            setReferralLinkError('')
-                                          }}
-                                        >{code.code}</a>
-                                      </td>
-                                      <td>{formatDateTime(code.createdAt)}</td>
-                                      <td>{formatDateTime(code.expiresAt)}</td>
-                                      <td><StatusBadge status={code.status} /></td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          </div>
-                        ))
-                      ) : <p className="admin-student-no-data">No referral code generated</p>}
-                    </>
-                  )}
+                      )}
+                      {studentDetails.student.referralCodeOwner?.email && (
+                        <div>
+                          <dt>Referrer Email</dt>
+                          <dd>{studentDetails.student.referralCodeOwner.email}</dd>
+                        </div>
+                      )}
+                    </dl>
+                  ) : <p className="admin-student-no-data">No referral code used</p>}
                 </section>
 
               </>
