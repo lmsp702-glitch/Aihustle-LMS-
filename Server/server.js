@@ -1,4 +1,5 @@
 import { config, requireJwtSecret } from './config/env.js'
+import { pathToFileURL } from 'node:url'
 import cors from 'cors'
 import express from 'express'
 import { connectToDatabase } from './config/db.js'
@@ -15,6 +16,7 @@ import notificationsRouter from './routes/notifications.js'
 import certificatesRouter from './routes/certificates.js'
 
 const app = express()
+export { app }
 app.use(
   cors({
     credentials: true,
@@ -158,4 +160,6 @@ async function startServer() {
   }
 }
 
-startServer()
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  startServer()
+}
