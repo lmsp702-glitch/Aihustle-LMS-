@@ -137,6 +137,16 @@
   margin: 0;
 }
 
+.admin-support__email-metadata {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.admin-support__email-subject-label {
+  color: var(--admin-muted, #626d67);
+  font-size: 0.72em;
+  font-weight: 600;
+}
+
 .admin-support__ticket-metadata > div {
   min-width: 0;
   padding: 13px;
@@ -682,6 +692,15 @@
   justify-content: flex-start;
 }
 
+.admin-support.is-main-admin .admin-support__complaint-action {
+  display: inline-flex;
+  width: 132px;
+  min-height: 38px;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+}
+
 .admin-support.is-main-admin .support-status.is-unresolved,
 .admin-support.is-main-admin .support-status.is-unsolved {
   background: #fbf1db;
@@ -756,6 +775,18 @@
 .admin-support.is-main-admin .admin-support__requester {
   border-color: var(--admin-line);
   background: var(--admin-paper);
+}
+
+.admin-support.is-main-admin .admin-support__email-body {
+  padding: 14px;
+  border: 1px solid var(--admin-line);
+  border-radius: var(--admin-card-radius);
+  background: var(--admin-paper);
+}
+
+.admin-support.is-main-admin .admin-support__email-body > p {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .admin-support.is-main-admin.is-dark .admin-support__requester {
@@ -1008,5 +1039,9 @@
 
   .admin-support__filters .admin-support__search {
     flex-basis: 100%;
+  }
+
+  .admin-support__email-metadata {
+    grid-template-columns: 1fr;
   }
 }

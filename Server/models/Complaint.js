@@ -1,6 +1,6 @@
 import mongoose from 'mongoose'
 
-export const complaintStatuses = ['Unsolved', 'Solved']
+export const complaintStatuses = ['Unsolved', 'Solved', 'Open', 'In Progress', 'Resolved']
 
 const complaintReplySchema = new mongoose.Schema(
   {
@@ -28,6 +28,8 @@ const complaintSchema = new mongoose.Schema(
     studentName: { type: String, trim: true, maxlength: 120 },
     studentId: { type: String, trim: true, maxlength: 100 },
     studentEmail: { type: String, trim: true, lowercase: true, maxlength: 254 },
+    source: { type: String, enum: ['Complaint', 'Email Support'], default: 'Complaint' },
+    priority: { type: String, enum: ['Low', 'Normal', 'High'], default: 'Normal' },
     collegeId: { type: mongoose.Schema.Types.ObjectId, ref: 'College' },
     subject: { type: String, required: true, trim: true, minlength: 3, maxlength: 160 },
     category: { type: String, required: true, trim: true, maxlength: 100 },

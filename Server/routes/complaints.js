@@ -4,6 +4,11 @@ import mongoose from 'mongoose'
 import Complaint, { complaintStatuses } from '../models/Complaint.js'
 import { CollegeStudent, Student } from '../models/account-models.js'
 import { authenticate } from '../middleware/auth.js'
+import {
+  logEmailDeliveryFailure,
+  sendEmailSupportMessage,
+  sendEmailSupportReply,
+} from '../utils/email.js'
 
 const router = Router()
 const studentCollections = new Set(['students', 'clg_students'])
@@ -15,11 +20,16 @@ const complaintCategories = new Set([
   'Technical Issue',
   'Other',
 ])
+const emailSupportStatuses = ['Unsolved', 'Solved']
 
 router.use(authenticate)
 
 function isValidText(value, minLength, maxLength) {
   return typeof value === 'string' && value.trim().length >= minLength && value.trim().length <= maxLength
+}
+
+function isValidEmailSupportSubject(value) {
+  return isValidText(value, 3, 160) && !/[\r\n\u0000-\u001f\u007f]/.test(value)
 }
 
 function requireStudent(req, res) {
@@ -116,7 +126,6 @@ router.post('/', async (req, res, next) => {
       .select('fullName email studentId studentType collegeId')
       .lean()
     if (!student) return res.status(404).json({ message: 'Student account not found.' })
-
     const complaint = await Complaint.create({
       complaintId: createComplaintId(),
       userId: new mongoose.Types.ObjectId(req.auth.id),
@@ -133,6 +142,76 @@ router.post('/', async (req, res, next) => {
       status: 'Unsolved',
     })
     return res.status(201).json({ complaint: serializeComplaint(complaint, student) })
+  } catch (error) {
+    if (error?.code === 11000) {
+      return res.status(503).json({ message: 'A unique complaint ID could not be allocated. Please try again.' })
+    }
+    return next(error)
+  }
+})
+
+router.post('/email-support', async (req, res, next) => {
+  try {
+    if (!requireStudent(req, res)) return
+    const { subject, message } = req.body ?? {}
+    if (!isValidEmailSupportSubject(subject)) {
+      return res.status(400).json({ message: 'Enter a subject between 3 and 160 characters.' })
+    }
+    if (!isValidText(message, 10, 10000)) {
+      return res.status(400).json({ message: 'Enter a message between 10 and 10,000 characters.' })
+    }
+
+    const StudentModel = req.auth.accountCollection === 'clg_students' ? CollegeStudent : Student
+    const student = await StudentModel.findById(req.auth.id)
+      .select('fullName email studentId studentType collegeId')
+      .lean()
+    if (!student) return res.status(404).json({ message: 'Student account not found.' })
+    if (!isValidText(student.fullName, 1, 120) || !isValidText(student.email, 3, 254)) {
+      return res.status(409).json({ message: 'Your student profile must have a name and email before contacting support.' })
+    }
+
+    const complaint = await Complaint.create({
+      complaintId: createComplaintId(),
+      userId: new mongoose.Types.ObjectId(req.auth.id),
+      userCollection: req.auth.accountCollection,
+      studentName: student.fullName || 'Student',
+      studentId: student.studentId || String(student._id),
+      studentEmail: student.email,
+      ...(req.auth.accountCollection === 'clg_students' && student.collegeId
+        ? { collegeId: student.collegeId }
+        : {}),
+      source: 'Email Support',
+      priority: 'Normal',
+      subject: subject.trim(),
+      category: 'Email Support',
+      description: message.trim(),
+      status: 'Unsolved',
+    })
+
+    let emailSent = true
+    let notificationMessage
+    try {
+      await sendEmailSupportMessage({
+        email: student.email,
+        fullName: student.fullName || 'Student',
+        subject: complaint.subject,
+        message: complaint.description,
+      })
+    } catch (emailError) {
+      emailSent = false
+      notificationMessage = `Your message was saved as ${complaint.complaintId}, but its email notification could not be sent. Support can still review it; please do not resubmit.`
+      logEmailDeliveryFailure({
+        event: 'notification.email_support.failed',
+        accountId: req.auth.id,
+        error: emailError,
+      })
+    }
+
+    return res.status(201).json({
+      complaint: serializeComplaint(complaint, student),
+      emailSent,
+      ...(notificationMessage ? { message: notificationMessage } : {}),
+    })
   } catch (error) {
     if (error?.code === 11000) {
       return res.status(503).json({ message: 'A unique complaint ID could not be allocated. Please try again.' })
@@ -191,14 +270,40 @@ router.post('/admin/:complaintId/replies', async (req, res, next) => {
     const complaint = await Complaint.findById(req.params.complaintId)
     if (!complaint) return res.status(404).json({ message: 'Complaint not found.' })
 
+    const replyMessage = req.body.message.trim()
     complaint.replies.push({
       authorId: new mongoose.Types.ObjectId(req.auth.id),
       authorRole: 'main_admin',
-      message: req.body.message.trim(),
+      message: replyMessage,
     })
     await complaint.save()
+    let emailSent
+    let notificationMessage
+    if (complaint.source === 'Email Support') {
+      emailSent = true
+      try {
+        await sendEmailSupportReply({
+          email: complaint.studentEmail,
+          fullName: complaint.studentName,
+          subject: complaint.subject,
+          message: replyMessage,
+        })
+      } catch (emailError) {
+        emailSent = false
+        notificationMessage = 'The reply was saved, but its email could not be delivered. The saved reply is visible here.'
+        logEmailDeliveryFailure({
+          event: 'notification.email_support_reply.failed',
+          accountId: req.auth.id,
+          error: emailError,
+        })
+      }
+    }
     const [result] = await includeStudentDetails([complaint])
-    return res.json({ complaint: result })
+    return res.json({
+      complaint: result,
+      ...(emailSent !== undefined ? { emailSent } : {}),
+      ...(notificationMessage ? { message: notificationMessage } : {}),
+    })
   } catch (error) {
     return next(error)
   }
@@ -211,11 +316,14 @@ router.patch('/admin/:complaintId/status', async (req, res, next) => {
       return res.status(400).json({ message: 'Select a valid complaint.' })
     }
     const { status } = req.body ?? {}
-    if (!complaintStatuses.includes(status)) {
-      return res.status(400).json({ message: 'Choose Solved or Unsolved.' })
-    }
     const complaint = await Complaint.findById(req.params.complaintId)
     if (!complaint) return res.status(404).json({ message: 'Complaint not found.' })
+    if (
+      !complaintStatuses.includes(status) ||
+      (complaint.source === 'Email Support' && !emailSupportStatuses.includes(status))
+    ) {
+      return res.status(400).json({ message: 'Choose Solved or Unsolved.' })
+    }
 
     if (complaint.status !== status) {
       complaint.statusHistory.push({
