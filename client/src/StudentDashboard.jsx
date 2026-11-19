@@ -37,7 +37,6 @@ const studentResultsCache = new Map()
 const studentReferralCache = new Map()
 const studentReferralRequests = new Map()
 const COURSE_NOTES_KEY = 'course-notes'
-const COURSE_RESOURCES_KEY = 'course-resources'
 const COURSE_CERTIFICATE_KEY = 'course-certificate'
 
 function getStudentCertificateCacheKey() {
@@ -4239,21 +4238,6 @@ function StudentCourseLearning({
                 <span className="student-course-learning__item-icon"><Icon name="pen" size={15} /></span>
                 <strong>Notes</strong>
               </button>
-              <button
-                className={detailsTab === 'resources' ? 'is-selected' : ''}
-                type="button"
-                aria-pressed={detailsTab === 'resources'}
-                onClick={() => {
-                  if (attentionCheckChallenge || attentionCheckLoading || attentionSessionRef.current.blocked) return
-                  videoPlayerRef.current?.pause()
-                  endCurrentAttentionCheckSession()
-                  setActiveContentItemId(COURSE_RESOURCES_KEY)
-                  setDetailsTab('resources')
-                }}
-              >
-                <span className="student-course-learning__item-icon"><Icon name="link" size={15} /></span>
-                <strong>Resources</strong>
-              </button>
             </section>
             {contentSearch && !filteredModuleItems.some(({ items }) => items.length) && !filteredCourseLevelItems.length && (
               <p className="student-course-learning__empty-module">No course content matches “{contentSearch}”.</p>
@@ -4656,10 +4640,6 @@ function StudentCourseLearning({
               <button className={detailsTab === 'notes' ? 'is-selected' : ''} type="button" aria-pressed={detailsTab === 'notes'} onClick={() => setDetailsTab('notes')}>
                 <span className="student-course-learning__item-icon"><Icon name="pen" size={15} /></span>
                 <strong>Notes</strong>
-              </button>
-              <button className={detailsTab === 'resources' ? 'is-selected' : ''} type="button" aria-pressed={detailsTab === 'resources'} onClick={() => setDetailsTab('resources')}>
-                <span className="student-course-learning__item-icon"><Icon name="link" size={15} /></span>
-                <strong>Resources</strong>
               </button>
             </section>
           </aside>
