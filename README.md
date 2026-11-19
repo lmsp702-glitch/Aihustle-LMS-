@@ -26,7 +26,7 @@ deployment, set `VITE_API_URL` to `/api`.
 
 For the current separate deployments, set the frontend Vercel environment
 variable `VITE_API_URL` to
-`https://lms-platform-3nlxt77rg-pragathi-ds-projects.vercel.app/api` and the
+`https://lms-platform-v6a7.vercel.app/api` and the
 backend Vercel environment variable `CLIENT_ORIGIN` to
 `https://lms-platform-kpv2.vercel.app` (no trailing slash). Redeploy both
 projects after changing their environment variables.
