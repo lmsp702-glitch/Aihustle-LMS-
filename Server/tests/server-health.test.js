@@ -10,10 +10,10 @@ after(async () => {
   })
 })
 
-test('backend health route responds successfully at the root and API base', async () => {
+test('backend health route responds successfully at the root and API health paths', async () => {
   const { port } = server.address()
 
-  for (const path of ['/', '/api']) {
+  for (const path of ['/', '/api', '/api/health']) {
     const response = await fetch(`http://127.0.0.1:${port}${path}`)
     assert.equal(response.status, 200)
     assert.deepEqual(await response.json(), { status: 'ok', service: 'LMS API' })

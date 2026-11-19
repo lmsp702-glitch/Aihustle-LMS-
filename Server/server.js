@@ -36,6 +36,7 @@ app.use(express.json({ limit: '8mb' }))
 const healthCheck = (req, res) => res.json({ status: 'ok', service: 'LMS API' })
 app.get('/', healthCheck)
 app.get('/api', healthCheck)
+app.get('/api/health', healthCheck)
 app.use('/api/auth', authRouter)
 app.use('/api/admin', adminRouter)
 app.use('/api', learningRouter)
@@ -163,6 +164,10 @@ async function startServer() {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (
+  !process.env.VERCEL &&
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
   startServer()
 }
