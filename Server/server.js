@@ -33,6 +33,9 @@ app.use(
   }),
 )
 app.use(express.json({ limit: '8mb' }))
+const healthCheck = (req, res) => res.json({ status: 'ok', service: 'LMS API' })
+app.get('/', healthCheck)
+app.get('/api', healthCheck)
 app.use('/api/auth', authRouter)
 app.use('/api/admin', adminRouter)
 app.use('/api', learningRouter)
