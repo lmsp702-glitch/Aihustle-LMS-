@@ -7,7 +7,7 @@ from django.conf import settings
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 
-from authentication.approval import external_user_access_error
+from authentication.approval import hustler_access_error, normalize_account_type
 from core.mongodb import collection
 
 
@@ -48,7 +48,7 @@ class JWTAuthentication(BaseAuthentication):
             raise AuthenticationFailed("User account is unavailable.")
         if payload.get("role") != document.get("role"):
             raise AuthenticationFailed("Token role is no longer valid.")
-        approval_error = external_user_access_error(document)
+        approval_error = hustler_access_error(document)
         if approval_error:
             raise AuthenticationFailed(approval_error)
         user = AuthenticatedUser(
@@ -57,7 +57,7 @@ class JWTAuthentication(BaseAuthentication):
             name=document.get("name", ""),
             role=document.get("role", "student"),
             username=document.get("username"),
-            account_type=document.get("accountType"),
+            account_type=normalize_account_type(document),
             student_type=document.get("studentType"),
             status=document.get("status", "active"),
             approval_status=document.get("approvalStatus"),

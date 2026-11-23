@@ -493,7 +493,7 @@ export default function StudentProfile({ user, onLogout, onAccountUpdated }) {
                 </span>
               ) : (
                 <span className="student-portfolio-pill is-gold">
-                  <ProfileIcon name="user" size={14} /> Independent Student
+                  <ProfileIcon name="user" size={14} /> Hustler
                 </span>
               )}
               {location && (
@@ -1255,7 +1255,7 @@ export default function StudentProfile({ user, onLogout, onAccountUpdated }) {
                 </div>
                 <div>
                   <dt>Account type</dt>
-                  <dd>{currentUser?.studentType === 'college' ? 'College Student' : 'Independent Student'}</dd>
+                  <dd>{currentUser?.studentType === 'college' ? 'College Student' : 'Hustler'}</dd>
                 </div>
                 {currentUser?.studentType === 'college' && (
                   <>

@@ -68,11 +68,17 @@ def _student_query(validated_data):
         student_type = tab
     if student_type == "independent":
         clauses.append({
-            "$or": [
-                {"studentType": "independent"},
-                {"student_type": "independent"},
-                {"accountType": "external"},
-                {"account_type": "external"},
+            "$and": [
+                {
+                    "$or": [
+                        {"studentType": "independent"},
+                        {"student_type": "independent"},
+                        {"accountType": {"$in": ["hustler", "external", "independent"]}},
+                        {"account_type": {"$in": ["hustler", "external", "independent"]}},
+                    ]
+                },
+                {"studentType": {"$ne": "college"}},
+                {"student_type": {"$ne": "college"}},
             ]
         })
     elif student_type == "college":

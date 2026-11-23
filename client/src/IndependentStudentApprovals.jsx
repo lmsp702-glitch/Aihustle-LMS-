@@ -264,7 +264,7 @@ export default function IndependentStudentApprovals({
         <div>
           <p className="admin-eyebrow">USER MANAGEMENT</p>
           <h1>Student Approval</h1>
-          <p>Review external student account applications before granting LMS access.</p>
+          <p>Review Hustler account applications before granting LMS access.</p>
         </div>
       </header>
 
@@ -301,7 +301,7 @@ export default function IndependentStudentApprovals({
                     <td>{student.fullName || 'Unnamed student'}</td>
                     <td>{student.email}</td>
                     <td>{formatDate(student.createdAt)}</td>
-                    <td>Independent</td>
+                    <td>Hustler</td>
                     <td><span className={`admin-status admin-status--${student.approvalStatus}`}>{student.approvalStatus}</span></td>
                     <td className="independent-approvals__actions">
                       <button type="button" className="admin-text-button" onClick={() => reviewStudent(student)}>View Details</button>
@@ -317,7 +317,7 @@ export default function IndependentStudentApprovals({
               </tbody>
             </table>
           </div>
-        ) : !loading && !error ? <p className="independent-approvals__empty">No {status === 'all' ? '' : `${status} `}independent student applications.</p> : null}
+        ) : !loading && !error ? <p className="independent-approvals__empty">No {status === 'all' ? '' : `${status} `}Hustler applications.</p> : null}
         <div className="independent-approvals__load-more" ref={loadMoreRef} aria-live="polite">
           {total > 0 && <span>{Math.min(students.length, total)} of {total} applications loaded</span>}
           {loading && students.length > 0 && <span role="status">Loading more applications…</span>}

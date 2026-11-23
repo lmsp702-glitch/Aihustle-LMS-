@@ -65,9 +65,9 @@ const administrativeActions = [
   },
   {
     view: 'independent-approvals',
-    title: 'Review independent student applications',
-    description: 'Approve or reject external student account applications.',
-    keywords: 'independent student approval pending applications',
+    title: 'Review Hustler applications',
+    description: 'Approve or reject Hustler account applications.',
+    keywords: 'Hustler student approval pending applications',
   },
   {
     view: 'colleges',
@@ -417,7 +417,7 @@ function RegistrationsTable({ users, emptyMessage }) {
               <td>
                 <span className="admin-table__name">{user.fullName || user.username || 'Unnamed account'}</span>
               </td>
-              <td>{user.studentType === 'college' ? 'College Student' : 'Independent Student'}</td>
+              <td>{user.studentType === 'college' ? 'College Student' : 'Hustler'}</td>
               <td>{formatDate(user.createdAt)}</td>
               <td><StatusBadge status={user.status} /></td>
             </tr>
@@ -455,7 +455,7 @@ function StudentManagementTable({ students, onViewDetails, onViewCodes }) {
               <td>
                 <span className="admin-table__name">{student.fullName || 'Unnamed student'}</span>
               </td>
-              <td>{student.studentType === 'college' ? 'College' : 'Independent'}</td>
+              <td>{student.studentType === 'college' ? 'College' : 'Hustler'}</td>
               <td>{formatDate(student.createdAt)}</td>
               <td>
                 <button
@@ -2233,13 +2233,13 @@ function AdminDashboard({
               <section className="admin-bottom-grid">
                 <article className="admin-panel">
                   <div className="admin-panel__heading admin-panel__heading--registrations">
-                    <div><h2>Recent Student Registrations</h2><p>Latest independent and college student accounts</p></div>
+                    <div><h2>Recent Student Registrations</h2><p>Latest Hustler and college student accounts</p></div>
                     <button className="admin-text-button" type="button" onClick={() => selectView('students')}>View all <span>→</span></button>
                   </div>
                   <div className="admin-tabs" role="tablist" aria-label="Student type">
                     {[
                       ['all', 'All Students'],
-                      ['independent', 'Independent'],
+                      ['independent', 'Hustler'],
                       ['college', 'College'],
                     ].map(([studentType, label]) => (
                       <button
@@ -2276,7 +2276,7 @@ function AdminDashboard({
                 <div className="admin-page-heading__copy">
                   <p className="admin-eyebrow">USER MANAGEMENT</p>
                   <h1>{viewTitles[activeView]}</h1>
-                  <p>Independent and college students registered in the LMS.</p>
+                  <p>Hustlers and college students registered in the LMS.</p>
                 </div>
               </section>
 
@@ -2412,7 +2412,7 @@ function AdminDashboard({
                       }}
                     >
                       <option value="all">All Students</option>
-                      <option value="independent">Independent Students</option>
+                      <option value="independent">Hustlers</option>
                       <optgroup label="College Name">
                         {colleges.map((college) => (
                           <option key={`name-${college.id}`} value={`college-name:${college.id}`}>
@@ -2691,7 +2691,7 @@ function AdminDashboard({
                 <div className="admin-tabs admin-students-tabs" role="tablist" aria-label="Student category">
                   {[
                     ['all', 'All Students'],
-                    ['independent', 'Independent'],
+                    ['independent', 'Hustler'],
                     ['college', 'College'],
                   ].map(([studentType, label]) => (
                     <button
@@ -2905,7 +2905,7 @@ function AdminDashboard({
                           }}
                         >
                           <strong>{student.name}</strong>
-                          <span>{student.email} · {student.studentType === 'college' ? student.collegeName || 'College student' : 'Independent student'}</span>
+                          <span>{student.email} · {student.studentType === 'college' ? student.collegeName || 'College student' : 'Hustler'}</span>
                         </button>
                       )) : (
                         <p className="admin-report-hint">No matching students found.</p>
@@ -2914,7 +2914,7 @@ function AdminDashboard({
                   )}
                   {selectedReportStudent && (
                     <span className="admin-report-hint" role="status">
-                      Selected: {selectedReportStudent.studentType === 'college' ? 'College student' : 'Independent student'}
+                      Selected: {selectedReportStudent.studentType === 'college' ? 'College student' : 'Hustler'}
                     </span>
                   )}
                 </div>
@@ -2955,7 +2955,7 @@ function AdminDashboard({
               <div>
                 <p className="admin-eyebrow">STUDENT MANAGEMENT</p>
                 <h2 id="admin-student-dialog-title">Add a student</h2>
-                <p>Create a login for an independent or college student.</p>
+                <p>Create a login for a Hustler or college student.</p>
               </div>
               <button
                 type="button"
@@ -2977,7 +2977,7 @@ function AdminDashboard({
                     collegeId: '',
                   }))}
                 >
-                  <option value="independent">Independent student</option>
+                  <option value="independent">Hustler</option>
                   <option value="college">College student</option>
                 </select>
               </label>
@@ -3372,7 +3372,7 @@ function AdminDashboard({
                           <small>{student.email || 'No email'} · @{student.username || 'No username'}</small>
                         </span>
                         <span className="admin-student-picker__type">
-                          {student.studentType === 'college' ? 'College' : 'Independent'}
+                          {student.studentType === 'college' ? 'College' : 'Hustler'}
                         </span>
                       </button>
                     ))

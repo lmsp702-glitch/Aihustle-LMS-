@@ -302,7 +302,7 @@ class HealthCheckTests(SimpleTestCase):
     @patch("authentication.views.consume_registration_email_verification", return_value=True)
     @patch("authentication.views.collection")
     @patch("authentication.views.create_user")
-    def test_registration_returns_pending_public_external_user_without_tokens(
+    def test_registration_returns_pending_public_hustler_without_tokens(
         self, create_user, collection, consume_verification, issue_tokens
     ):
         collection.return_value.find_one.return_value = None
@@ -339,7 +339,7 @@ class HealthCheckTests(SimpleTestCase):
 
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.json()["user"]["email"], user["email"])
-        self.assertEqual(response.json()["user"]["accountType"], "external")
+        self.assertEqual(response.json()["user"]["accountType"], "hustler")
         self.assertEqual(response.json()["user"]["studentType"], "independent")
         self.assertEqual(response.json()["user"]["approvalStatus"], "pending")
         self.assertNotIn("password_hash", response.json()["user"])

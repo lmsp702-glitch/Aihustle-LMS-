@@ -4,10 +4,20 @@ from rest_framework.generics import GenericAPIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from authentication.approval import normalize_account_type
 from core.mongo import parse_object_id, serialize_document
 from core.mongodb import collection
 from users.serializers import UserProfileSerializer
 from core.serializers import UserSummarySerializer
+
+
+def _public_user_document(user):
+    document = serialize_document(user)
+    document.pop("account_type", None)
+    account_type = normalize_account_type(user)
+    if account_type is not None:
+        document["accountType"] = account_type
+    return document
 
 
 class UserListView(GenericAPIView):
@@ -22,7 +32,7 @@ class UserListView(GenericAPIView):
         if request.user.role not in {"main_admin", "college_admin"}:
             return Response({"detail": "Administrator access is required."}, status=403)
         users = collection("users").find({}, {"password_hash": 0}).limit(100)
-        return Response([serialize_document(user) for user in users])
+        return Response([_public_user_document(user) for user in users])
 
 
 class UserDetailView(GenericAPIView):
@@ -40,7 +50,7 @@ class UserDetailView(GenericAPIView):
         ) if object_id else None
         if user is None:
             return Response({"detail": "Not found."}, status=404)
-        return Response(serialize_document(user))
+        return Response(_public_user_document(user))
 
     @extend_schema(
         operation_id="users_update",
@@ -63,7 +73,7 @@ class UserDetailView(GenericAPIView):
         )
         if updated is None:
             return Response({"detail": "Not found."}, status=404)
-        return Response(serialize_document(updated))
+        return Response(_public_user_document(updated))
 
 
 class MyProfileView(UserDetailView):

@@ -918,7 +918,7 @@ export default function AdminProgressReports({ onLogout }) {
                         <tr key={`${student.studentType}-${student._id}`}>
                           <td>
                             <strong>{student.fullName || student.username || 'Name unavailable'}</strong>
-                            <span className="admin-progress-student-type">{student.studentType === 'college' ? 'College student' : 'Independent student'}</span>
+                            <span className="admin-progress-student-type">{student.studentType === 'college' ? 'College student' : 'Hustler'}</span>
                           </td>
                           <td><code>{student._id}</code></td>
                           <td>{student.email || 'Email unavailable'}</td>

@@ -956,7 +956,7 @@ export function EnrollmentManagement({ onLogout }) {
               <span>Student type</span>
               <select value={studentTypeFilter} onChange={(event) => setStudentTypeFilter(event.target.value)}>
                 <option value="all">All students</option>
-                <option value="independent">Independent students</option>
+                <option value="independent">Hustlers</option>
                 <option value="college">College students</option>
               </select>
             </label>
@@ -989,7 +989,7 @@ export function EnrollmentManagement({ onLogout }) {
                             <td>{student?.fullName || 'Name not available'}</td>
                             <td>{student?.studentId || student?._id || 'Not available'}</td>
                             <td>{student?.email || 'Not available'}</td>
-                            <td>{isCollegeStudent ? 'College' : 'Independent'}</td>
+                            <td>{isCollegeStudent ? 'College' : 'Hustler'}</td>
                             <td>
                               {isCollegeStudent
                                 ? entry.collegeId?.name || entry.collegeId?.collegeName || entry.collegeId?.title || 'Not available'

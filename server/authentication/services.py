@@ -12,7 +12,7 @@ from django.contrib.auth.hashers import check_password, make_password
 from django.core.mail import BadHeaderError, send_mail
 from pymongo.errors import DuplicateKeyError
 
-from authentication.approval import external_user_access_error
+from authentication.approval import hustler_access_error, is_hustler_account
 from core.mongodb import collection
 
 
@@ -36,7 +36,7 @@ class EmailVerificationRateLimitError(Exception):
         super().__init__("Please wait before requesting another verification code.")
 
 
-class ExternalUserAccessDenied(ValueError):
+class HustlerAccessDenied(ValueError):
     pass
 
 
@@ -53,7 +53,7 @@ def create_user(
     if role != "student":
         raise ValueError("Only student accounts may be created by public registration.")
     if not username:
-        raise ValueError("A username is required for external accounts.")
+        raise ValueError("A username is required for Hustler accounts.")
     if not re.fullmatch(r"[a-zA-Z0-9._-]{3,30}", username.strip()):
         raise ValueError("Username must contain 3 to 30 valid characters.")
     users = collection("users")
@@ -73,7 +73,7 @@ def create_user(
         "username": normalized_username,
         "password_hash": make_password(password),
         "role": role,
-        "accountType": "external",
+        "accountType": "hustler",
         "studentType": "independent",
         "is_active": True,
         "status": "pending",
@@ -121,7 +121,7 @@ def authenticate_user(email, password):
         return None
     if not check_password(password, user.get("password_hash", "")):
         return None
-    if not user.get("is_active", True) and not external_user_access_error(user):
+    if not user.get("is_active", True) and not hustler_access_error(user):
         return None
     return user
 
@@ -146,9 +146,9 @@ def get_or_create_google_user(identity):
             if user is None:
                 raise
 
-    if user.get("role") != "student" or user.get("accountType") != "external":
-        raise ValueError("This Google account is not linked to an External User account.")
-    access_error = external_user_access_error(user)
+    if not is_hustler_account(user):
+        raise ValueError("This Google account is not linked to a Hustler account.")
+    access_error = hustler_access_error(user)
     if access_error:
         raise ValueError(access_error)
     return user
@@ -317,9 +317,9 @@ def issue_token(user, token_type, expires_at):
 
 
 def issue_token_pair(user):
-    access_error = external_user_access_error(user)
+    access_error = hustler_access_error(user)
     if access_error:
-        raise ExternalUserAccessDenied(access_error)
+        raise HustlerAccessDenied(access_error)
     now = datetime.now(timezone.utc)
     access_expiry = now + timedelta(minutes=settings.JWT_ACCESS_TOKEN_MINUTES)
     refresh_expiry = now + timedelta(days=settings.JWT_REFRESH_TOKEN_DAYS)
@@ -342,7 +342,7 @@ def refresh_access_token(token):
     user = collection("users").find_one({"_id": user_id})
     if not user or not user.get("is_active", True):
         raise jwt.InvalidTokenError("The user account is unavailable.")
-    if external_user_access_error(user):
-        raise jwt.InvalidTokenError("The External User account is not approved.")
+    if hustler_access_error(user):
+        raise jwt.InvalidTokenError("The Hustler account is not approved.")
     expiry = datetime.now(timezone.utc) + timedelta(minutes=settings.JWT_ACCESS_TOKEN_MINUTES)
     return issue_token(user, "access", expiry)

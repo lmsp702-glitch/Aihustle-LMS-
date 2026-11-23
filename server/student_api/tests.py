@@ -16,7 +16,7 @@ class StudentApiTests(SimpleTestCase):
             "email": "learner@example.com",
             "name": "External Learner",
             "role": "student",
-            "accountType": "external",
+            "accountType": "hustler",
             "status": "approved",
             "approvalStatus": "approved",
             "is_active": True,

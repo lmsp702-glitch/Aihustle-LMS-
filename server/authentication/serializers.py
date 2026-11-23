@@ -12,9 +12,9 @@ class RegisterSerializer(serializers.Serializer):
     confirmPassword = serializers.CharField(write_only=True, trim_whitespace=False)
     role = serializers.CharField(required=False, default="student")
     accountType = serializers.ChoiceField(
-        choices=("independent", "external"),
+        choices=("hustler", "independent", "external"),
         required=False,
-        default="independent",
+        default="hustler",
     )
     referralCode = serializers.CharField(required=False, allow_blank=True)
     emailVerificationToken = serializers.CharField(write_only=True)
@@ -32,6 +32,7 @@ class RegisterSerializer(serializers.Serializer):
             )
         if attrs.get("role") != "student":
             raise serializers.ValidationError({"role": "Public registration is only available for students."})
+        attrs["accountType"] = "hustler"
         if attrs["confirmPassword"] != attrs["password"]:
             raise serializers.ValidationError({"confirmPassword": "Passwords do not match."})
         return attrs

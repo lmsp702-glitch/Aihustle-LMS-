@@ -153,7 +153,7 @@ class AdminCloudinaryApiTests(SimpleTestCase):
         delete.assert_not_called()
 
 
-class ExternalStudentApprovalApiTests(SimpleTestCase):
+class HustlerApprovalApiTests(SimpleTestCase):
     def setUp(self):
         self.client = APIClient()
         self.admin_id = ObjectId()
@@ -179,7 +179,7 @@ class ExternalStudentApprovalApiTests(SimpleTestCase):
             return getattr(self.client, method)(path, *args, **kwargs)
 
     @patch("admin_api.approval_views.collection")
-    def test_approval_list_returns_paginated_external_users(self, collection):
+    def test_approval_list_returns_paginated_hustlers(self, collection):
         student = {
             "_id": ObjectId(),
             "name": "External Learner",
@@ -207,6 +207,7 @@ class ExternalStudentApprovalApiTests(SimpleTestCase):
         self.assertEqual(response.json()["total"], 1)
         self.assertEqual(response.json()["pendingCount"], 2)
         self.assertEqual(response.json()["students"][0]["approvalStatus"], "pending")
+        self.assertEqual(response.json()["students"][0]["accountType"], "hustler")
         self.assertEqual(response.json()["students"][0]["_id"], str(student["_id"]))
         self.assertNotIn("password_hash", response.content.decode())
 
@@ -234,7 +235,7 @@ class ExternalStudentApprovalApiTests(SimpleTestCase):
         self.assertNotIn("password_hash", response.content.decode())
 
     @patch("admin_api.approval_views.collection")
-    def test_admin_can_approve_pending_external_user(self, collection):
+    def test_admin_can_approve_pending_hustler(self, collection):
         student_id = ObjectId()
         users = collection.return_value
         users.find_one_and_update.return_value = {
@@ -261,7 +262,7 @@ class ExternalStudentApprovalApiTests(SimpleTestCase):
         self.assertEqual(update["approvedBy"], str(self.admin_id))
 
     @patch("admin_api.approval_views.collection")
-    def test_admin_can_reject_pending_external_user_with_reason(self, collection):
+    def test_admin_can_reject_pending_hustler_with_reason(self, collection):
         student_id = ObjectId()
         users = collection.return_value
         users.find_one_and_update.return_value = {
@@ -285,7 +286,7 @@ class ExternalStudentApprovalApiTests(SimpleTestCase):
         self.assertEqual(update["rejectionReason"], "Incomplete application")
 
     @patch("admin_api.approval_views.collection")
-    def test_college_admin_cannot_review_external_user_applications(self, collection):
+    def test_college_admin_cannot_review_hustler_applications(self, collection):
         self.admin_document = {**self.admin_document, "role": "college_admin"}
         token = jwt.encode(
             {"sub": str(self.admin_id), "role": "college_admin", "type": "access"},

@@ -694,7 +694,7 @@ const faqsByCategory = [
   {
     category: 'Account and Registration',
     items: [
-      ['How do I create an account?', 'Public registration currently supports independent student accounts. Use the Register option on the login page and complete the required account details.'],
+      ['How do I create an account?', 'Public registration currently supports Hustler accounts. Use the Register option on the login page and complete the required account details.'],
       ['Can I change my username?', 'Username changes are not currently available from the student dashboard. Contact support if you need help with your account identity.'],
     ],
   },

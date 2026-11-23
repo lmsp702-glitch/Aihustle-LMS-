@@ -65,6 +65,7 @@ function SettingsPage({
   const hasCachedAccount = Boolean(user?.id && user?.username && user?.email)
   const [account, setAccount] = useState(() => hasCachedAccount ? user : null)
   const isCollegeStudent = account?.accountType === 'College Student'
+    || account?.accountType === 'college'
     || account?.studentType === 'college'
     || (!account && user?.studentType === 'college')
   const [name, setName] = useState(() => hasCachedAccount ? user.fullName || '' : '')
@@ -116,7 +117,11 @@ function SettingsPage({
       .then((response) => response.json())
       .then(({ account: result }) => {
         if (active) {
-          const settingsAccount = result.accountType === 'College Student' && result.studentId
+          const settingsAccount = (
+            result.accountType === 'College Student' ||
+            result.accountType === 'college' ||
+            result.studentType === 'college'
+          ) && result.studentId
             ? { ...result, username: result.studentId.trim().toLowerCase() }
             : result
           setAccount(settingsAccount)
@@ -153,7 +158,11 @@ function SettingsPage({
       setUsernameState('idle')
       return undefined
     }
-    if (account.accountType === 'College Student' || account.studentType === 'college') {
+    if (
+      account.accountType === 'College Student' ||
+      account.accountType === 'college' ||
+      account.studentType === 'college'
+    ) {
       setUsernameState('current')
       return undefined
     }
@@ -526,10 +535,14 @@ function SettingsPage({
     invalid: 'Use 3–30 letters, numbers, dots, underscores, or hyphens.',
     error: 'Could not check username availability. Try again.',
   }[usernameState]
-  const accountType = account?.accountType || (
+  const accountType = account?.accountType === 'hustler'
+    ? 'Hustler'
+    : account?.accountType === 'college'
+      ? 'College Student'
+      : account?.accountType || (
     user?.role === 'main_admin' || user?.role === 'college_admin'
       ? user.collegeId ? 'College Admin' : 'Platform Admin'
-      : user?.studentType === 'college' ? 'College Student' : 'Independent Student'
+      : user?.studentType === 'college' ? 'College Student' : 'Hustler'
   )
   const dashboardPath = {
     student: '/student/dashboard',

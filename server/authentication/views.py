@@ -36,9 +36,9 @@ from authentication.services import (
     EmailVerificationConfigurationError,
     EmailVerificationDeliveryError,
     EmailVerificationRateLimitError,
-    ExternalUserAccessDenied,
+    HustlerAccessDenied,
 )
-from authentication.approval import external_user_access_error
+from authentication.approval import hustler_access_error, normalize_account_type
 from authentication.permissions import IsMainAdmin
 from core.mongo import serialize_document
 from core.mongodb import collection
@@ -106,7 +106,7 @@ class RegisterView(GenericAPIView):
             return Response({"message": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
         return Response(
             {
-                "message": "Your account was created and is awaiting administrator approval.",
+                "message": "Your Hustler account was created and is awaiting administrator approval.",
                 "user": public_user(user),
             },
             status=status.HTTP_201_CREATED,
@@ -137,12 +137,12 @@ class LoginView(GenericAPIView):
                 {"message": "Invalid username/email or password."},
                 status=status.HTTP_401_UNAUTHORIZED,
             )
-        approval_error = external_user_access_error(user)
+        approval_error = hustler_access_error(user)
         if approval_error:
             return Response({"message": approval_error}, status=status.HTTP_403_FORBIDDEN)
         try:
             pair = issue_token_pair(user)
-        except ExternalUserAccessDenied as exc:
+        except HustlerAccessDenied as exc:
             return Response({"message": str(exc)}, status=status.HTTP_403_FORBIDDEN)
         return Response(
             {
@@ -194,12 +194,12 @@ class GoogleLoginView(GenericAPIView):
         except ValueError as exc:
             return Response({"message": str(exc)}, status=status.HTTP_403_FORBIDDEN)
 
-        approval_error = external_user_access_error(user)
+        approval_error = hustler_access_error(user)
         if approval_error:
             return Response({"message": approval_error}, status=status.HTTP_403_FORBIDDEN)
         try:
             pair = issue_token_pair(user)
-        except ExternalUserAccessDenied as exc:
+        except HustlerAccessDenied as exc:
             return Response({"message": str(exc)}, status=status.HTTP_403_FORBIDDEN)
         return Response(
             {
@@ -241,7 +241,7 @@ class RefreshView(GenericAPIView):
             )
         if not user:
             return Response({"detail": "Invalid or expired refresh token."}, status=status.HTTP_401_UNAUTHORIZED)
-        if external_user_access_error(user):
+        if hustler_access_error(user):
             return Response(
                 {"detail": "Invalid or expired refresh token."},
                 status=status.HTTP_401_UNAUTHORIZED,
@@ -426,7 +426,7 @@ def public_user(user):
         "email": document["email"],
         "role": document["role"],
         "username": document.get("username"),
-        "accountType": document.get("accountType"),
+        "accountType": normalize_account_type(document),
         "studentType": document.get("studentType"),
         "status": document.get("status", "active"),
         "approvalStatus": document.get("approvalStatus"),

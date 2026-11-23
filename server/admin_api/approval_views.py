@@ -13,7 +13,19 @@ from authentication.permissions import IsMainAdmin
 from core.mongodb import collection
 
 
-_EXTERNAL_STUDENTS = {"role": "student", "accountType": "external"}
+_HUSTLER_STUDENTS = {
+    "role": "student",
+    "$and": [
+        {
+            "$or": [
+                {"accountType": {"$in": ["hustler", "external", "independent"]}},
+                {"account_type": {"$in": ["hustler", "external", "independent"]}},
+            ]
+        },
+        {"studentType": {"$ne": "college"}},
+        {"student_type": {"$ne": "college"}},
+    ],
+}
 _APPROVAL_STATUSES = {"pending", "approved", "rejected"}
 
 
@@ -36,6 +48,7 @@ class ApprovalStudentSerializer(serializers.Serializer):
     _id = serializers.CharField()
     fullName = serializers.CharField()
     email = serializers.EmailField()
+    accountType = serializers.ChoiceField(choices=("hustler",))
     createdAt = serializers.CharField(allow_null=True)
     studentType = serializers.CharField()
     approvalStatus = serializers.ChoiceField(choices=("pending", "approved", "rejected"))
@@ -75,6 +88,7 @@ def _approval_student(document):
         "_id": str(document["_id"]),
         "fullName": document.get("fullName") or document.get("name") or "",
         "email": document.get("email", ""),
+        "accountType": "hustler",
         "createdAt": _isoformat(document.get("created_at")),
         "studentType": document.get("studentType") or "independent",
         "approvalStatus": approval_status,
@@ -95,11 +109,11 @@ class IndependentStudentApprovalListView(GenericAPIView):
         values = query_serializer.validated_data
         users = collection("users")
         pending_query = {
-            **_EXTERNAL_STUDENTS,
+            **_HUSTLER_STUDENTS,
             "approvalStatus": {"$nin": ["approved", "rejected"]},
         }
         pending_count = users.count_documents(pending_query)
-        query = dict(_EXTERNAL_STUDENTS)
+        query = dict(_HUSTLER_STUDENTS)
         if values["status"] == "pending":
             query["approvalStatus"] = {"$nin": ["approved", "rejected"]}
         elif values["status"] in {"approved", "rejected"}:
@@ -133,7 +147,7 @@ class IndependentStudentApprovalDetailsView(GenericAPIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
         student = collection("users").find_one(
-            {**_EXTERNAL_STUDENTS, "_id": object_id},
+            {**_HUSTLER_STUDENTS, "_id": object_id},
             {"password_hash": 0},
         )
         if student is None:
@@ -188,7 +202,7 @@ class IndependentStudentApprovalDecisionView(GenericAPIView):
         users = collection("users")
         student = users.find_one_and_update(
             {
-                **_EXTERNAL_STUDENTS,
+                **_HUSTLER_STUDENTS,
                 "_id": object_id,
                 "approvalStatus": {"$nin": ["approved", "rejected"]},
             },
@@ -198,7 +212,7 @@ class IndependentStudentApprovalDecisionView(GenericAPIView):
         )
         if student is None:
             existing = users.find_one(
-                {**_EXTERNAL_STUDENTS, "_id": object_id},
+                {**_HUSTLER_STUDENTS, "_id": object_id},
                 {"_id": 1},
             )
             if existing is None:
@@ -211,4 +225,4 @@ class IndependentStudentApprovalDecisionView(GenericAPIView):
                 status=status.HTTP_409_CONFLICT,
             )
         decision_text = "approved" if decision == "approve" else "rejected"
-        return Response({"message": f"External User account {decision_text}."})
+        return Response({"message": f"Hustler account {decision_text}."})

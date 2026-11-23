@@ -562,7 +562,7 @@ function AdminSupport({
                     <div className="admin-support__requester">
                       <span>Student: {activeRecord.requester?.fullName || 'Student'} · {activeRecord.requester?.email || 'Email unavailable'}</span>
                       <span>Student ID: {activeRecord.requester?.studentId || activeRecord.requester?.id || activeRecord.userId}</span>
-                      <span>Account: {activeRecord.userCollection === 'clg_students' || activeRecord.accountType === 'college' ? 'College student' : 'Independent student'}</span>
+                      <span>Account: {activeRecord.userCollection === 'clg_students' || activeRecord.accountType === 'college' ? 'College student' : 'Hustler'}</span>
                       <span>Submitted: {new Date(activeRecord.createdAt).toLocaleString()}</span>
                     </div>
                   )}

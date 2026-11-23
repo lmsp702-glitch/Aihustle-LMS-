@@ -8,12 +8,15 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs
+from io import StringIO
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
+from django.core.management import call_command
 from django.test import SimpleTestCase, override_settings
 from rest_framework.test import APIClient
 
 from authentication.jwt import AuthenticatedUser
+from authentication.approval import is_hustler_account, normalize_account_type
 from authentication.google_oauth import (
     GoogleOAuthError,
     authenticate_google_authorization_code,
@@ -38,6 +41,32 @@ from authentication.permissions import (
 class AuthenticationTests(SimpleTestCase):
     def setUp(self):
         self.client = APIClient()
+
+    def test_legacy_hustler_account_types_normalize_without_reclassifying_college_students(self):
+        for value in ("external", "independent", "hustler"):
+            user = {"role": "student", "accountType": value}
+            self.assertTrue(is_hustler_account(user))
+            self.assertEqual(normalize_account_type(user), "hustler")
+
+        college_student = {
+            "role": "student",
+            "accountType": "external",
+            "studentType": "college",
+        }
+        self.assertFalse(is_hustler_account(college_student))
+        self.assertEqual(normalize_account_type(college_student), "external")
+        self.assertFalse(is_hustler_account({"role": "main_admin", "accountType": "hustler"}))
+
+    @patch("authentication.management.commands.normalize_hustler_account_types.collection")
+    def test_hustler_type_migration_is_dry_run_unless_explicitly_applied(self, collection):
+        users = collection.return_value
+        users.count_documents.return_value = 2
+        output = StringIO()
+
+        call_command("normalize_hustler_account_types", stdout=output)
+
+        self.assertIn("Found 2", output.getvalue())
+        users.update_many.assert_not_called()
 
     @patch("authentication.views.issue_token_pair", return_value={"access": "access", "refresh": "refresh"})
     @patch("authentication.views.create_user")
@@ -77,7 +106,7 @@ class AuthenticationTests(SimpleTestCase):
                 "confirmPassword": "secure-password",
                 "emailVerificationToken": "verified-token",
                 "role": "student",
-                "accountType": "independent",
+                "accountType": "hustler",
                 "referralCode": "REFERRAL-123",
             },
             format="json",
@@ -133,7 +162,7 @@ class AuthenticationTests(SimpleTestCase):
         )
 
     @patch("authentication.services.collection")
-    def test_rejected_external_account_can_return_approval_status_after_password_check(
+    def test_rejected_legacy_account_can_return_approval_status_after_password_check(
         self, collection
     ):
         user = {
@@ -157,7 +186,7 @@ class AuthenticationTests(SimpleTestCase):
         )
 
     @patch("authentication.services.collection")
-    def test_create_user_marks_account_as_external(self, collection):
+    def test_create_user_marks_account_as_hustler(self, collection):
         users = collection.return_value
         users.insert_one.return_value.inserted_id = ObjectId()
 
@@ -169,23 +198,23 @@ class AuthenticationTests(SimpleTestCase):
         )
 
         stored_user = users.insert_one.call_args.args[0]
-        self.assertEqual(user["accountType"], "external")
+        self.assertEqual(user["accountType"], "hustler")
         self.assertEqual(user["studentType"], "independent")
-        self.assertEqual(stored_user["accountType"], "external")
+        self.assertEqual(stored_user["accountType"], "hustler")
         self.assertEqual(stored_user["username"], "external.learner")
         self.assertEqual(stored_user["approvalStatus"], "pending")
         self.assertEqual(stored_user["status"], "pending")
 
     @patch("authentication.services.collection")
     @patch("authentication.services.create_user")
-    def test_google_creates_an_external_user_for_a_new_email(self, create, collection):
+    def test_google_creates_a_hustler_for_a_new_email(self, create, collection):
         users = collection.return_value
         users.find_one.return_value = None
         created_user = {
             "_id": ObjectId(),
             "email": "new-google@example.com",
             "role": "student",
-            "accountType": "external",
+            "accountType": "hustler",
             "studentType": "independent",
             "is_active": True,
             "status": "pending",
@@ -202,7 +231,7 @@ class AuthenticationTests(SimpleTestCase):
         self.assertEqual(create.call_args.kwargs["username"], "new-google")
 
     @patch("authentication.services.collection")
-    def test_google_does_not_convert_existing_non_external_account(self, collection):
+    def test_google_does_not_convert_existing_non_hustler_account(self, collection):
         existing_user = {
             "_id": ObjectId(),
             "email": "institutional@example.com",
@@ -212,11 +241,11 @@ class AuthenticationTests(SimpleTestCase):
         }
         collection.return_value.find_one.return_value = existing_user
 
-        with self.assertRaisesRegex(ValueError, "not linked to an External User"):
+        with self.assertRaisesRegex(ValueError, "not linked to a Hustler"):
             get_or_create_google_user({"email": "institutional@example.com"})
 
     @patch("authentication.services.collection")
-    def test_google_logs_in_existing_external_user_without_rewriting_it(self, collection):
+    def test_google_logs_in_existing_legacy_external_account_without_rewriting_it(self, collection):
         existing_user = {
             "_id": ObjectId(),
             "email": "external@example.com",
@@ -363,7 +392,7 @@ class AuthenticationTests(SimpleTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["refresh"], "refresh")
-        self.assertEqual(response.json()["user"]["accountType"], "external")
+        self.assertEqual(response.json()["user"]["accountType"], "hustler")
         authenticate.assert_called_once_with(
             email="learner",
             password="secure-password",
@@ -398,7 +427,7 @@ class AuthenticationTests(SimpleTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["token"], "new-access")
         self.assertEqual(response.json()["refresh"], pair["refresh"])
-        self.assertEqual(response.json()["user"]["accountType"], "external")
+        self.assertEqual(response.json()["user"]["accountType"], "hustler")
         refresh_access.assert_called_once_with(pair["refresh"])
 
     @patch("authentication.jwt.collection")
@@ -425,7 +454,7 @@ class AuthenticationTests(SimpleTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["user"]["role"], "student")
-        self.assertEqual(response.json()["user"]["accountType"], "external")
+        self.assertEqual(response.json()["user"]["accountType"], "hustler")
         self.assertEqual(response.json()["user"]["isActive"], True)
 
     @patch("authentication.jwt.collection")
@@ -451,13 +480,13 @@ class AuthenticationTests(SimpleTestCase):
     @patch("authentication.views.consume_registration_email_verification", return_value=True)
     @patch("authentication.views.create_user")
     @patch("authentication.views.collection")
-    def test_registration_creates_pending_external_account_without_tokens(
+    def test_registration_creates_pending_hustler_account_without_tokens(
         self, collection, create_user, consume_verification, issue_tokens
     ):
         collection.return_value.find_one.return_value = None
         user = {
             "_id": ObjectId(),
-            "name": "External Learner",
+            "name": "Hustler Learner",
             "email": "learner@example.com",
             "username": "external.learner",
             "role": "student",
@@ -472,14 +501,14 @@ class AuthenticationTests(SimpleTestCase):
         response = self.client.post(
             "/api/auth/register/",
             {
-                "fullName": "External Learner",
+                "fullName": "Hustler Learner",
                 "email": "learner@example.com",
                 "username": "external.learner",
                 "password": "secure-password",
                 "confirmPassword": "secure-password",
                 "emailVerificationToken": "verified-token",
                 "role": "student",
-                "accountType": "independent",
+                "accountType": "hustler",
             },
             format="json",
         )
@@ -496,12 +525,12 @@ class AuthenticationTests(SimpleTestCase):
 
     @patch("authentication.views.issue_token_pair")
     @patch("authentication.views.authenticate_user")
-    def test_pending_and_rejected_external_users_cannot_log_in(
+    def test_pending_and_rejected_hustlers_cannot_log_in(
         self, authenticate, issue_tokens
     ):
         for approval_status, account_status, expected_message in (
             ("pending", "pending", "pending administrator approval"),
-            ("rejected", "rejected", "registration was rejected"),
+            ("rejected", "rejected", "Hustler registration was rejected"),
         ):
             authenticate.return_value = {
                 "_id": ObjectId(),
@@ -523,7 +552,7 @@ class AuthenticationTests(SimpleTestCase):
         issue_tokens.assert_not_called()
 
     @patch("authentication.services.collection")
-    def test_refresh_rejects_external_user_after_approval_is_revoked(self, collection):
+    def test_refresh_rejects_hustler_after_approval_is_revoked(self, collection):
         user = {
             "_id": ObjectId(),
             "email": "learner@example.com",
@@ -544,7 +573,7 @@ class AuthenticationTests(SimpleTestCase):
             refresh_access_token(pair["refresh"])
 
     @patch("authentication.jwt.collection")
-    def test_access_token_is_rejected_after_external_approval_is_revoked(self, collection):
+    def test_access_token_is_rejected_after_hustler_approval_is_revoked(self, collection):
         user = {
             "_id": ObjectId(),
             "email": "learner@example.com",
@@ -729,7 +758,7 @@ class GoogleLoginTests(SimpleTestCase):
         self.assertEqual(response.json()["refresh"], "refresh-token")
         self.assertEqual(response.json()["user"]["email"], identity["email"])
         self.assertEqual(response.json()["user"]["role"], "student")
-        self.assertEqual(response.json()["user"]["accountType"], "external")
+        self.assertEqual(response.json()["user"]["accountType"], "hustler")
         authenticate_code.assert_called_once_with(
             "authorization-code",
             redirect_uri="http://localhost:5173",
@@ -740,7 +769,7 @@ class GoogleLoginTests(SimpleTestCase):
     @patch("authentication.views.issue_token_pair")
     @patch("authentication.views.get_or_create_google_user")
     @patch("authentication.views.authenticate_google_authorization_code")
-    def test_google_registration_creates_pending_account_without_tokens(
+    def test_google_registration_creates_pending_hustler_without_tokens(
         self, authenticate_code, get_user, issue_tokens
     ):
         authenticate_code.return_value = {
@@ -751,7 +780,7 @@ class GoogleLoginTests(SimpleTestCase):
             "_id": ObjectId(),
             "email": "new-learner@example.com",
             "role": "student",
-            "accountType": "external",
+            "accountType": "hustler",
             "status": "pending",
             "approvalStatus": "pending",
             "is_active": True,

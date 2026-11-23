@@ -543,7 +543,7 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
                 confirmPassword,
                 emailVerificationToken: registrationEmailVerificationToken,
                 role: 'student',
-                accountType: 'independent',
+                accountType: 'hustler',
                 registrationDetails,
                 ...(form.elements.referralCode.value.trim()
                   ? { referralCode: form.elements.referralCode.value.trim() }
@@ -577,7 +577,7 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
           throw new Error('The server could not confirm account creation. Please try again.')
         }
 
-        onRegistrationSuccess(result.message || 'Your account was created and is awaiting administrator approval.')
+        onRegistrationSuccess(result.message || 'Your Hustler account was created and is awaiting administrator approval.')
         return
       }
 
