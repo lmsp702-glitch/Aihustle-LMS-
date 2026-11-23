@@ -85,15 +85,17 @@ class AuthenticationTests(SimpleTestCase):
         self.assertEqual(response.status_code, 501)
         self.assertIn("Referral-code", response.json()["message"])
 
-    def test_referral_validation_route_reports_unimplemented_feature(self):
+    @patch("student_api.views.collection")
+    def test_referral_validation_route_returns_json_for_an_invalid_code(self, collection):
+        collection.return_value.find_one.return_value = None
         response = self.client.post(
             "/api/referrals/validate",
             {"code": "REFERRAL-123"},
             format="json",
         )
 
-        self.assertEqual(response.status_code, 501)
-        self.assertIn("not available", response.json()["message"])
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response.json()["valid"])
 
     @patch("authentication.services.collection")
     def test_duplicate_email_is_rejected(self, collection):

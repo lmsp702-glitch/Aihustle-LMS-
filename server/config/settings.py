@@ -26,6 +26,7 @@ INSTALLED_APPS = [
     "drf_spectacular",
     "core",
     "authentication",
+    "student_api",
     "users",
     "colleges",
     "courses",
@@ -38,6 +39,7 @@ MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",
+    "student_api.middleware.ApiJsonErrorMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"

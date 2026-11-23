@@ -1,4 +1,5 @@
 from drf_spectacular.utils import extend_schema
+from rest_framework.response import Response
 
 from core.serializers import CourseSerializer
 from core.views import MongoResourceView
@@ -11,7 +12,23 @@ class CourseListView(MongoResourceView):
 
     @extend_schema(operation_id="courses_list", responses=CourseSerializer(many=True))
     def get(self, request):
-        return super().get(request)
+        response = super().get(request)
+        if request.user.role != "student" or not isinstance(response.data, list):
+            return response
+        courses = []
+        for item in response.data:
+            status_value = str(item.get("status", "")).lower()
+            if (
+                item.get("published") is False
+                or item.get("isPublished") is False
+                or item.get("is_published") is False
+                or status_value in {"draft", "unpublished", "inactive", "rejected", "archived"}
+            ):
+                continue
+            item.setdefault("_id", item.get("id"))
+            item.setdefault("title", item.get("name", "Course"))
+            courses.append(item)
+        return Response({"courses": courses})
 
     @extend_schema(
         operation_id="courses_create",

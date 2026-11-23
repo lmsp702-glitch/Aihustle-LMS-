@@ -1,0 +1,102 @@
+from django.urls import path
+
+from student_api.views import (
+    CourseLearningContentView,
+    CourseRecommendationsView,
+    EnrollmentLearningActivityView,
+    EnrollmentListCreateView,
+    EnrollmentProgressView,
+    StudentReferralCodeValidationView,
+    StudentAssignmentDownloadView,
+    StudentAssignmentSubmissionActionView,
+    StudentAssignmentSubmissionView,
+    StudentCertificatesView,
+    StudentCertificatePdfView,
+    StudentCourseListView,
+    StudentCourseResourceFileView,
+    StudentLearningActivityView,
+    StudentLearningSummaryView,
+    StudentNotificationActionView,
+    StudentNotificationsView,
+    StudentQuizAttemptView,
+    StudentReferralsView,
+    StudentAttentionCheckView,
+)
+
+urlpatterns = [
+    path("referrals/validate", StudentReferralCodeValidationView.as_view(), name="referral-code-validate"),
+    path("enrollments", EnrollmentListCreateView.as_view(), name="student-enrollments"),
+    path("enrollments/me", EnrollmentListCreateView.as_view(), name="student-my-enrollments"),
+    path(
+        "enrollments/<str:enrollment_id>/progress",
+        EnrollmentProgressView.as_view(),
+        name="student-enrollment-progress",
+    ),
+    path(
+        "enrollments/<str:enrollment_id>/learning-activity",
+        EnrollmentLearningActivityView.as_view(),
+        name="student-enrollment-learning-activity",
+    ),
+    path("courses/recommendations", CourseRecommendationsView.as_view(), name="student-course-recommendations"),
+    path("courses", StudentCourseListView.as_view(), name="student-course-list-no-slash"),
+    path("courses/", StudentCourseListView.as_view(), name="student-course-list"),
+    path(
+        "courses/<str:course_id>/learning-content",
+        CourseLearningContentView.as_view(),
+        name="student-course-learning-content",
+    ),
+    path("learning/summary", StudentLearningSummaryView.as_view(), name="student-learning-summary"),
+    path("learning/activity", StudentLearningActivityView.as_view(), name="student-learning-activity"),
+    path("certificates", StudentCertificatesView.as_view(), name="student-certificates"),
+    path(
+        "certificates/<str:certificate_id>/pdf",
+        StudentCertificatePdfView.as_view(),
+        name="student-certificate-pdf",
+    ),
+    path("notifications/me", StudentNotificationsView.as_view(), name="student-notifications"),
+    path("notifications/read-all", StudentNotificationActionView.as_view(), name="student-notifications-read-all"),
+    path("notifications/<str:notification_id>/read", StudentNotificationActionView.as_view(), name="student-notification-read"),
+    path("notifications/<str:notification_id>", StudentNotificationActionView.as_view(), name="student-notification-delete"),
+    path("referrals/me", StudentReferralsView.as_view(), name="student-referrals"),
+    path("referrals/generate", StudentReferralsView.as_view(), name="student-referral-generate"),
+    path(
+        "courses/<str:course_id>/assignments/<str:assignment_id>/submissions",
+        StudentAssignmentSubmissionView.as_view(),
+        name="student-assignment-submission",
+    ),
+    path(
+        "assignment-submissions/<str:submission_id>/human-review-requests",
+        StudentAssignmentSubmissionActionView.as_view(),
+        name="student-assignment-human-review",
+    ),
+    path(
+        "assignment-submissions/<str:submission_id>/download",
+        StudentAssignmentDownloadView.as_view(),
+        name="student-assignment-download",
+    ),
+    path(
+        "courses/<str:course_id>/quizzes/<str:quiz_id>/attempts/status",
+        StudentQuizAttemptView.as_view(),
+        name="student-quiz-status",
+    ),
+    path(
+        "courses/<str:course_id>/quizzes/<str:quiz_id>/attempts/start",
+        StudentQuizAttemptView.as_view(),
+        name="student-quiz-start",
+    ),
+    path(
+        "courses/<str:course_id>/quizzes/<str:quiz_id>/attempts/<str:attempt_id>/submit",
+        StudentQuizAttemptView.as_view(),
+        name="student-quiz-submit",
+    ),
+    path(
+        "courses/<str:course_id>/attention-checks/<str:lesson_id>/<str:action>",
+        StudentAttentionCheckView.as_view(),
+        name="student-attention-check",
+    ),
+    path(
+        "courses/<str:course_id>/resources/<str:resource_id>/file",
+        StudentCourseResourceFileView.as_view(),
+        name="student-course-resource-file",
+    ),
+]
