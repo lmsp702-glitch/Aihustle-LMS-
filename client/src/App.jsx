@@ -89,7 +89,7 @@ async function readApiResponse(response) {
 }
 
 async function registerAccount(payload) {
-  const response = await fetch(`${API_BASE_URL}/auth/register`, {
+  const response = await fetch(`${API_BASE_URL}/auth/register/`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -530,7 +530,7 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
         : undefined
       const loginRoles = ['student', 'main_admin', 'college_admin']
       for (const candidateRole of isRegistering ? ['student'] : loginRoles) {
-        response = await fetch(`${API_BASE_URL}/auth/${isRegistering ? 'register' : 'login'}`, {
+        response = await fetch(`${API_BASE_URL}/auth/${isRegistering ? 'register' : 'login'}/`, {
           method: 'POST',
           credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
@@ -599,7 +599,11 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
         throw new Error('The server returned incomplete or mismatched login details.')
       }
 
-      sessionStorage.setItem('lms.auth', JSON.stringify({ token: result.token, user: result.user }))
+      sessionStorage.setItem('lms.auth', JSON.stringify({
+        token: result.token,
+        refreshToken: result.refresh,
+        user: result.user,
+      }))
       window.location.assign(DASHBOARD_PATHS[result.user.role])
     } catch (error) {
       onMessage(
@@ -778,6 +782,7 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
 
         if (
           typeof result.token !== 'string' ||
+          typeof result.refresh !== 'string' ||
           typeof result.user?.id !== 'string' ||
           result.user.role !== attempt.role
         ) {
@@ -785,7 +790,11 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
         }
 
         attempt.active = false
-        sessionStorage.setItem('lms.auth', JSON.stringify({ token: result.token, user: result.user }))
+        sessionStorage.setItem('lms.auth', JSON.stringify({
+          token: result.token,
+          refreshToken: result.refresh,
+          user: result.user,
+        }))
         window.location.assign(DASHBOARD_PATHS[result.user.role])
       } catch (error) {
         attempt.active = false

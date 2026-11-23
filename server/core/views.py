@@ -23,11 +23,12 @@ class HealthCheckView(GenericAPIView):
         try:
             check_mongo_connection()
         except (RuntimeError, PyMongoError) as exc:
+            detail = "MongoDB is not configured." if isinstance(exc, RuntimeError) else "MongoDB Atlas is unreachable."
             return Response(
                 {
                     "status": "degraded",
                     "database": "unavailable",
-                    "detail": "MongoDB is not configured or unavailable.",
+                    "detail": detail,
                     "timestamp": datetime.now(timezone.utc),
                 },
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,

@@ -77,13 +77,23 @@ class HealthCheckTests(SimpleTestCase):
         self.assertEqual(response.status_code, 401)
 
     @patch("authentication.views.issue_token_pair", return_value={"access": "access", "refresh": "refresh"})
+    @patch("authentication.views.consume_registration_email_verification", return_value=True)
+    @patch("authentication.views.collection")
     @patch("authentication.views.create_user")
-    def test_registration_returns_public_user_and_token_pair(self, create_user, issue_tokens):
+    def test_registration_returns_public_external_user_and_token_pair(
+        self, create_user, collection, consume_verification, issue_tokens
+    ):
+        collection.return_value.find_one.return_value = None
         user = {
             "_id": ObjectId(),
             "name": "Learner",
             "email": "learner@example.com",
+            "username": "learner",
             "role": "student",
+            "accountType": "external",
+            "studentType": "independent",
+            "status": "active",
+            "is_active": True,
             "password_hash": "must-not-leak",
         }
         create_user.return_value = user
@@ -91,14 +101,31 @@ class HealthCheckTests(SimpleTestCase):
         response = self.client.post(
             "/api/auth/register/",
             {
-                "name": "Learner",
+                "fullName": "Learner",
                 "email": "learner@example.com",
+                "username": "learner",
                 "password": "secure-password",
+                "confirmPassword": "secure-password",
+                "emailVerificationToken": "verified-token",
+                "role": "student",
+                "accountType": "independent",
+                "registrationDetails": {"educationLevel": "college"},
             },
             format="json",
         )
 
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.json()["user"]["email"], user["email"])
+        self.assertEqual(response.json()["user"]["accountType"], "external")
+        self.assertEqual(response.json()["user"]["studentType"], "independent")
         self.assertNotIn("password_hash", response.json()["user"])
         self.assertEqual(response.json()["access"], "access")
+        consume_verification.assert_called_once_with(
+            "learner@example.com",
+            "verified-token",
+        )
+        self.assertEqual(create_user.call_args.kwargs["username"], "learner")
+        self.assertEqual(
+            create_user.call_args.kwargs["registration_details"],
+            {"educationLevel": "college"},
+        )

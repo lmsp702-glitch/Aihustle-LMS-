@@ -1,18 +1,8 @@
 import React, { useEffect, useState } from 'react'
+import { API_BASE_URL } from './api-base-url.js'
 import { isInvalidSessionResponse } from './auth-session.js'
 import './AdminCertificateTemplateSettings.css'
 
-function resolveApiBaseUrl() {
-  const configuredUrl = import.meta.env.VITE_API_BASE_URL
-    || import.meta.env.VITE_API_URL
-    || 'http://localhost:5000/api'
-  const url = new URL(configuredUrl, window.location.origin)
-  const pathname = url.pathname.replace(/\/+$/, '')
-  const apiPath = pathname.toLowerCase().endsWith('/api') ? pathname : `${pathname}/api`
-  return `${url.origin}${apiPath}`
-}
-
-const API_BASE_URL = resolveApiBaseUrl()
 const allowedTypes = ['image/png', 'image/jpeg']
 const maxFileSize = 4 * 1024 * 1024
 

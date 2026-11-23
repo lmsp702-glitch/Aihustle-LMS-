@@ -4,10 +4,16 @@ from drf_spectacular.views import (
     SpectacularSwaggerView,
 )
 
+from authentication.views import ReferralValidationUnavailableView
 from core.views import HealthCheckView
 
 urlpatterns = [
     path("api/health/", HealthCheckView.as_view(), name="health"),
+    path(
+        "api/referrals/validate",
+        ReferralValidationUnavailableView.as_view(),
+        name="referral-validation-unavailable",
+    ),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path(
         "api/docs/",

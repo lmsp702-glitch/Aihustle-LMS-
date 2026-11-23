@@ -16,6 +16,11 @@ class AuthenticatedUser:
     email: str
     name: str
     role: str
+    username: str = None
+    account_type: str = None
+    student_type: str = None
+    status: str = "active"
+    college_id: str = None
     is_active: bool = True
     is_authenticated: bool = True
 
@@ -46,6 +51,15 @@ class JWTAuthentication(BaseAuthentication):
             email=document["email"],
             name=document.get("name", ""),
             role=document.get("role", "student"),
+            username=document.get("username"),
+            account_type=document.get("accountType"),
+            student_type=document.get("studentType"),
+            status=document.get("status", "active"),
+            college_id=(
+                str(document.get("collegeId") or document.get("college_id"))
+                if document.get("collegeId") or document.get("college_id")
+                else None
+            ),
         )
         return user, parts[1]
 

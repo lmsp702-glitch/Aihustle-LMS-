@@ -22,12 +22,17 @@ function installSessionStorage() {
 
 test('authenticated requests refresh an expired token and retry with the new token', async () => {
   const storedValues = installSessionStorage()
+  globalThis.sessionStorage.setItem('lms.auth', JSON.stringify({
+    token: 'expired-access-token',
+    refreshToken: 'refresh-token',
+  }))
   const requests = []
   globalThis.fetch = async (url, options) => {
     requests.push({ url, options })
-    if (url.endsWith('/auth/refresh')) {
+    if (url.endsWith('/auth/refresh/')) {
       return new Response(JSON.stringify({
         token: 'new-access-token',
+        refresh: 'new-refresh-token',
         user: { id: 'student-1', role: 'student' },
       }), { status: 200, headers: { 'Content-Type': 'application/json' } })
     }
@@ -57,16 +62,17 @@ test('authenticated requests refresh an expired token and retry with the new tok
   assert.equal(requests[2].options.headers.Authorization, 'Bearer new-access-token')
   assert.deepEqual(JSON.parse(storedValues.get('lms.auth')), {
     token: 'new-access-token',
+    refreshToken: 'new-refresh-token',
     user: { id: 'student-1', role: 'student' },
   })
 })
 
-test('expired sessions without a refresh cookie remain rejected', async () => {
+test('expired sessions without a refresh token remain rejected', async () => {
   installSessionStorage()
   const requests = []
   globalThis.fetch = async (url) => {
     requests.push(url)
-    if (url.endsWith('/auth/refresh')) {
+    if (url.endsWith('/auth/refresh/')) {
       return new Response(JSON.stringify({ message: 'Your session has expired. Sign in again.' }), {
         status: 401,
         headers: { 'Content-Type': 'application/json' },
@@ -88,6 +94,5 @@ test('expired sessions without a refresh cookie remain rejected', async () => {
   assert.equal(response.status, 401)
   assert.deepEqual(requests, [
     'https://lms.example/api/enrollments',
-    'https://lms.example/api/auth/refresh',
   ])
 })

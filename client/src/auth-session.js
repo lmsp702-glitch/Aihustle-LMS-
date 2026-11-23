@@ -17,17 +17,31 @@ export function isInvalidSessionResponse(response, result) {
 export async function refreshAuthSession(apiBaseUrl) {
   if (!refreshRequest) {
     refreshRequest = (async () => {
-      const response = await fetch(`${apiBaseUrl}/auth/refresh`, {
+      const storedAuth = sessionStorage.getItem('lms.auth')
+      let refreshToken = null
+      try {
+        refreshToken = storedAuth ? JSON.parse(storedAuth)?.refreshToken : null
+      } catch {
+        return null
+      }
+      if (typeof refreshToken !== 'string' || !refreshToken) return null
+      const response = await fetch(`${apiBaseUrl}/auth/refresh/`, {
         method: 'POST',
         credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh: refreshToken }),
       })
       const result = await response.json().catch(() => null)
       if (response.status === 401 || response.status === 403) return null
       if (!response.ok) throw new Error(result?.message || 'Your session could not be refreshed.')
-      if (typeof result?.token !== 'string' || typeof result.user?.id !== 'string') {
+      if (typeof result?.token !== 'string' || typeof result?.user?.id !== 'string') {
         throw new Error('The server returned invalid session refresh details.')
       }
-      sessionStorage.setItem('lms.auth', JSON.stringify({ token: result.token, user: result.user }))
+      sessionStorage.setItem('lms.auth', JSON.stringify({
+        token: result.token,
+        refreshToken: result.refresh || refreshToken,
+        user: result.user,
+      }))
       return { token: result.token, user: result.user }
     })().finally(() => {
       refreshRequest = undefined
