@@ -2,16 +2,27 @@ import mongoose from 'mongoose'
 
 const notificationSchema = new mongoose.Schema(
   {
-    recipientRole: {
-      type: String,
-      enum: ['main_admin', 'student', 'college_admin', 'college'],
-      required: true,
-    },
+    recipientRole: { type: String, enum: ['main_admin', 'student'], required: true },
     recipientId: { type: mongoose.Schema.Types.ObjectId },
-    collegeId: { type: mongoose.Schema.Types.ObjectId, ref: 'College' },
-    isRead: { type: Boolean, default: false },
     type: {
       type: String,
+      enum: [
+        'independent_student_registered',
+        'independent_student_approved',
+        'independent_student_rejected',
+        'course_assigned',
+        'course_incomplete',
+        'assignment_due',
+        'assignment_submitted',
+        'assignment_ai_graded',
+        'assignment_human_review_completed',
+        'assignment_approved',
+        'assignment_rejected',
+        'assignment_human_review_requested',
+        'quiz_result',
+        'certificate_available',
+        'course_updated',
+      ],
       required: true,
     },
     eventKey: { type: String, trim: true, maxlength: 300 },
@@ -28,7 +39,6 @@ const notificationSchema = new mongoose.Schema(
 )
 
 notificationSchema.index({ recipientRole: 1, recipientId: 1, createdAt: -1 })
-notificationSchema.index({ collegeId: 1, recipientRole: 1, createdAt: -1 })
 notificationSchema.index({ eventKey: 1 }, { unique: true, sparse: true, name: 'unique_notification_event_key' })
 notificationSchema.index({ recipientRole: 1, recipientId: 1, deletedAt: 1, readAt: 1 }, { name: 'notification_unread_count' })
 

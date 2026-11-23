@@ -103,45 +103,12 @@ function SettingsPage({
   const [pageError, setPageError] = useState('')
   const [isLoading, setIsLoading] = useState(!hasCachedAccount)
   const [exportState, setExportState] = useState({ loading: false, error: '', notice: '' })
-  const [showDeleteModal, setShowDeleteModal] = useState(false)
+  const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false)
+  const [isDeletingAccount, setIsDeletingAccount] = useState(false)
   const [deletePassword, setDeletePassword] = useState('')
-  const [deleteConfirmation, setDeleteConfirmation] = useState('')
+  const [deleteConfirmText, setDeleteConfirmText] = useState('')
   const [deleteError, setDeleteError] = useState('')
-  const [isDeleting, setIsDeleting] = useState(false)
-  const [notificationPreferences, setNotificationPreferences] = useState({
-    courseAnnouncements: true,
-    newCourseUpdates: true,
-    assignmentDeadlines: true,
-    quizReminders: true,
-    referralNotifications: true,
-    emailNotifications: true,
-  })
-  const [loadingNotificationPreferences, setLoadingNotificationPreferences] = useState(user?.role === 'student')
-  const [savingNotificationPreferences, setSavingNotificationPreferences] = useState(false)
-  const [notificationPreferencesNotice, setNotificationPreferencesNotice] = useState('')
-  const [notificationPreferencesError, setNotificationPreferencesError] = useState('')
-
-  useEffect(() => {
-    let active = true
-    if (user?.role === 'student') {
-      settingsRequest('/notifications')
-        .then((res) => res.json())
-        .then((data) => {
-          if (active && data?.preferences) {
-            setNotificationPreferences(data.preferences)
-          }
-        })
-        .catch((err) => {
-          if (active) {
-            setNotificationPreferencesError(err instanceof Error ? err.message : 'Could not load notification preferences.')
-          }
-        })
-        .finally(() => {
-          if (active) setLoadingNotificationPreferences(false)
-        })
-    }
-    return () => { active = false }
-  }, [user?.role])
+  const [deleteModalError, setDeleteModalError] = useState('')
 
   useEffect(() => {
     let active = true
@@ -479,63 +446,75 @@ function SettingsPage({
     }
   }
 
-  async function handleConfirmDelete(event) {
-    if (event) event.preventDefault()
-    if (deleteConfirmation.trim().toUpperCase() !== 'DELETE') {
-      setDeleteError('Please type DELETE to confirm.')
-      return
-    }
-    if (account?.hasPassword && !deletePassword) {
-      setDeleteError('Please enter your current password.')
-      return
-    }
-    setIsDeleting(true)
+  function openDeleteDialog() {
     setDeleteError('')
+    setDeleteModalError('')
+    setDeletePassword('')
+    setDeleteConfirmText('')
+    setIsDeleteDialogOpen(true)
+  }
+
+  function closeDeleteDialog() {
+    if (isDeletingAccount) return
+    setIsDeleteDialogOpen(false)
+    setDeleteModalError('')
+    setDeletePassword('')
+    setDeleteConfirmText('')
+  }
+
+  async function handleDeleteAccount(event) {
+    if (event) event.preventDefault()
+    if (isDeletingAccount) return
+
+    if (account?.hasPassword && !deletePassword) {
+      setDeleteModalError('Please enter your password to confirm.')
+      return
+    }
+
+    if (deleteConfirmText.trim().toUpperCase() !== 'DELETE') {
+      setDeleteModalError('Please type DELETE to confirm.')
+      return
+    }
+
+    setIsDeletingAccount(true)
+    setDeleteModalError('')
+    setDeleteError('')
+
     try {
-      await settingsRequest('/account', {
+      const response = await settingsRequest('/account', {
         method: 'DELETE',
         body: JSON.stringify({
-          confirmation: 'DELETE',
           password: deletePassword,
+          confirmText: deleteConfirmText.trim(),
         }),
       })
+      const result = await response.json().catch(() => ({}))
+
       sessionStorage.removeItem('lms.auth')
-      localStorage.removeItem('lms.auth')
-      setShowDeleteModal(false)
+      sessionStorage.setItem(
+        'lms.account_deleted_notice',
+        result.message || 'Your account has been permanently deleted.',
+      )
+
+      try {
+        await fetch(`${API_BASE_URL}/auth/logout`, {
+          method: 'POST',
+          credentials: 'include',
+        })
+      } catch {
+        // Continue even if server logout request fails
+      }
+
       if (typeof onLogout === 'function') {
         onLogout()
       } else {
-        window.location.href = '/'
+        window.location.replace('/')
       }
-    } catch (err) {
-      setDeleteError(err instanceof Error ? err.message : 'Your account could not be deleted. Please try again.')
-      setIsDeleting(false)
-    }
-  }
-
-  async function updateNotificationPreference(key, value) {
-    const previous = { ...notificationPreferences }
-    setNotificationPreferences((prev) => ({ ...prev, [key]: value }))
-    setSavingNotificationPreferences(true)
-    setNotificationPreferencesError('')
-    setNotificationPreferencesNotice('')
-
-    try {
-      const response = await settingsRequest('/notifications', {
-        method: 'PATCH',
-        body: JSON.stringify({ [key]: value }),
-      })
-      const data = await response.json()
-      if (data?.preferences) {
-        setNotificationPreferences(data.preferences)
-      }
-      setNotificationPreferencesNotice('Preferences saved.')
-      setTimeout(() => setNotificationPreferencesNotice(''), 3000)
-    } catch (err) {
-      setNotificationPreferences(previous)
-      setNotificationPreferencesError(err instanceof Error ? err.message : 'Failed to save preference. Please try again.')
-    } finally {
-      setSavingNotificationPreferences(false)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'The account could not be deleted.'
+      setDeleteModalError(message)
+      setDeleteError(message)
+      setIsDeletingAccount(false)
     }
   }
 
@@ -568,7 +547,7 @@ function SettingsPage({
           <header className="settings-page__standalone-heading">
           <span className="student-eyebrow">ACCOUNT PREFERENCES</span>
           <h1>Settings</h1>
-          <p>Manage your account, security, and appearance.</p>
+          <p>Manage your account and security.</p>
           </header>
         </>
       )}
@@ -683,167 +662,6 @@ function SettingsPage({
             </form>
           </SettingsSection>
 
-          <SettingsSection title="Appearance" description="Choose a theme for the LMS. Your preference applies across pages and is saved on this device.">
-            <fieldset className="settings-theme-options">
-              <legend className="settings-sr-only">Choose appearance</legend>
-              {[
-                ['light', 'Light mode', 'Warm cream backgrounds and dark text'],
-                ['dark', 'Dark mode', 'A darker palette for low-light settings'],
-              ].map(([value, title, detail]) => (
-                <label className={`settings-theme-option${themePreference === value ? ' is-selected' : ''}`} key={value}>
-                  <input type="radio" name="theme" value={value} checked={themePreference === value} onChange={() => onSetTheme(value)} />
-                  <span><strong>{title}</strong><small>{detail}</small></span>
-                </label>
-              ))}
-            </fieldset>
-          </SettingsSection>
-
-          {user?.role === 'student' && (
-            <SettingsSection
-              title="Notification Preferences"
-              description="Choose what notifications you receive across your courses, learning activities, and account."
-              className="settings-notification-section"
-            >
-              {loadingNotificationPreferences ? (
-                <div className="settings-loading" role="status">Loading notification preferences…</div>
-              ) : (
-                <div className="settings-notification-content">
-                  <div className="settings-notification-groups">
-                    {/* Course Notifications */}
-                    <div className="settings-notification-group">
-                      <h3 className="settings-notification-group__title">Course Notifications</h3>
-                      <div className="settings-notification-card">
-                        <div className="settings-notification-card__info">
-                          <strong>Course Announcements</strong>
-                          <p>Receive notifications when instructors or admins publish course announcements.</p>
-                        </div>
-                        <label className="settings-toggle" aria-label="Toggle Course Announcements">
-                          <input
-                            type="checkbox"
-                            checked={notificationPreferences.courseAnnouncements !== false}
-                            onChange={(e) => updateNotificationPreference('courseAnnouncements', e.target.checked)}
-                            disabled={savingNotificationPreferences}
-                          />
-                          <span className="settings-toggle__slider" aria-hidden="true" />
-                        </label>
-                      </div>
-
-                      <div className="settings-notification-card">
-                        <div className="settings-notification-card__info">
-                          <strong>New Course Updates</strong>
-                          <p>Receive notifications about newly published courses and important course updates.</p>
-                        </div>
-                        <label className="settings-toggle" aria-label="Toggle New Course Updates">
-                          <input
-                            type="checkbox"
-                            checked={notificationPreferences.newCourseUpdates !== false}
-                            onChange={(e) => updateNotificationPreference('newCourseUpdates', e.target.checked)}
-                            disabled={savingNotificationPreferences}
-                          />
-                          <span className="settings-toggle__slider" aria-hidden="true" />
-                        </label>
-                      </div>
-                    </div>
-
-                    {/* Learning Reminders */}
-                    <div className="settings-notification-group">
-                      <h3 className="settings-notification-group__title">Learning Reminders</h3>
-                      <div className="settings-notification-card">
-                        <div className="settings-notification-card__info">
-                          <strong>Assignment Deadlines</strong>
-                          <p>Receive reminders about upcoming assignment deadlines.</p>
-                        </div>
-                        <label className="settings-toggle" aria-label="Toggle Assignment Deadlines">
-                          <input
-                            type="checkbox"
-                            checked={notificationPreferences.assignmentDeadlines !== false}
-                            onChange={(e) => updateNotificationPreference('assignmentDeadlines', e.target.checked)}
-                            disabled={savingNotificationPreferences}
-                          />
-                          <span className="settings-toggle__slider" aria-hidden="true" />
-                        </label>
-                      </div>
-
-                      <div className="settings-notification-card">
-                        <div className="settings-notification-card__info">
-                          <strong>Quiz Reminders</strong>
-                          <p>Receive reminders about pending quizzes and upcoming quiz deadlines.</p>
-                        </div>
-                        <label className="settings-toggle" aria-label="Toggle Quiz Reminders">
-                          <input
-                            type="checkbox"
-                            checked={notificationPreferences.quizReminders !== false}
-                            onChange={(e) => updateNotificationPreference('quizReminders', e.target.checked)}
-                            disabled={savingNotificationPreferences}
-                          />
-                          <span className="settings-toggle__slider" aria-hidden="true" />
-                        </label>
-                      </div>
-                    </div>
-
-                    {/* Referral Notifications */}
-                    <div className="settings-notification-group">
-                      <h3 className="settings-notification-group__title">Referral Notifications</h3>
-                      <div className="settings-notification-card">
-                        <div className="settings-notification-card__info">
-                          <strong>Referral Notifications</strong>
-                          <p>Receive updates about referral registrations, referral activity and eligible referral rewards.</p>
-                        </div>
-                        <label className="settings-toggle" aria-label="Toggle Referral Notifications">
-                          <input
-                            type="checkbox"
-                            checked={notificationPreferences.referralNotifications !== false}
-                            onChange={(e) => updateNotificationPreference('referralNotifications', e.target.checked)}
-                            disabled={savingNotificationPreferences}
-                          />
-                          <span className="settings-toggle__slider" aria-hidden="true" />
-                        </label>
-                      </div>
-                    </div>
-
-                    {/* Email Notifications */}
-                    <div className="settings-notification-group">
-                      <h3 className="settings-notification-group__title">Email Notifications</h3>
-                      <div className="settings-notification-card">
-                        <div className="settings-notification-card__info">
-                          <strong>Email Notifications</strong>
-                          <p>Master control for receiving notification emails. Disabling this stops all notification emails while in-app notifications remain active.</p>
-                        </div>
-                        <label className="settings-toggle" aria-label="Toggle Email Notifications">
-                          <input
-                            type="checkbox"
-                            checked={notificationPreferences.emailNotifications !== false}
-                            onChange={(e) => updateNotificationPreference('emailNotifications', e.target.checked)}
-                            disabled={savingNotificationPreferences}
-                          />
-                          <span className="settings-toggle__slider" aria-hidden="true" />
-                        </label>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="settings-notification-footer">
-                    {savingNotificationPreferences && (
-                      <span className="settings-notification-status is-saving" role="status">
-                        Saving changes…
-                      </span>
-                    )}
-                    {notificationPreferencesNotice && (
-                      <p className="settings-message is-success" role="status">
-                        {notificationPreferencesNotice}
-                      </p>
-                    )}
-                    {notificationPreferencesError && (
-                      <p className="settings-message is-error" role="alert">
-                        {notificationPreferencesError}
-                      </p>
-                    )}
-                  </div>
-                </div>
-              )}
-            </SettingsSection>
-          )}
-
           {user?.role === 'main_admin' && (
             <SettingsSection
               title="Certificate Management"
@@ -945,181 +763,143 @@ function SettingsPage({
             </SettingsSection>
           )}
 
-          <SettingsSection title="Connected Accounts" description="Only linked authentication providers are shown.">
-            <div className="settings-connected-account">
-              <span className="settings-google-mark" aria-hidden="true">G</span>
-              <div><strong>Google</strong><span>{account?.googleConnected ? `Connected${account.googleEmail ? ` · ${account.googleEmail}` : ''}` : 'Not connected'}</span></div>
-              <span className={`settings-pill${account?.googleConnected ? ' is-connected' : ''}`}>{account?.googleConnected ? 'Connected' : 'Not connected'}</span>
-            </div>
-            <p className="settings-note">Account linking and unlinking are managed securely during sign-in. Settings does not offer unlinking.</p>
-          </SettingsSection>
-
-          <SettingsSection title="Active Sessions" description="Your current sign-in uses a stateless access token.">
-            <ComingSoon>The platform does not yet track or revoke individual device sessions. No device or location data is shown.</ComingSoon>
-          </SettingsSection>
-
-          <SettingsSection title="Your LMS Data" description="Generate a copy of account details and LMS records currently available for your account.">
-            <p className="settings-note">The report includes your account information and support requests, when available. Enrollment, course-progress, purchase, and achievement records are not currently connected.</p>
-            {exportState.error && <p className="settings-message is-error" role="alert">{exportState.error}</p>}
-            {exportState.notice && <p className="settings-message is-success" role="status">{exportState.notice}</p>}
-            <button className="student-button student-button--quiet" type="button" onClick={downloadData} disabled={exportState.loading || isLoading}>
-              {exportState.loading ? 'Preparing report…' : 'Download my data'}
-            </button>
-          </SettingsSection>
-
-          {accountType === 'College Student' || user?.studentType === 'college' || account?.role === 'college_admin' ? (
-            <SettingsSection
-              title="Delete Account"
-              description="Institutional account policies and data retention."
-              className="settings-delete-section"
-            >
-              <div className="settings-delete-warning settings-delete-warning--institutional">
-                <div className="settings-delete-warning__header">
-                  <svg className="settings-delete-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-                  </svg>
-                  <strong>Institutional Policy Restriction</strong>
+          {user?.role !== 'main_admin' && (
+            <>
+              <SettingsSection title="Connected Accounts" description="Only linked authentication providers are shown.">
+                <div className="settings-connected-account">
+                  <span className="settings-google-mark" aria-hidden="true">G</span>
+                  <div><strong>Google</strong><span>{account?.googleConnected ? `Connected${account.googleEmail ? ` · ${account.googleEmail}` : ''}` : 'Not connected'}</span></div>
+                  <span className={`settings-pill${account?.googleConnected ? ' is-connected' : ''}`}>{account?.googleConnected ? 'Connected' : 'Not connected'}</span>
                 </div>
-                <p>
-                  Your account is managed by your educational institution. Institutional policy requires student academic records, progress, and enrollments to be administered directly by your college administration. Self-deletion is not permitted.
-                </p>
-                <p className="settings-delete-subtext">
-                  Please contact your college administrator or IT department if you wish to withdraw or request account removal.
-                </p>
+                <p className="settings-note">Account linking and unlinking are managed securely during sign-in. Settings does not offer unlinking.</p>
+              </SettingsSection>
+
+              <SettingsSection title="Active Sessions" description="Your current sign-in uses a stateless access token.">
+                <ComingSoon>The platform does not yet track or revoke individual device sessions. No device or location data is shown.</ComingSoon>
+              </SettingsSection>
+
+              <SettingsSection title="Your LMS Data" description="Generate a copy of account details and LMS records currently available for your account.">
+                <p className="settings-note">The report includes your account information and support requests, when available. Enrollment, course-progress, purchase, and achievement records are not currently connected.</p>
+                {exportState.error && <p className="settings-message is-error" role="alert">{exportState.error}</p>}
+                {exportState.notice && <p className="settings-message is-success" role="status">{exportState.notice}</p>}
+                <button className="student-button student-button--quiet" type="button" onClick={downloadData} disabled={exportState.loading || isLoading}>
+                  {exportState.loading ? 'Preparing report…' : 'Download my data'}
+                </button>
+              </SettingsSection>
+            </>
+          )}
+
+          {user?.role === 'main_admin' ? (
+            <SettingsSection title="Delete Account" description="Platform administrator accounts cannot be deleted." className="settings-delete-section">
+              <div className="settings-delete-warning">
+                <strong>Platform administrator account</strong>
+                <p>Root platform administrator accounts cannot be deleted from self-service settings.</p>
+              </div>
+            </SettingsSection>
+          ) : user?.role === 'college_admin' ? (
+            <SettingsSection title="Delete Account" description="College administrator accounts cannot be deleted." className="settings-delete-section">
+              <div className="settings-delete-warning">
+                <strong>College administrator account</strong>
+                <p>College administrator accounts cannot be self-deleted. Contact the platform administrator if your access needs to be changed.</p>
               </div>
             </SettingsSection>
           ) : (
             <SettingsSection
               title="Delete Account"
-              description="Permanently delete your account and personal learning data."
+              description="Permanently delete your account and all associated learning records."
               className="settings-delete-section"
             >
               <div className="settings-delete-warning">
-                <div className="settings-delete-warning__header">
-                  <svg className="settings-delete-icon is-danger" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <circle cx="12" cy="12" r="10" />
-                    <line x1="12" y1="8" x2="12" y2="12" />
-                    <line x1="12" y1="16" x2="12.01" y2="16" />
-                  </svg>
-                  <strong>Permanent Account Deletion</strong>
-                </div>
+                <strong>Warning: Account deletion is permanent</strong>
                 <p>
-                  Deleting your account will permanently deactivate your profile and remove your personal information.
+                  Deleting your account will permanently remove your profile, enrollments, course progress, quiz attempts, and certificates. This action cannot be undone.
                 </p>
-                <ul className="settings-delete-list">
-                  <li>Active course enrollments will be cancelled.</li>
-                  <li>Learning progress, quiz attempts, and activity history will be deleted.</li>
-                  <li>Completed certificates remain valid in our verification registry, but portal access will be revoked.</li>
-                  <li>Active referral codes you generated will be deactivated.</li>
-                  <li>If you joined via a referral, your referral status will be updated and pending rewards cancelled.</li>
-                  <li>Your username and email address will be released.</li>
-                </ul>
-                <div className="settings-delete-actions">
-                  <button
-                    type="button"
-                    className="student-button student-button--danger"
-                    onClick={() => {
-                      setShowDeleteModal(true)
-                      setDeleteError('')
-                      setDeletePassword('')
-                      setDeleteConfirmation('')
-                    }}
-                    disabled={isLoading}
-                  >
-                    Delete My Account
-                  </button>
-                </div>
+                {deleteError && <p className="settings-message is-error" role="alert">{deleteError}</p>}
+                <button
+                  type="button"
+                  className="settings-delete-button"
+                  onClick={openDeleteDialog}
+                  disabled={isDeletingAccount}
+                >
+                  Delete Account
+                </button>
               </div>
             </SettingsSection>
           )}
 
-          {showDeleteModal && (
+          {isDeleteDialogOpen && (
             <div
-              className="settings-modal-backdrop"
-              onClick={() => !isDeleting && setShowDeleteModal(false)}
-              role="alertdialog"
+              className="settings-delete-confirm-overlay"
+              role="dialog"
               aria-modal="true"
-              aria-labelledby="settings-delete-modal-title"
+              aria-labelledby="delete-account-title"
+              onClick={(e) => {
+                if (e.target === e.currentTarget && !isDeletingAccount) closeDeleteDialog()
+              }}
             >
-              <div className="settings-modal-dialog" onClick={(e) => e.stopPropagation()}>
-                <div className="settings-modal-dialog__header">
-                  <div className="settings-modal-dialog__icon is-danger">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                      <circle cx="12" cy="12" r="10" />
-                      <line x1="12" y1="8" x2="12" y2="12" />
-                      <line x1="12" y1="16" x2="12.01" y2="16" />
-                    </svg>
-                  </div>
-                  <div>
-                    <h3 id="settings-delete-modal-title">Delete Account</h3>
-                    <p className="settings-modal-dialog__sub">This action is permanent and cannot be reversed.</p>
-                  </div>
-                </div>
+              <div className="settings-delete-confirm-modal">
+                <h3 id="delete-account-title">Delete Account Permanently</h3>
+                <p>
+                  Are you sure you want to delete your account? All of your personal details, course progress, quiz attempts, assignment submissions, certificates, and achievements will be permanently erased.
+                </p>
 
-                <form onSubmit={handleConfirmDelete} className="settings-delete-form">
-                  <div className="settings-delete-modal__consequences">
-                    <p>All personal profile records, learning progress, quiz attempts, and active enrollments will be permanently erased. Active referral codes will be deactivated.</p>
-                  </div>
-
+                <form onSubmit={handleDeleteAccount}>
                   {account?.hasPassword && (
-                    <div className="settings-field">
-                      <label htmlFor="delete-account-password">
-                        <span>Current Password</span>
-                        <input
-                          id="delete-account-password"
-                          type="password"
-                          autoComplete="current-password"
-                          value={deletePassword}
-                          onChange={(e) => setDeletePassword(e.target.value)}
-                          placeholder="Enter your current password"
-                          disabled={isDeleting}
-                          required
-                        />
-                      </label>
+                    <div className="settings-form-group">
+                      <label htmlFor="settings-delete-password">Current Password</label>
+                      <input
+                        id="settings-delete-password"
+                        type="password"
+                        value={deletePassword}
+                        onChange={(e) => setDeletePassword(e.target.value)}
+                        placeholder="Enter your current password"
+                        autoComplete="current-password"
+                        disabled={isDeletingAccount}
+                        required
+                      />
                     </div>
                   )}
 
-                  <div className="settings-field">
-                    <label htmlFor="delete-account-confirm">
-                      <span>Type <strong>DELETE</strong> to confirm</span>
-                      <input
-                        id="delete-account-confirm"
-                        type="text"
-                        autoComplete="off"
-                        value={deleteConfirmation}
-                        onChange={(e) => setDeleteConfirmation(e.target.value)}
-                        placeholder="DELETE"
-                        disabled={isDeleting}
-                        required
-                      />
+                  <div className="settings-form-group">
+                    <label htmlFor="settings-delete-confirm-text">
+                      Type <strong>DELETE</strong> to confirm
                     </label>
+                    <input
+                      id="settings-delete-confirm-text"
+                      type="text"
+                      value={deleteConfirmText}
+                      onChange={(e) => setDeleteConfirmText(e.target.value)}
+                      placeholder="DELETE"
+                      disabled={isDeletingAccount}
+                      required
+                    />
                   </div>
 
-                  {deleteError && (
-                    <p className="settings-message is-error" role="alert">
-                      {deleteError}
+                  {deleteModalError && (
+                    <p className="settings-message is-error" role="alert" style={{ marginBottom: '14px' }}>
+                      {deleteModalError}
                     </p>
                   )}
 
-                  <div className="settings-modal-dialog__actions">
+                  <div className="settings-delete-confirm-actions">
                     <button
                       type="button"
-                      className="student-button student-button--subtle"
-                      onClick={() => setShowDeleteModal(false)}
-                      disabled={isDeleting}
+                      className="settings-secondary-button"
+                      onClick={closeDeleteDialog}
+                      disabled={isDeletingAccount}
                     >
                       Cancel
                     </button>
                     <button
                       type="submit"
-                      className="student-button student-button--danger"
+                      className="settings-button-danger"
                       disabled={
-                        isDeleting ||
-                        deleteConfirmation.trim().toUpperCase() !== 'DELETE' ||
-                        (account?.hasPassword && !deletePassword)
+                        isDeletingAccount ||
+                        (account?.hasPassword && !deletePassword) ||
+                        deleteConfirmText.trim().toUpperCase() !== 'DELETE'
                       }
                     >
-                      {isDeleting ? 'Deleting Account…' : 'Permanently Delete Account'}
+                      {isDeletingAccount ? 'Deleting account…' : 'Permanently Delete Account'}
                     </button>
                   </div>
                 </form>

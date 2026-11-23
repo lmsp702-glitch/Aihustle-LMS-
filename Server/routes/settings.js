@@ -1,31 +1,28 @@
 import bcrypt from 'bcryptjs'
-import { createHash, createHmac, randomInt, timingSafeEqual } from 'node:crypto'
+import { createHmac, randomInt, timingSafeEqual } from 'node:crypto'
+import { Readable } from 'node:stream'
 import { Router } from 'express'
+import multer from 'multer'
 import mongoose from 'mongoose'
+import cloudinary from '../config/cloudinary.js'
 import AccountIdentity from '../models/AccountIdentity.js'
 import SupportTicket from '../models/SupportTicket.js'
-import {
-  accountModelsByCollection,
-  roleForAccountCollection,
-  Student,
-  CollegeStudent,
-} from '../models/account-models.js'
+import { accountModelsByCollection, roleForAccountCollection } from '../models/account-models.js'
 import College from '../models/College.js'
 import Enrollment from '../models/Enrollment.js'
-import Progress from '../models/Progress.js'
-import LearningActivity from '../models/LearningActivity.js'
+import AssignmentSubmission from '../models/AssignmentSubmission.js'
 import QuizAttempt from '../models/QuizAttempt.js'
 import QuizAttemptState from '../models/QuizAttemptState.js'
-import AssignmentSubmission from '../models/AssignmentSubmission.js'
-import VideoAttentionResponse from '../models/VideoAttentionResponse.js'
-import Notification from '../models/Notification.js'
-import NotificationPreference, { DEFAULT_NOTIFICATION_PREFERENCES } from '../models/NotificationPreference.js'
-import RefreshSession from '../models/RefreshSession.js'
-import ReferralCode from '../models/ReferralCode.js'
 import Certificate from '../models/Certificate.js'
-import StudentNote from '../models/StudentNote.js'
-import { sanitizePreferences } from '../utils/notification-service.js'
-import { clearRefreshCookie } from './auth.js'
+import Notification from '../models/Notification.js'
+import VideoAttentionResponse from '../models/VideoAttentionResponse.js'
+import RefreshSession from '../models/RefreshSession.js'
+import StudentProfile from '../models/StudentProfile.js'
+import ReferralCode from '../models/ReferralCode.js'
+import ReferralCodeUserLimit from '../models/ReferralCodeUserLimit.js'
+import ReferralCodeDailyLimit from '../models/ReferralCodeDailyLimit.js'
+import Feedback from '../models/Feedback.js'
+import Complaint from '../models/Complaint.js'
 import { authenticate } from '../middleware/auth.js'
 import { config } from '../config/env.js'
 import { findTakenEmails, findTakenUsernames } from '../utils/account-identity-availability.js'
@@ -85,11 +82,18 @@ function serializeSettings(user, identity) {
     accountType: getAccountType(user),
     studentId: user.studentType === 'college' ? user.studentId || '' : null,
     collegeName: null,
+    department: user.department || null,
+    batch: user.batch || null,
     googleConnected: Boolean(identity?.googleSub),
     googleEmail: identity?.googleSub ? identity.googleEmail || user.email : null,
     hasPassword: Boolean(user.passwordHash),
     twoFactorEnabled: user.role === 'student' ? user.twoFactorEnabled === true : null,
     twoFactorEnabledAt: user.role === 'student' ? user.twoFactorEnabledAt || null : null,
+    phone: user.phone || '',
+    avatarUrl: user.avatarUrl || '',
+    headline: user.headline || '',
+    bio: user.bio || '',
+    location: user.location || '',
   }
 }
 
@@ -311,9 +315,9 @@ router.patch('/profile', async (req, res, next) => {
     if (!body || typeof body !== 'object' || Array.isArray(body)) {
       return res.status(400).json({ message: 'Enter valid account details.' })
     }
-    const allowedFields = new Set(['fullName', 'username'])
+    const allowedFields = new Set(['fullName', 'username', 'phone', 'avatarUrl', 'headline', 'bio', 'location'])
     if (Object.keys(body).some((field) => !allowedFields.has(field))) {
-      return res.status(400).json({ message: 'Only your display name and username can be changed here.' })
+      return res.status(400).json({ message: 'Only permitted profile details can be changed here.' })
     }
 
     const updates = {}
@@ -322,6 +326,36 @@ router.patch('/profile', async (req, res, next) => {
         return res.status(400).json({ message: 'Display name must be between 2 and 120 characters.' })
       }
       updates.fullName = body.fullName.trim()
+    }
+    if (Object.hasOwn(body, 'headline')) {
+      if (typeof body.headline !== 'string' || body.headline.trim().length > 160) {
+        return res.status(400).json({ message: 'Headline cannot exceed 160 characters.' })
+      }
+      updates.headline = body.headline.trim()
+    }
+    if (Object.hasOwn(body, 'bio')) {
+      if (typeof body.bio !== 'string' || body.bio.trim().length > 2000) {
+        return res.status(400).json({ message: 'Bio cannot exceed 2000 characters.' })
+      }
+      updates.bio = body.bio.trim()
+    }
+    if (Object.hasOwn(body, 'location')) {
+      if (typeof body.location !== 'string' || body.location.trim().length > 120) {
+        return res.status(400).json({ message: 'Location cannot exceed 120 characters.' })
+      }
+      updates.location = body.location.trim()
+    }
+    if (Object.hasOwn(body, 'phone')) {
+      if (typeof body.phone !== 'string' || body.phone.trim().length > 40) {
+        return res.status(400).json({ message: 'Phone number cannot exceed 40 characters.' })
+      }
+      updates.phone = body.phone.trim()
+    }
+    if (Object.hasOwn(body, 'avatarUrl')) {
+      if (typeof body.avatarUrl !== 'string' || body.avatarUrl.trim().length > 1000) {
+        return res.status(400).json({ message: 'Avatar URL is invalid.' })
+      }
+      updates.avatarUrl = body.avatarUrl.trim()
     }
     if (Object.hasOwn(body, 'username')) {
       if (AccountModel.collection.name !== 'clg_students') {
@@ -394,6 +428,11 @@ router.patch('/profile', async (req, res, next) => {
               identity.username = updates.username
             }
             if (updates.fullName) user.fullName = updates.fullName
+            if (Object.hasOwn(updates, 'phone')) user.phone = updates.phone
+            if (Object.hasOwn(updates, 'avatarUrl')) user.avatarUrl = updates.avatarUrl
+            if (Object.hasOwn(updates, 'headline')) user.headline = updates.headline
+            if (Object.hasOwn(updates, 'bio')) user.bio = updates.bio
+            if (Object.hasOwn(updates, 'location')) user.location = updates.location
             await user.save({ session })
             await identity.save({ session })
             updatedUser = user
@@ -412,6 +451,86 @@ router.patch('/profile', async (req, res, next) => {
   } catch (error) {
     if (error?.statusCode) return res.status(error.statusCode).json({ message: error.message })
     if (error?.code === 11000) return res.status(409).json({ message: 'That username is already taken.' })
+    return next(error)
+  }
+})
+
+const uploadAvatar = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true)
+    } else {
+      cb(new Error('Only image files (PNG, JPG, WEBP, GIF) are allowed.'))
+    }
+  },
+})
+
+router.post('/avatar', uploadAvatar.single('avatar'), async (req, res, next) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: 'No image file was uploaded.' })
+    }
+
+    const AccountModel = getAccountModel(req, res)
+    if (!AccountModel) return
+
+    let avatarUrl = ''
+    if (cloudinary.isConfigured) {
+      const uploadResult = await new Promise((resolve, reject) => {
+        const uploadStream = cloudinary.uploader.upload_stream(
+          {
+            folder: 'admin-avatars',
+            resource_type: 'image',
+            transformation: [{ width: 400, height: 400, crop: 'fill', gravity: 'face' }],
+          },
+          (error, result) => {
+            if (error) reject(error)
+            else resolve(result)
+          },
+        )
+        Readable.from(req.file.buffer).pipe(uploadStream)
+      })
+      avatarUrl = uploadResult.secure_url || uploadResult.url
+    } else {
+      const base64 = req.file.buffer.toString('base64')
+      avatarUrl = `data:${req.file.mimetype};base64,${base64}`
+    }
+
+    const user = await AccountModel.findByIdAndUpdate(
+      req.auth.id,
+      { $set: { avatarUrl } },
+      { returnDocument: 'after' },
+    )
+    if (!user) return res.status(404).json({ message: 'Account could not be found.' })
+
+    return res.json({
+      message: 'Profile picture updated successfully.',
+      avatarUrl,
+    })
+  } catch (error) {
+    return next(error)
+  }
+})
+
+router.delete('/avatar', async (req, res, next) => {
+  try {
+    const AccountModel = getAccountModel(req, res)
+    if (!AccountModel) return
+
+    const user = await AccountModel.findByIdAndUpdate(
+      req.auth.id,
+      { $set: { avatarUrl: '' } },
+      { returnDocument: 'after' },
+    )
+    if (!user) return res.status(404).json({ message: 'Account could not be found.' })
+
+    return res.json({
+      message: 'Profile picture removed.',
+      avatarUrl: '',
+    })
+  } catch (error) {
     return next(error)
   }
 })
@@ -730,312 +849,117 @@ router.get('/data-export', async (req, res, next) => {
   }
 })
 
-const allowedPreferenceKeys = [
-  'courseAnnouncements',
-  'newCourseUpdates',
-  'assignmentDeadlines',
-  'quizReminders',
-  'referralNotifications',
-  'emailNotifications',
-]
-
-router.get('/notifications', async (req, res, next) => {
-  try {
-    if (req.auth.role !== 'student') {
-      return res.status(403).json({ message: 'Notification preferences are only available for student accounts.' })
-    }
-
-    const doc = await NotificationPreference.findOne({
-      userId: req.auth.id,
-      accountCollection: req.auth.accountCollection,
-    }).lean()
-
-    return res.json({
-      preferences: sanitizePreferences(doc),
-    })
-  } catch (error) {
-    return next(error)
-  }
-})
-
-async function handleUpdateNotificationPreferences(req, res, next) {
-  try {
-    if (req.auth.role !== 'student') {
-      return res.status(403).json({ message: 'Notification preferences are only available for student accounts.' })
-    }
-
-    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
-      return res.status(400).json({ message: 'Invalid notification preferences payload.' })
-    }
-
-    const updates = {}
-    for (const key of allowedPreferenceKeys) {
-      if (key in req.body) {
-        if (typeof req.body[key] !== 'boolean') {
-          return res.status(400).json({ message: `Preference ${key} must be a boolean.` })
-        }
-        updates[key] = req.body[key]
-      }
-    }
-
-    if (Object.keys(updates).length === 0) {
-      return res.status(400).json({ message: 'No valid notification preferences were provided.' })
-    }
-
-    const studentType = req.auth.user?.studentType || (req.auth.accountCollection === 'clg_students' ? 'college' : 'independent')
-
-    const updated = await NotificationPreference.findOneAndUpdate(
-      { userId: req.auth.id, accountCollection: req.auth.accountCollection },
-      {
-        $set: {
-          userId: req.auth.id,
-          accountCollection: req.auth.accountCollection,
-          studentType,
-          ...updates,
-        },
+export async function deleteStudentAccountData(AccountModel, accountId, session = null) {
+  const options = session ? { session } : {}
+  await AccountIdentity.deleteOne(
+    { accountCollection: AccountModel.collection.name, accountId },
+    options,
+  )
+  await RefreshSession.deleteMany({ userId: accountId }, options)
+  await Enrollment.deleteMany({ userId: accountId }, options)
+  await AssignmentSubmission.deleteMany({ userId: accountId }, options)
+  await QuizAttempt.deleteMany({ userId: accountId }, options)
+  await QuizAttemptState.deleteMany({ userId: accountId }, options)
+  await Certificate.deleteMany({ userId: accountId }, options)
+  await Notification.deleteMany({ recipientId: accountId }, options)
+  await VideoAttentionResponse.deleteMany({ userId: accountId }, options)
+  await StudentProfile.deleteOne({ userId: accountId }, options)
+  await Feedback.deleteMany({ userId: accountId }, options)
+  await SupportTicket.deleteMany({ userId: accountId }, options)
+  await Complaint.deleteMany({ userId: accountId }, options)
+  await ReferralCode.updateMany(
+    { usedBy: accountId },
+    {
+      $set: {
+        usedBy: null,
+        usedAt: null,
+        status: 'active',
+        registrationStatus: null,
       },
-      { new: true, upsert: true, setDefaultsOnInsert: true },
-    ).lean()
-
-    return res.json({
-      message: 'Notification preferences updated.',
-      preferences: sanitizePreferences(updated),
-    })
-  } catch (error) {
-    return next(error)
-  }
+    },
+    options,
+  )
+  await ReferralCode.deleteMany({ generatedBy: accountId }, options)
+  await ReferralCodeUserLimit.deleteMany({ userId: accountId }, options)
+  await ReferralCodeDailyLimit.deleteMany({ userId: accountId }, options)
+  await AccountModel.deleteOne({ _id: accountId }, options)
 }
 
-router.patch('/notifications', handleUpdateNotificationPreferences)
-router.put('/notifications', handleUpdateNotificationPreferences)
-
-async function handleDeleteAccount(req, res, next) {
+async function handleAccountDeletion(req, res, next) {
   try {
-    // 1. Guard against College-managed accounts
-    if (
-      req.auth.accountCollection === 'clg_students' ||
-      req.auth.user?.studentType === 'college'
-    ) {
-      return res.status(403).json({
-        message: 'College-managed accounts cannot be deleted directly. Please contact your college administrator to request account deactivation or removal.',
-      })
+    if (req.auth.role === 'main_admin') {
+      return res.status(403).json({ message: 'Platform administrator accounts cannot be deleted.' })
+    }
+    if (req.auth.role === 'college_admin') {
+      return res.status(403).json({ message: 'College administrator accounts cannot be deleted. Contact the platform administrator.' })
+    }
+    if (req.auth.role !== 'student') {
+      return res.status(403).json({ message: 'Only student accounts can be deleted through settings.' })
     }
 
-    // 2. Only independent students can self-delete via this endpoint
-    if (req.auth.role !== 'student' || req.auth.accountCollection !== 'students') {
-      return res.status(403).json({
-        message: 'Account deletion is only available for independent student accounts.',
-      })
+    const AccountModel = getAccountModel(req, res)
+    if (!AccountModel) return
+
+    const { password, confirmText } = req.body ?? {}
+
+    if (typeof confirmText !== 'string' || confirmText.trim().toUpperCase() !== 'DELETE') {
+      return res.status(400).json({ message: 'Please type DELETE to confirm account deletion.' })
     }
 
-    const { confirmation, password, currentPassword } = req.body ?? {}
-
-    // 3. Validate confirmation text
-    if (typeof confirmation !== 'string' || confirmation.trim().toUpperCase() !== 'DELETE') {
-      return res.status(400).json({
-        message: 'Please type DELETE to confirm account deletion.',
-      })
-    }
-
-    // 4. Retrieve student with passwordHash
-    const AccountModel = accountModelsByCollection[req.auth.accountCollection]
-    if (!AccountModel) {
-      return res.status(404).json({ message: 'Account could not be found.' })
-    }
-
+    // Always identify the account using the authenticated user's ID
     const user = await AccountModel.findById(req.auth.id).select('+passwordHash')
     if (!user) {
       return res.status(404).json({ message: 'Account could not be found.' })
     }
 
-    // If already deleted
-    if (user.status === 'deleted') {
-      return res.status(400).json({ message: 'This account has already been deleted.' })
-    }
-
-    // 5. Password verification (if account has a password)
     if (user.passwordHash) {
-      const submittedPassword = password || currentPassword
-      if (typeof submittedPassword !== 'string' || !submittedPassword) {
-        return res.status(400).json({
-          message: 'Please enter your current password to confirm account deletion.',
-        })
+      if (typeof password !== 'string' || !password) {
+        return res.status(400).json({ message: 'Enter your password to confirm account deletion.' })
       }
-      const isPasswordValid = await bcrypt.compare(submittedPassword, user.passwordHash)
-      if (!isPasswordValid) {
-        return res.status(401).json({
-          message: 'The password you entered is incorrect.',
-        })
+      const isMatch = await bcrypt.compare(password, user.passwordHash)
+      if (!isMatch) {
+        return res.status(400).json({ message: 'The password you entered is incorrect.' })
       }
     }
 
-    const studentId = user._id
-    const originalEmail = String(user.email || '').toLowerCase().trim()
-    const emailHash = createHash('sha256').update(originalEmail).digest('hex')
-    const deletedAt = new Date()
-    const anonymizedEmail = `deleted_${studentId}@deleted.aiHustle.internal`
-    const anonymizedUsername = `deleted_${studentId}`
+    const accountId = user._id
 
-    // 6. Execute atomic deletion / anonymization with transaction (fallback if standalone)
-    let session = null
+    // Attempt deletion within a transaction if replica sets are configured, or fallback to direct deletion
+    let deletedSuccessfully = false
     try {
-      session = await mongoose.startSession()
-    } catch {
-      session = null
-    }
-
-    const performDeletion = async (sess) => {
-      const opts = sess ? { session: sess } : {}
-
-      // A. Anonymize Student record
-      await AccountModel.updateOne(
-        { _id: studentId },
-        {
-          $set: {
-            fullName: 'Deleted Student',
-            email: anonymizedEmail,
-            username: anonymizedUsername,
-            status: 'deleted',
-            isActive: false,
-            deletedAt,
-            registrationDetails: {},
-            studentId: '',
-            hearAboutUsOther: '',
-            twoFactorEnabled: false,
-            approvalStatus: 'rejected',
-          },
-          $unset: {
-            passwordHash: 1,
-            twoFactorSecret: 1,
-            phone: 1,
-            dateOfBirth: 1,
-            gender: 1,
-            address: 1,
-          },
-        },
-        opts,
-      )
-
-      // B. Delete AccountIdentity to release username and email
-      await AccountIdentity.deleteOne(
-        { accountCollection: 'students', accountId: studentId },
-        opts,
-      )
-
-      // C. Invalidate all RefreshSessions
-      await RefreshSession.deleteMany(
-        { userId: studentId },
-        opts,
-      )
-
-      // D. Cancel Enrollments
-      await Enrollment.updateMany(
-        { userId: studentId, status: { $ne: 'cancelled' } },
-        { $set: { status: 'cancelled' } },
-        opts,
-      )
-
-      // E. Delete personal learning progress, activities, quiz attempts, submissions, and notifications
-      await Promise.all([
-        Progress.deleteMany({ userId: studentId }, opts),
-        LearningActivity.deleteMany({ studentId }, opts),
-        QuizAttempt.deleteMany({ userId: studentId }, opts),
-        QuizAttemptState.deleteMany({ userId: studentId }, opts),
-        AssignmentSubmission.deleteMany({ userId: studentId }, opts),
-        VideoAttentionResponse.deleteMany({ userId: studentId }, opts),
-        Notification.deleteMany({ recipientId: studentId }, opts),
-        NotificationPreference.deleteMany({ userId: studentId }, opts),
-        (mongoose.connection.readyState === 0 && StudentNote.deleteMany === mongoose.Model.deleteMany
-          ? Promise.resolve()
-          : StudentNote.deleteMany({ studentId }, opts).catch(() => {})),
-      ])
-
-      // F. Anonymize Support Tickets
-      await SupportTicket.updateMany(
-        { userId: studentId },
-        {
-          $set: {
-            requesterName: 'Deleted Student',
-            requesterEmail: 'deleted@deleted.local',
-          },
-        },
-        opts,
-      )
-
-      // G. Scenario A: Referrals where this user was the REFERRED student
-      await ReferralCode.updateMany(
-        {
-          $or: [
-            { usedBy: studentId },
-            ...(user.referredByCode ? [{ code: user.referredByCode }] : []),
-          ],
-        },
-        {
-          $set: {
-            registrationStatus: 'account_deleted',
-            rewardStatus: 'cancelled',
-            referredEmailHash: emailHash,
-            referredUserAnonymized: true,
-          },
-        },
-        opts,
-      )
-
-      // H. Scenario B: Referrals where this user was the REFERRER
-      await ReferralCode.updateMany(
-        { generatedBy: studentId },
-        {
-          $set: {
-            isDeactivated: true,
-            status: 'expired',
-          },
-        },
-        opts,
-      )
-    }
-
-    if (session) {
+      const session = await mongoose.startSession()
       try {
         await session.withTransaction(async () => {
-          await performDeletion(session)
+          await deleteStudentAccountData(AccountModel, accountId, session)
         })
-      } catch (txErr) {
-        const isTxUnsupported =
-          txErr?.code === 20 ||
-          txErr?.codeName === 'IllegalOperation' ||
-          txErr?.message?.includes('Transaction numbers are only allowed') ||
-          txErr?.message?.includes('transactions are not supported') ||
-          txErr?.message?.includes('standalone') ||
-          txErr?.message?.includes('replica set')
-        if (isTxUnsupported) {
-          await performDeletion(null)
-        } else {
-          throw txErr
-        }
+        deletedSuccessfully = true
       } finally {
-        await session.endSession().catch(() => {})
+        await session.endSession()
       }
-    } else {
-      await performDeletion(null)
-    }
-
-    // 7. Clear refresh session cookie
-    try {
-      clearRefreshCookie(res)
-    } catch {
-      res.clearCookie('lms_refresh', { path: '/api/auth' })
+    } catch (transactionError) {
+      const msg = String(transactionError?.message || '')
+      if (
+        msg.includes('replica set') ||
+        msg.includes('Transaction numbers are only allowed') ||
+        msg.includes('does not support transactions')
+      ) {
+        await deleteStudentAccountData(AccountModel, accountId, null)
+        deletedSuccessfully = true
+      } else {
+        throw transactionError
+      }
     }
 
     return res.json({
-      success: true,
-      message: 'Your account has been deleted and personal information removed in accordance with our data policy.',
+      message: 'Your account and all associated learning records have been permanently deleted.',
+      deleted: true,
     })
   } catch (error) {
     return next(error)
   }
 }
 
-router.delete('/account', handleDeleteAccount)
-router.post('/delete-account', handleDeleteAccount)
+router.delete('/account', handleAccountDeletion)
+router.delete('/', handleAccountDeletion)
 
 export default router

@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { isInvalidSessionResponse } from './auth-session.js'
-
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api'
+import { API_BASE_URL } from './api-base-url.js'
 
 async function adminRequest(path, onLogout, options = {}) {
   const savedAuth = sessionStorage.getItem('lms.auth')
@@ -29,34 +28,43 @@ async function adminRequest(path, onLogout, options = {}) {
   return { response, result }
 }
 
-function AdminDataPanel({ eyebrow, title, description, children }) {
+function AdminDataPanel({ eyebrow, title, description, className = '', children }) {
   return (
-    <section className="admin-panel admin-view-panel">
-      <div className="admin-page-heading admin-page-heading--compact">
+    <div className="admin-data-page">
+      <header className="admin-page-heading admin-page-heading--compact">
         <div><p className="admin-eyebrow">{eyebrow}</p><h1>{title}</h1><p>{description}</p></div>
-      </div>
-      {children}
-    </section>
+      </header>
+      <section className={`admin-panel admin-view-panel ${className}`.trim()}>
+        {children}
+      </section>
+    </div>
   )
 }
 
 export function CollegesManagement({ onLogout }) {
   const [colleges, setColleges] = useState([])
+  const [selectedCollege, setSelectedCollege] = useState(null)
+  const [selectedCollegeId, setSelectedCollegeId] = useState('')
+  const [detailsLoading, setDetailsLoading] = useState(false)
+  const [detailsError, setDetailsError] = useState('')
+  const [selectedLimitSubAdminId, setSelectedLimitSubAdminId] = useState('')
+  const [isStudentLimitDialogOpen, setIsStudentLimitDialogOpen] = useState(false)
+  const [studentLimitValue, setStudentLimitValue] = useState('')
+  const [studentLimitError, setStudentLimitError] = useState('')
+  const [studentLimitMessage, setStudentLimitMessage] = useState('')
+  const [isSavingStudentLimit, setIsSavingStudentLimit] = useState(false)
+  const [activeForm, setActiveForm] = useState('')
   const [loadError, setLoadError] = useState('')
   const [formError, setFormError] = useState('')
   const [message, setMessage] = useState('')
   const [pendingAccountId, setPendingAccountId] = useState('')
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
-  const [search, setSearch] = useState('')
-  const [editingCollege, setEditingCollege] = useState(null)
-  const [credentialsModal, setCredentialsModal] = useState(null)
-  const [credPassword, setCredPassword] = useState('')
 
   async function loadColleges() {
     setLoadError('')
     try {
-      const { response, result } = await adminRequest('/admin/colleges', onLogout)
+      const { response, result } = await adminRequest('/admin/colleges?includeInactive=true', onLogout)
       if (!response.ok) throw new Error(result.message || 'Unable to load colleges.')
       setColleges(result.colleges || [])
     } catch (error) {
@@ -67,6 +75,33 @@ export function CollegesManagement({ onLogout }) {
   }
 
   useEffect(() => { loadColleges() }, [])
+
+  async function viewCollege(collegeId) {
+    setDetailsLoading(true)
+    setDetailsError('')
+    setStudentLimitMessage('')
+    setActiveForm('')
+    setSelectedCollegeId(collegeId)
+    setSelectedCollege(null)
+    try {
+      const { response, result } = await adminRequest(
+        `/admin/colleges/${encodeURIComponent(collegeId)}/details`,
+        onLogout,
+      )
+      if (!response.ok) throw new Error(result.message || 'Unable to load college details.')
+      setSelectedCollege(result.college)
+      setSelectedLimitSubAdminId((current) => (
+        result.college.subAdmins.some((account) => account.id === current)
+          ? current
+          : result.college.studentLimitSubAdminId ||
+            (result.college.subAdmins.length === 1 ? result.college.subAdmins[0].id : '')
+      ))
+    } catch (error) {
+      setDetailsError(error instanceof Error ? error.message : 'Unable to load college details.')
+    } finally {
+      setDetailsLoading(false)
+    }
+  }
 
   async function submitCollege(event) {
     event.preventDefault()
@@ -82,7 +117,7 @@ export function CollegesManagement({ onLogout }) {
       })
       if (!response.ok) throw new Error(result.message || 'Unable to create the college.')
       form.reset()
-      setMessage(`College created with ID ${result.college.id}. You can now create a sub-admin account for this college.`)
+      setMessage(`College created with ID ${result.college.id}.`)
       await loadColleges()
     } catch (error) {
       setFormError(error instanceof Error ? error.message : 'Unable to create the college.')
@@ -100,6 +135,7 @@ export function CollegesManagement({ onLogout }) {
     try {
       const form = event.currentTarget
       const data = Object.fromEntries(new FormData(form).entries())
+      data.studentLimit = Number(data.studentLimit)
       const { response, result } = await adminRequest(
         `/admin/colleges/${encodeURIComponent(data.collegeId)}/sub-admins`,
         onLogout,
@@ -114,78 +150,6 @@ export function CollegesManagement({ onLogout }) {
       await loadColleges()
     } catch (error) {
       setFormError(error instanceof Error ? error.message : 'Unable to create the sub-admin account.')
-    } finally {
-      setIsSaving(false)
-    }
-  }
-
-  async function toggleCollegeStatus(college) {
-    const nextStatus = college.status === 'active' ? 'inactive' : 'active'
-    setIsSaving(true)
-    setMessage('')
-    setFormError('')
-    try {
-      const { response, result } = await adminRequest(
-        `/admin/colleges/${encodeURIComponent(college.id)}/status`,
-        onLogout,
-        { method: 'PATCH', body: JSON.stringify({ status: nextStatus }) },
-      )
-      if (!response.ok) throw new Error(result.message || 'Unable to update status.')
-      setMessage(result.message)
-      await loadColleges()
-    } catch (error) {
-      setFormError(error instanceof Error ? error.message : 'Unable to update status.')
-    } finally {
-      setIsSaving(false)
-    }
-  }
-
-  async function handleSaveEdit(event) {
-    event.preventDefault()
-    if (!editingCollege) return
-    setIsSaving(true)
-    setFormError('')
-    setMessage('')
-    try {
-      const form = event.currentTarget
-      const payload = Object.fromEntries(new FormData(form).entries())
-      const { response, result } = await adminRequest(
-        `/admin/colleges/${encodeURIComponent(editingCollege.id)}`,
-        onLogout,
-        { method: 'PUT', body: JSON.stringify(payload) },
-      )
-      if (!response.ok) throw new Error(result.message || 'Unable to update college.')
-      setMessage('College details updated successfully.')
-      setEditingCollege(null)
-      await loadColleges()
-    } catch (error) {
-      setFormError(error instanceof Error ? error.message : 'Unable to update college.')
-    } finally {
-      setIsSaving(false)
-    }
-  }
-
-  async function handleSetCredentials(event) {
-    event.preventDefault()
-    if (!credentialsModal) return
-    setIsSaving(true)
-    setFormError('')
-    setMessage('')
-    try {
-      const form = event.currentTarget
-      const payload = Object.fromEntries(new FormData(form).entries())
-      const { response, result } = await adminRequest(
-        `/admin/colleges/${encodeURIComponent(credentialsModal.id)}/credentials`,
-        onLogout,
-        { method: 'POST', body: JSON.stringify(payload) },
-      )
-      if (!response.ok) throw new Error(result.message || 'Unable to update credentials.')
-      setMessage(result.message)
-      setCredentialsModal(null)
-      setCredPassword('')
-      await loadColleges()
-    } catch (error) {
-      setFormError(error instanceof Error ? error.message : 'Unable to update credentials.')
     } finally {
       setIsSaving(false)
     }
@@ -211,31 +175,240 @@ export function CollegesManagement({ onLogout }) {
     }
   }
 
-  const filteredColleges = colleges.filter((c) => {
-    if (!search.trim()) return true
-    const term = search.toLowerCase()
-    return (
-      (c.name || '').toLowerCase().includes(term) ||
-      (c.code || '').toLowerCase().includes(term) ||
-      (c.city || '').toLowerCase().includes(term) ||
-      (c.contactName || '').toLowerCase().includes(term) ||
-      (c.contactEmail || '').toLowerCase().includes(term) ||
-      (c.subAdmin?.username || '').toLowerCase().includes(term)
+  const selectedLimitSubAdmin = selectedCollege?.subAdmins.find(
+    (account) => account.id === selectedLimitSubAdminId,
+  )
+
+  function openStudentLimitDialog(subAdmin = null) {
+    const target = subAdmin || selectedCollege?.subAdmins.find(
+      (account) => account.id === selectedLimitSubAdminId,
     )
-  })
+    setSelectedLimitSubAdminId(target?.id || '')
+    setStudentLimitValue(Number.isSafeInteger(target?.studentLimit) ? String(target.studentLimit) : '')
+    setStudentLimitError('')
+    setStudentLimitMessage('')
+    setIsStudentLimitDialogOpen(true)
+  }
+
+  function selectStudentLimitSubAdmin(subAdminId) {
+    const subAdmin = selectedCollege?.subAdmins.find((account) => account.id === subAdminId)
+    setSelectedLimitSubAdminId(subAdmin?.id || '')
+    setStudentLimitValue(Number.isSafeInteger(subAdmin?.studentLimit) ? String(subAdmin.studentLimit) : '')
+    setStudentLimitError('')
+  }
+
+  async function saveStudentLimit(event) {
+    event.preventDefault()
+    if (!selectedCollegeId || !selectedLimitSubAdminId) return
+    const trimmedLimit = studentLimitValue.trim()
+    const studentLimit = Number(trimmedLimit)
+    if (!trimmedLimit || !Number.isSafeInteger(studentLimit) || studentLimit <= 0) {
+      setStudentLimitError('Enter a positive whole number for the student limit.')
+      return
+    }
+
+    setIsSavingStudentLimit(true)
+    setStudentLimitError('')
+    try {
+      const { response, result } = await adminRequest(
+        `/admin/colleges/${encodeURIComponent(selectedCollegeId)}/sub-admins/${encodeURIComponent(selectedLimitSubAdminId)}/student-limit`,
+        onLogout,
+        { method: 'PATCH', body: JSON.stringify({ studentLimit }) },
+      )
+      if (!response.ok) throw new Error(result.message || 'Unable to update the student limit.')
+      setIsStudentLimitDialogOpen(false)
+      await viewCollege(selectedCollegeId)
+      setStudentLimitMessage('Student limit updated successfully.')
+    } catch (error) {
+      setStudentLimitError(error instanceof Error ? error.message : 'Unable to update the student limit.')
+    } finally {
+      setIsSavingStudentLimit(false)
+    }
+  }
 
   return (
     <AdminDataPanel
-      eyebrow="COLLEGE MANAGEMENT"
-      title="Colleges & College Accounts"
-      description="Create and manage colleges and college accounts, monitor enrollment, configure sub-admin credentials, and manage account statuses."
+      eyebrow="USER MANAGEMENT"
+      title="Colleges"
+      description="Manage colleges, enrollment counts, and college sub-admins."
     >
+      {selectedCollegeId ? (
+        <section className="admin-college-details" aria-label="College details">
+          <div className="admin-college-details__heading">
+            <button
+              className="admin-button admin-button--college-back"
+              type="button"
+              onClick={() => {
+                setSelectedCollege(null)
+                setSelectedCollegeId('')
+                setDetailsError('')
+                setSelectedLimitSubAdminId('')
+              }}
+            >← Back to colleges</button>
+            {selectedCollege && <span className={`admin-status admin-status--${selectedCollege.status}`}>{selectedCollege.status}</span>}
+          </div>
+          {detailsLoading
+            ? <p className="admin-loading" role="status">Loading college details…</p>
+            : detailsError
+              ? <p className="admin-inline-error" role="alert">{detailsError}</p>
+              : selectedCollege && (
+                <>
+                  <header>
+                    <p className="admin-eyebrow">COLLEGE DETAILS</p>
+                    <h2>{selectedCollege.name}</h2>
+                    <p>College ID: <code>{selectedCollege.id}</code></p>
+                  </header>
+                  {studentLimitMessage && <p className="admin-import-result" role="status">{studentLimitMessage}</p>}
+                  <div className="admin-college-stats" aria-label="Student statistics">
+                    <article className="admin-college-stats__limit">
+                      <div>
+                        <span>Student Limit</span>
+                        <strong>{selectedCollege.studentLimit ?? 'Not Set'}</strong>
+                      </div>
+                      <button
+                        type="button"
+                        className="admin-button admin-button--secondary"
+                        onClick={() => openStudentLimitDialog(selectedLimitSubAdmin || null)}
+                        disabled={!selectedCollege.subAdmins.length}
+                        title={selectedLimitSubAdmin ? `Edit limit for ${selectedLimitSubAdmin.fullName || selectedLimitSubAdmin.username}` : undefined}
+                      >Edit Limit</button>
+                    </article>
+                    <article><span>Total Registered Students</span><strong>{selectedCollege.totalStudents ?? 0}</strong></article>
+                    <article>
+                      <span>Remaining Student Slots</span>
+                      <strong>
+                        {Number.isSafeInteger(selectedCollege.studentLimit)
+                          ? Math.max(0, selectedCollege.studentLimit - (selectedCollege.totalStudents ?? 0))
+                          : 'Not Set'}
+                      </strong>
+                    </article>
+                    <article><span>Enrolled Students</span><strong>{selectedCollege.enrolledStudents ?? 0}</strong></article>
+                  </div>
+                  {selectedCollege.subAdmins.filter((account) => Number.isSafeInteger(account.studentLimit)).length > 1 && (
+                    <p className="admin-college-limit-policy">
+                      The lowest limit assigned to a Sub-Admin governs new student registrations.
+                    </p>
+                  )}
+                  <dl>
+                    <div><dt>College Code</dt><dd>{selectedCollege.code || 'Not provided'}</dd></div>
+                    <div><dt>Address</dt><dd>{selectedCollege.address || 'Not provided'}</dd></div>
+                    <div><dt>City</dt><dd>{selectedCollege.city || 'Not provided'}</dd></div>
+                    <div><dt>State / Region</dt><dd>{selectedCollege.state || 'Not provided'}</dd></div>
+                    <div><dt>Country</dt><dd>{selectedCollege.country || 'Not provided'}</dd></div>
+                    <div><dt>Contact Name</dt><dd>{selectedCollege.contactName || 'Not provided'}</dd></div>
+                    <div><dt>Contact Phone</dt><dd>{selectedCollege.contactPhone || 'Not provided'}</dd></div>
+                    <div><dt>Contact Email</dt><dd>{selectedCollege.contactEmail || 'Not provided'}</dd></div>
+                    <div><dt>Date Created</dt><dd>{selectedCollege.createdAt ? new Date(selectedCollege.createdAt).toLocaleDateString() : 'Not available'}</dd></div>
+                  </dl>
+                  <section className="admin-college-details__section">
+                    <h3>Sub-Admins</h3>
+                    {selectedCollege.subAdmins.length ? (
+                      <div className="admin-table-wrap">
+                        <table className="admin-table">
+                          <thead><tr><th>Sub-Admin Name</th><th>Username</th><th>Email</th><th>Assigned Student Limit</th><th>Status</th><th>Action</th></tr></thead>
+                          <tbody>{selectedCollege.subAdmins.map((subAdmin) => (
+                            <tr key={subAdmin.id}>
+                              <td>{subAdmin.fullName || 'Not provided'}</td>
+                              <td>{subAdmin.username}</td>
+                              <td>{subAdmin.email}</td>
+                              <td>{subAdmin.studentLimit ?? 'Not Set'}</td>
+                              <td>{subAdmin.isActive ? 'Active' : subAdmin.status}</td>
+                              <td>
+                                <button
+                                  className="admin-text-button"
+                                  type="button"
+                                  onClick={() => openStudentLimitDialog(subAdmin)}
+                                >Edit Limit</button>
+                              </td>
+                            </tr>
+                          ))}</tbody>
+                        </table>
+                      </div>
+                    ) : <p>No Sub-Admin Assigned</p>}
+                  </section>
+                  <section className="admin-college-details__section">
+                    <h3>Students</h3>
+                    {selectedCollege.students.length ? (
+                      <div className="admin-table-wrap">
+                        <table className="admin-table">
+                          <thead><tr><th>Name</th><th>Email</th><th>Username</th><th>Student ID</th><th>Department</th><th>Batch</th><th>Status</th></tr></thead>
+                          <tbody>{selectedCollege.students.map((student) => (
+                            <tr key={student.id}>
+                              <td>{student.fullName || 'Not provided'}</td>
+                              <td>{student.email}</td>
+                              <td>{student.username}</td>
+                              <td>{student.studentId || 'Not provided'}</td>
+                              <td>{student.department || 'Not provided'}</td>
+                              <td>{student.batch || 'Not provided'}</td>
+                              <td>{student.status || 'Not provided'}</td>
+                            </tr>
+                          ))}</tbody>
+                        </table>
+                      </div>
+                    ) : <p>No student accounts are assigned to this college.</p>}
+                  </section>
+                  <section className="admin-college-details__section">
+                    <h3>Assigned Courses</h3>
+                    {selectedCollege.courses.length ? (
+                      <div className="admin-table-wrap">
+                        <table className="admin-table">
+                          <thead><tr><th>Course</th><th>Status</th><th>Enrolled Students</th></tr></thead>
+                          <tbody>{selectedCollege.courses.map((course) => (
+                            <tr key={course.id}>
+                              <td>{course.title}</td>
+                              <td>{course.status}</td>
+                              <td>{course.enrolledStudents}</td>
+                            </tr>
+                          ))}</tbody>
+                        </table>
+                      </div>
+                    ) : <p>No courses have student enrollments for this college.</p>}
+                  </section>
+                  <section className="admin-college-details__section">
+                    <h3>Enrollment Details</h3>
+                    {selectedCollege.enrollments.length ? (
+                      <div className="admin-table-wrap">
+                        <table className="admin-table">
+                          <thead><tr><th>Student</th><th>Email</th><th>Course</th><th>Status</th><th>Enrolled</th></tr></thead>
+                          <tbody>{selectedCollege.enrollments.map((enrollment) => (
+                            <tr key={enrollment.id}>
+                              <td>{enrollment.studentName || enrollment.studentId}</td>
+                              <td>{enrollment.studentEmail || 'Not provided'}</td>
+                              <td>{enrollment.courseTitle}</td>
+                              <td>{enrollment.status}</td>
+                              <td>{enrollment.createdAt ? new Date(enrollment.createdAt).toLocaleDateString() : 'Not available'}</td>
+                            </tr>
+                          ))}</tbody>
+                        </table>
+                      </div>
+                    ) : <p>No enrollments are recorded for this college.</p>}
+                  </section>
+                </>
+              )}
+        </section>
+      ) : (
+        <>
+      <div className="admin-college-actions" aria-label="College actions">
+        <button
+          className="admin-button admin-button--primary"
+          type="button"
+          aria-expanded={activeForm === 'college'}
+          onClick={() => setActiveForm((current) => current === 'college' ? '' : 'college')}
+        >+ Add College</button>
+        <button
+          className="admin-button admin-button--secondary"
+          type="button"
+          aria-expanded={activeForm === 'sub-admin'}
+          onClick={() => setActiveForm((current) => current === 'sub-admin' ? '' : 'sub-admin')}
+        >+ Add Sub-Admin</button>
+      </div>
       <div className="admin-data-grid">
+        {activeForm === 'college' && (
         <form className="admin-data-form" onSubmit={submitCollege}>
           <h2>Create a college</h2>
-          <label><span>College name *</span><input name="name" maxLength="200" required placeholder="e.g. Stanford Institute of Tech" /></label>
-          <label><span>College code *</span><input name="code" minLength="2" maxLength="40" pattern="[A-Za-z0-9-]{2,40}" required placeholder="e.g. SIT-2026" /></label>
-          <label><span>Address</span><input name="address" maxLength="500" placeholder="Campus street address" /></label>
+          <label><span>College name</span><input name="name" maxLength="200" required /></label>
+          <label><span>College code</span><input name="code" minLength="2" maxLength="40" pattern="[A-Za-z0-9-]{2,40}" required /></label>
+          <label><span>Address</span><input name="address" maxLength="500" /></label>
           <div className="admin-data-form__columns">
             <label><span>City</span><input name="city" maxLength="120" /></label>
             <label><span>State / region</span><input name="state" maxLength="120" /></label>
@@ -250,202 +423,164 @@ export function CollegesManagement({ onLogout }) {
           </div>
           <button className="admin-button admin-button--primary" disabled={isSaving}>Create college</button>
         </form>
+        )}
 
+        {activeForm === 'sub-admin' && (
         <form className="admin-data-form" onSubmit={sendSubAdmin}>
-          <h2>Create College Account / Sub-Admin</h2>
-          <p>Assign login credentials to a college administrator so they can log in via the common login page.</p>
+          <h2>Invite a college sub-admin</h2>
+          <p>They set their own password through a single-use link that expires after 24 hours.</p>
           <label>
-            <span>College *</span>
-            <select name="collegeId" required disabled={isLoading || colleges.length === 0}>
+            <span>College</span>
+            <select name="collegeId" required disabled={isLoading || !colleges.some((college) => college.status === 'active')}>
               <option value="">Select a college</option>
-              {colleges.map((college) => (
-                <option key={college.id} value={college.id}>
-                  {college.name} ({college.code})
-                </option>
-              ))}
+              {colleges.filter((college) => college.status === 'active').map((college) => <option key={college.id} value={college.id}>{college.name}</option>)}
             </select>
           </label>
-          <label><span>Administrator full name *</span><input name="fullName" maxLength="120" required placeholder="Dr. John Doe" /></label>
-          <label><span>Administrator email *</span><input name="email" type="email" maxLength="254" required placeholder="admin@college.edu" /></label>
-          <label><span>Username *</span><input name="username" minLength="3" maxLength="30" pattern="[A-Za-z0-9._-]{3,30}" required placeholder="college_admin" /></label>
+          <label><span>Full name</span><input name="fullName" maxLength="120" required /></label>
+          <label><span>Email</span><input name="email" type="email" maxLength="254" required /></label>
+          <label><span>Username</span><input name="username" minLength="3" maxLength="30" pattern="[A-Za-z0-9._-]{3,30}" required /></label>
           <label>
-            <span>Direct password (optional, min 8 chars)</span>
-            <input name="password" type="password" minLength="8" maxLength="72" placeholder="Leave blank to send email activation link" />
+            <span>Student Registration Limit</span>
+            <input
+              name="studentLimit"
+              type="number"
+              min="1"
+              step="1"
+              inputMode="numeric"
+              placeholder="Enter maximum number of students"
+              required
+            />
+            <small>Maximum number of students this Sub-Admin can register for their college.</small>
           </label>
-          <button className="admin-button admin-button--primary" disabled={isSaving || isLoading || !colleges.length}>
-            Create College Account
+          <button className="admin-button admin-button--primary" disabled={isSaving || isLoading || !colleges.some((college) => college.status === 'active')}>
+            Create account and send activation
           </button>
         </form>
+        )}
       </div>
-
       {loadError && <p className="admin-inline-error" role="alert">{loadError}</p>}
       {formError && <p className="admin-inline-error" role="alert">{formError}</p>}
       {pendingAccountId && (
         <div className="admin-import-result" role="status">
-          <p>Account {pendingAccountId} is pending email activation. If SMTP is not configured, set direct password credentials above.</p>
+          <p>Account {pendingAccountId} is pending activation. Configure SMTP and retry delivery.</p>
           <button className="admin-button admin-button--secondary" type="button" onClick={resendActivation} disabled={isSaving}>
             Retry activation email
           </button>
         </div>
       )}
       {message && <p className="admin-import-result" role="status">{message}</p>}
-
-      {/* Edit College Modal / Panel */}
-      {editingCollege && (
-        <div className="admin-panel admin-view-panel" style={{ marginTop: '20px', border: '2px solid #657f68' }}>
-          <h2>Edit College: {editingCollege.name}</h2>
-          <form onSubmit={handleSaveEdit} className="admin-data-form">
-            <div className="admin-data-form__columns">
-              <label><span>College Name *</span><input name="name" defaultValue={editingCollege.name} required /></label>
-              <label><span>College Code *</span><input name="code" defaultValue={editingCollege.code} required /></label>
-            </div>
-            <div className="admin-data-form__columns">
-              <label><span>Contact Name</span><input name="contactName" defaultValue={editingCollege.contactName || ''} /></label>
-              <label><span>Contact Email</span><input name="contactEmail" type="email" defaultValue={editingCollege.contactEmail || ''} /></label>
-            </div>
-            <div className="admin-data-form__columns">
-              <label><span>Contact Phone</span><input name="contactPhone" defaultValue={editingCollege.contactPhone || ''} /></label>
-              <label><span>City</span><input name="city" defaultValue={editingCollege.city || ''} /></label>
-            </div>
-            <label><span>Address</span><input name="address" defaultValue={editingCollege.address || ''} /></label>
-            <div style={{ display: 'flex', gap: '10px', marginTop: '12px' }}>
-              <button className="admin-button admin-button--primary" type="submit" disabled={isSaving}>Save Changes</button>
-              <button className="admin-button admin-button--secondary" type="button" onClick={() => setEditingCollege(null)}>Cancel</button>
-            </div>
-          </form>
-        </div>
-      )}
-
-      {/* Set / Reset Credentials Modal */}
-      {credentialsModal && (
-        <div className="admin-panel admin-view-panel" style={{ marginTop: '20px', border: '2px solid #e8c460' }}>
-          <h2>Manage Credentials: {credentialsModal.name}</h2>
-          <p>Set a new password for the college administrator. The account will be activated immediately.</p>
-          <form onSubmit={handleSetCredentials} className="admin-data-form">
-            {!credentialsModal.subAdmin && (
-              <>
-                <label><span>Admin Full Name *</span><input name="fullName" defaultValue={credentialsModal.contactName || credentialsModal.name} required /></label>
-                <div className="admin-data-form__columns">
-                  <label><span>Admin Email *</span><input name="email" type="email" defaultValue={credentialsModal.contactEmail || ''} required /></label>
-                  <label><span>Username *</span><input name="username" defaultValue={`admin_${credentialsModal.code.toLowerCase()}`} required /></label>
-                </div>
-              </>
-            )}
-            <label><span>New Password (min 8 characters) *</span><input name="password" type="password" minLength="8" required value={credPassword} onChange={(e) => setCredPassword(e.target.value)} placeholder="Enter new password" /></label>
-            <div style={{ display: 'flex', gap: '10px', marginTop: '12px' }}>
-              <button className="admin-button admin-button--primary" type="submit" disabled={isSaving || credPassword.length < 8}>Set Password & Activate</button>
-              <button className="admin-button admin-button--secondary" type="button" onClick={() => setCredentialsModal(null)}>Cancel</button>
-            </div>
-          </form>
-        </div>
-      )}
-
-      {/* College List with search and controls */}
-      <div className="admin-college-list" style={{ marginTop: '24px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', flexWrap: 'wrap', gap: '10px' }}>
-          <h2>Registered Colleges ({colleges.length})</h2>
-          <input
-            type="search"
-            placeholder="Search colleges, code, contact..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            style={{ padding: '8px 12px', borderRadius: '6px', border: '1px solid #dcd7c9', minWidth: '240px' }}
-          />
-        </div>
-
-        {isLoading ? (
-          <p className="admin-loading">Loading colleges…</p>
-        ) : filteredColleges.length === 0 ? (
-          <p>No colleges found.</p>
-        ) : (
-          <div className="admin-table-wrap">
-            <table className="admin-table">
-              <thead>
-                <tr>
-                  <th>College Name & Code</th>
-                  <th>Contact Info</th>
-                  <th>Students</th>
-                  <th>Sub-Admin Account</th>
-                  <th>Status</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredColleges.map((college) => (
+      <div className="admin-college-list">
+        <h2>Colleges</h2>
+        {isLoading ? <p className="admin-loading">Loading colleges…</p> : colleges.length === 0
+          ? <p>No colleges have been added.</p>
+          : (
+            <div className="admin-table-wrap">
+              <table className="admin-table">
+                <thead><tr><th>College Name</th><th>College ID</th><th>Total Students</th><th>Enrolled Students</th><th>View Details</th></tr></thead>
+                <tbody>{colleges.map((college) => (
                   <tr key={college.id}>
-                    <td>
-                      <strong style={{ display: 'block', fontSize: '13px' }}>{college.name}</strong>
-                      <span style={{ fontSize: '11px', color: '#666' }}>Code: <code>{college.code}</code></span>
-                      {college.city && <span style={{ fontSize: '11px', color: '#888', marginLeft: '6px' }}>• {college.city}{college.state ? `, ${college.state}` : ''}</span>}
-                    </td>
-                    <td>
-                      <span style={{ display: 'block', fontSize: '12px' }}>{college.contactName || '—'}</span>
-                      <span style={{ fontSize: '11px', color: '#666' }}>{college.contactEmail || 'No email'}</span>
-                    </td>
-                    <td>
-                      <strong>{college.studentCount ?? 0}</strong> total
-                      {college.activeStudentCount !== undefined && (
-                        <span style={{ display: 'block', fontSize: '11px', color: '#49624e' }}>
-                          {college.activeStudentCount} active
-                        </span>
-                      )}
-                    </td>
-                    <td>
-                      {college.subAdmin ? (
-                        <>
-                          <span style={{ display: 'block', fontSize: '12px' }}>
-                            <strong>@{college.subAdmin.username}</strong>
-                          </span>
-                          <span style={{ fontSize: '11px', color: '#666' }}>{college.subAdmin.email}</span>
-                          <span className={`admin-status admin-status--${college.subAdmin.status === 'active' ? 'active' : 'pending'}`} style={{ display: 'inline-block', marginTop: '3px' }}>
-                            {college.subAdmin.status}
-                          </span>
-                        </>
-                      ) : (
-                        <span style={{ color: '#d97706', fontSize: '11px' }}>No sub-admin account</span>
-                      )}
-                    </td>
-                    <td>
-                      <span className={`admin-status admin-status--${college.status === 'active' ? 'active' : 'inactive'}`}>
-                        {college.status || 'active'}
-                      </span>
-                    </td>
-                    <td>
-                      <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                        <button
-                          type="button"
-                          className="admin-button admin-button--secondary"
-                          style={{ padding: '4px 8px', fontSize: '11px' }}
-                          onClick={() => setEditingCollege(college)}
-                        >
-                          Edit
-                        </button>
-                        <button
-                          type="button"
-                          className="admin-button admin-button--secondary"
-                          style={{ padding: '4px 8px', fontSize: '11px' }}
-                          onClick={() => setCredentialsModal(college)}
-                        >
-                          {college.subAdmin ? 'Set Password' : 'Create Login'}
-                        </button>
-                        <button
-                          type="button"
-                          className={`admin-button admin-button--${college.status === 'active' ? 'secondary' : 'primary'}`}
-                          style={{ padding: '4px 8px', fontSize: '11px' }}
-                          onClick={() => toggleCollegeStatus(college)}
-                          disabled={isSaving}
-                        >
-                          {college.status === 'active' ? 'Deactivate' : 'Activate'}
-                        </button>
-                      </div>
-                    </td>
+                    <td>{college.name}</td>
+                    <td><code>{college.id}</code></td>
+                    <td>{college.totalStudents ?? 0}</td>
+                    <td>{college.enrolledStudents ?? 0}</td>
+                    <td><button className="admin-text-button" type="button" onClick={() => viewCollege(college.id)}>View Details</button></td>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+                ))}</tbody>
+              </table>
+            </div>
+          )}
       </div>
+        </>
+      )}
+      {isStudentLimitDialogOpen && selectedCollege?.subAdmins.length > 0 && (
+        <div
+          className="admin-report-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !isSavingStudentLimit) {
+              setIsStudentLimitDialogOpen(false)
+            }
+          }}
+        >
+          <section
+            className="admin-report-dialog admin-college-limit-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="admin-college-limit-title"
+          >
+            <div className="admin-report-dialog__heading">
+              <div>
+                <p className="admin-eyebrow">COLLEGE MANAGEMENT</p>
+                <h2 id="admin-college-limit-title">Edit student limit</h2>
+                <p>
+                  {selectedLimitSubAdmin
+                    ? `Update the limit assigned to ${selectedLimitSubAdmin.fullName || selectedLimitSubAdmin.username}.`
+                    : 'Select the Sub-Admin whose student limit you want to configure.'}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="admin-report-dialog__close"
+                aria-label="Close student limit dialog"
+                disabled={isSavingStudentLimit}
+                onClick={() => setIsStudentLimitDialogOpen(false)}
+              >×</button>
+            </div>
+            <form onSubmit={saveStudentLimit}>
+              {selectedCollege.subAdmins.length > 1 && (
+                <label className="admin-report-field">
+                  <span>Sub-Admin</span>
+                  <select
+                    value={selectedLimitSubAdminId}
+                    required
+                    onChange={(event) => selectStudentLimitSubAdmin(event.target.value)}
+                  >
+                    <option value="" disabled>Select a Sub-Admin</option>
+                    {selectedCollege.subAdmins.map((subAdmin) => (
+                      <option key={subAdmin.id} value={subAdmin.id}>
+                        {subAdmin.fullName || subAdmin.username} ({subAdmin.studentLimit ?? 'Not Set'})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              <label className="admin-report-field">
+                <span>Assigned student limit</span>
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  inputMode="numeric"
+                  value={studentLimitValue}
+                  required
+                  disabled={!selectedLimitSubAdmin}
+                  onChange={(event) => setStudentLimitValue(event.target.value)}
+                  aria-describedby="admin-college-limit-hint"
+                  autoFocus
+                />
+              </label>
+              <p id="admin-college-limit-hint" className="admin-college-limit-dialog__hint">
+                Enter a positive whole number.
+              </p>
+              {studentLimitError && <p className="admin-inline-error" role="alert">{studentLimitError}</p>}
+              <div className="admin-report-dialog__actions">
+                <button
+                  type="button"
+                  className="admin-button admin-button--secondary"
+                  disabled={isSavingStudentLimit}
+                  onClick={() => setIsStudentLimitDialogOpen(false)}
+                >Cancel</button>
+                <button
+                  className="admin-button admin-button--primary"
+                  disabled={isSavingStudentLimit || !selectedLimitSubAdmin}
+                >
+                  {isSavingStudentLimit ? 'Saving…' : 'Save limit'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
     </AdminDataPanel>
   )
 }
@@ -647,5 +782,234 @@ export function CourseManagement({ onLogout }) {
   )
 }
 
-export { EnrollmentManagement } from './AdminEnrollmentManagement.jsx'
+export function EnrollmentManagement({ onLogout }) {
+  const [courses, setCourses] = useState([])
+  const [enrollments, setEnrollments] = useState([])
+  const [error, setError] = useState('')
+  const [isLoading, setIsLoading] = useState(true)
+  const [search, setSearch] = useState('')
+  const [selectedCourse, setSelectedCourse] = useState(null)
+  const [studentTypeFilter, setStudentTypeFilter] = useState('all')
 
+  useEffect(() => {
+    async function loadEnrollmentData() {
+      setIsLoading(true)
+      setError('')
+      try {
+        const [coursesResponse, enrollmentsResponse] = await Promise.all([
+          adminRequest('/admin/courses', onLogout),
+          adminRequest('/admin/enrollments', onLogout),
+        ])
+        if (!coursesResponse.response.ok) {
+          throw new Error(coursesResponse.result.message || 'Unable to load courses.')
+        }
+        if (!enrollmentsResponse.response.ok) {
+          throw new Error(enrollmentsResponse.result.message || 'Unable to load enrollments.')
+        }
+        setCourses(Array.isArray(coursesResponse.result.courses) ? coursesResponse.result.courses : [])
+        setEnrollments(Array.isArray(enrollmentsResponse.result.enrollments)
+          ? enrollmentsResponse.result.enrollments
+          : [])
+      } catch (loadError) {
+        setError(loadError instanceof Error ? loadError.message : 'Unable to load enrollments.')
+      } finally {
+        setIsLoading(false)
+      }
+    }
+
+    loadEnrollmentData()
+  }, [])
+
+  useEffect(() => {
+    if (!selectedCourse) return undefined
+    function closeOnEscape(event) {
+      if (event.key === 'Escape') setSelectedCourse(null)
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [selectedCourse])
+
+  const enrollmentsByCourse = enrollments.reduce((grouped, enrollment) => {
+    const courseId = String(enrollment.courseId?._id || enrollment.courseId || '')
+    const student = enrollment.userId
+    const studentId = String(student?._id || student || '')
+    if (!courseId || !studentId || !student?._id) return grouped
+
+    const courseEnrollments = grouped.get(courseId) || new Map()
+    if (!courseEnrollments.has(studentId)) courseEnrollments.set(studentId, enrollment)
+    grouped.set(courseId, courseEnrollments)
+    return grouped
+  }, new Map())
+
+  const normalizedSearch = search.trim().toLowerCase()
+  const visibleCourses = courses.filter((course) => {
+    const courseId = String(course._id || '')
+    const matchesSearch = !normalizedSearch ||
+      String(course.title || '').toLowerCase().includes(normalizedSearch) ||
+      courseId.toLowerCase().includes(normalizedSearch)
+    return matchesSearch
+  })
+
+  const selectedCourseAllEnrollments = selectedCourse
+    ? [...(enrollmentsByCourse.get(String(selectedCourse._id))?.values() || [])]
+    : []
+  const selectedCourseEnrollments = selectedCourseAllEnrollments.filter((enrollment) => {
+        if (studentTypeFilter === 'all') return true
+        const isCollegeStudent = Boolean(enrollment.collegeId || enrollment.userId?.studentType === 'college')
+        return studentTypeFilter === 'college' ? isCollegeStudent : !isCollegeStudent
+      })
+
+  return (
+    <AdminDataPanel
+      eyebrow="COURSE MANAGEMENT"
+      title="Enrollments"
+      description="View course enrollment totals and enrolled students."
+      className="admin-enrollments"
+    >
+      {error && <p className="admin-inline-error" role="alert">{error}</p>}
+      <div className="admin-enrollments__filters">
+        <label>
+          <span>Search courses</span>
+          <input
+            type="search"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search by course name or ID"
+          />
+        </label>
+      </div>
+      {isLoading
+        ? <p className="admin-enrollments__state" role="status">Loading courses and enrollments…</p>
+        : !error && courses.length === 0
+          ? <p className="admin-enrollments__state">No courses have been created.</p>
+          : !error && visibleCourses.length === 0
+            ? <p className="admin-enrollments__state">No courses match your search.</p>
+            : !error && (
+          <div className="admin-table-wrap admin-enrollments__table-wrap">
+            <table className="admin-table">
+              <thead>
+                <tr>
+                  <th>Course Name</th>
+                  <th>Course ID</th>
+                  <th>Total Enrolled Students</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleCourses.map((course) => {
+                  const courseId = String(course._id || '')
+                  const studentsById = enrollmentsByCourse.get(courseId) || new Map()
+                  const courseEnrollments = [...studentsById.values()]
+                  return (
+                    <tr key={courseId}>
+                      <td>{course.title || 'Untitled course'}</td>
+                      <td><code>{courseId}</code></td>
+                      <td>{courseEnrollments.length}</td>
+                      <td>
+                        <button
+                          className="admin-button admin-button--secondary admin-enrollments__view-button"
+                          type="button"
+                          onClick={() => {
+                            setStudentTypeFilter('all')
+                            setSelectedCourse(course)
+                          }}
+                        >
+                          View Students
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      {selectedCourse && (
+        <div
+          className="admin-enrollments__backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setSelectedCourse(null)
+          }}
+        >
+          <section
+            aria-labelledby="admin-enrollments-dialog-title"
+            aria-modal="true"
+            className="admin-enrollments__dialog"
+            role="dialog"
+          >
+            <header className="admin-enrollments__dialog-header">
+              <div>
+                <p className="admin-eyebrow">COURSE ENROLLMENTS</p>
+                <h2 id="admin-enrollments-dialog-title">{selectedCourse.title || 'Untitled course'}</h2>
+                <p>{selectedCourseAllEnrollments.length} enrolled student{selectedCourseAllEnrollments.length === 1 ? '' : 's'}</p>
+              </div>
+              <button
+                aria-label="Close enrolled students"
+                className="admin-enrollments__close"
+                type="button"
+                onClick={() => setSelectedCourse(null)}
+              >
+                ×
+              </button>
+            </header>
+            <label className="admin-enrollments__student-filter">
+              <span>Student type</span>
+              <select value={studentTypeFilter} onChange={(event) => setStudentTypeFilter(event.target.value)}>
+                <option value="all">All students</option>
+                <option value="independent">Independent students</option>
+                <option value="college">College students</option>
+              </select>
+            </label>
+            {selectedCourseEnrollments.length === 0
+              ? <p className="admin-enrollments__state">
+                {selectedCourseAllEnrollments.length === 0
+                  ? 'No students enrolled yet.'
+                  : 'No students match this student type filter.'}
+              </p>
+              : (
+                <div className="admin-table-wrap admin-enrollments__table-wrap">
+                  <table className="admin-table">
+                    <thead>
+                      <tr>
+                        <th>Student Name</th>
+                        <th>Student ID</th>
+                        <th>Email</th>
+                        <th>Student Type</th>
+                        <th>College Name</th>
+                        <th>Enrollment Date</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {selectedCourseEnrollments.map((entry) => {
+                        const student = entry.userId
+                        const isCollegeStudent = Boolean(entry.collegeId || student?.studentType === 'college')
+                        const enrollmentId = String(entry._id || `${selectedCourse._id}-${student?._id}`)
+                        return (
+                          <tr key={enrollmentId}>
+                            <td>{student?.fullName || 'Name not available'}</td>
+                            <td>{student?.studentId || student?._id || 'Not available'}</td>
+                            <td>{student?.email || 'Not available'}</td>
+                            <td>{isCollegeStudent ? 'College' : 'Independent'}</td>
+                            <td>
+                              {isCollegeStudent
+                                ? entry.collegeId?.name || entry.collegeId?.collegeName || entry.collegeId?.title || 'Not available'
+                                : '—'}
+                            </td>
+                            <td>
+                              {entry.createdAt && !Number.isNaN(new Date(entry.createdAt).getTime())
+                                ? new Date(entry.createdAt).toLocaleString()
+                                : 'Not available'}
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+          </section>
+        </div>
+      )}
+    </AdminDataPanel>
+  )
+}

@@ -4,7 +4,9 @@ import AssignmentSubmission from '../models/AssignmentSubmission.js'
 import Certificate from '../models/Certificate.js'
 import CertificateTemplate from '../models/CertificateTemplate.js'
 import QuizAttempt from '../models/QuizAttempt.js'
+import { getAssignmentAcademicResult, isAssignmentPassed } from './assignment-result.js'
 import { createStudentNotification } from './student-notifications.js'
+import { normalizeLessons } from './course-validation.js'
 
 function documentId(value) {
   const id = value?._id ?? value
@@ -14,7 +16,16 @@ function documentId(value) {
 function requiredActivity(activity, type) {
   const id = documentId(activity)
   const title = typeof activity?.title === 'string' ? activity.title.trim() : ''
-  return id && title ? { id, title, type } : null
+  if (!id || !title) return null
+  const maximumMarks = Number(activity?.assignment?.points ?? activity?.points)
+  return {
+    id,
+    title,
+    type,
+    ...(type === 'assignment' && Number.isFinite(maximumMarks) && maximumMarks > 0
+      ? { maximumMarks }
+      : {}),
+  }
 }
 
 function collectModuleActivities(module, includeOptional = false) {
@@ -23,7 +34,8 @@ function collectModuleActivities(module, includeOptional = false) {
   const quizzes = items.filter((item) => item.type === 'quiz')
   const assignments = items.filter((item) => item.type === 'assignment')
 
-  const lessonActivities = (videos.length ? videos : module?.lessons || [])
+  const moduleLessons = normalizeLessons(module?.lessons)
+  const lessonActivities = (videos.length ? videos : moduleLessons)
     .filter((item) => includeOptional || item.requiredForCertificate !== false)
     .map((item) => requiredActivity(item, 'video'))
   const quizActivities = (quizzes.length ? quizzes : module?.quiz ? [module.quiz] : [])
@@ -38,7 +50,9 @@ function collectModuleActivities(module, includeOptional = false) {
     }, 'quiz'))
   const assignmentActivities = assignments
     .filter((item) => includeOptional || item.requiredForCertificate !== false)
-    .map((item) => requiredActivity(item, 'assignment'))
+    .map((item) => requiredActivity(item.assignment
+      ? { ...item, ...item.assignment, _id: item._id }
+      : item, 'assignment'))
 
   return {
     videos: lessonActivities.filter(Boolean),
@@ -114,7 +128,8 @@ export async function evaluateCertificateEligibility({ course, enrollment }) {
         enrollmentId: enrollment._id,
         courseId: course._id,
         assignmentId: { $in: activities.assignments.map((activity) => activity.id) },
-      }).select('assignmentId reviewStatus submittedAt').sort({ submittedAt: -1, _id: -1 }).lean()
+      }).select('assignmentId reviewStatus submittedAt gradingStatus academicStatus scorePercentage marksObtained finalMarks aiEvaluation humanEvaluation')
+        .sort({ submittedAt: -1, _id: -1 }).lean()
       : [],
   ])
   const completedLessons = new Set((enrollment.completedLessonIds || []).map(String))
@@ -134,12 +149,21 @@ export async function evaluateCertificateEligibility({ course, enrollment }) {
   }
   for (const activity of activities.assignments) {
     const submission = latestSubmissionByAssignment.get(activity.id)
-    if (submission?.reviewStatus !== 'approved') {
+    if (!isAssignmentPassed(submission, activity.maximumMarks)) {
+      const academicResult = getAssignmentAcademicResult(submission, activity.maximumMarks)
       pendingRequirements.push({
         id: activity.id,
         type: 'assignment',
         title: activity.title,
-        status: submission?.reviewStatus === 'rejected' ? 'resubmit' : submission ? 'awaiting-review' : 'not-submitted',
+        status: !submission
+          ? 'not-submitted'
+          : academicResult?.academicStatus === 'Failed'
+            ? 'failed'
+            : submission.reviewStatus === 'rejected'
+              ? 'resubmit'
+              : submission.gradingStatus && !academicResult
+                ? 'awaiting-grading'
+                : 'awaiting-review',
       })
     }
   }
@@ -219,7 +243,7 @@ export async function issueCertificateIfEligible({ userId, studentName, enrollme
           requirementSnapshot: activitySnapshot,
         },
       },
-      { upsert: true, new: true, setDefaultsOnInsert: true },
+      { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true },
     ).lean()
     if (!certificate) throw new Error('The certificate could not be issued.')
     await createStudentNotification({

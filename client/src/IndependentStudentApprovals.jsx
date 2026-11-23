@@ -21,6 +21,9 @@ const registrationFieldDefaults = {
 const hiddenRegistrationFields = new Set(['customQualification', 'customLivingArrangement'])
 
 function registrationFieldLabel(field) {
+  if (field === 'livingWithWhom') {
+    return 'Living Arrangement'
+  }
   return field
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
     .replace(/[_-]+/g, ' ')
@@ -362,16 +365,6 @@ export default function IndependentStudentApprovals({
                         <dt>Rejection Reason</dt><dd>{selectedStudent.rejectionReason}</dd>
                       </div>
                     )}
-                    <div>
-                      <dt>How they heard about us</dt>
-                      <dd>
-                        {selectedStudent.hearAboutUs
-                          ? selectedStudent.hearAboutUs === 'Other' && selectedStudent.hearAboutUsOther
-                            ? `Other (${selectedStudent.hearAboutUsOther})`
-                            : selectedStudent.hearAboutUs
-                          : 'Not specified'}
-                      </dd>
-                    </div>
                   </dl>
                 </section>
                 {selectedStudent.approvalStatus === 'pending' && (

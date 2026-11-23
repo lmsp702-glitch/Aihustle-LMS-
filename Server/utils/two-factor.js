@@ -184,7 +184,7 @@ export async function issueStudentOtpChallenge({ user, accountCollection, purpos
     challenge = await EmailOtpChallenge.findOneAndUpdate(
       { _id: challenge._id, verifiedAt: null, invalidatedAt: null, lastSentAt },
       { $set: { lastSentAt: new Date() } },
-      { new: true },
+      { returnDocument: 'after' },
     )
     if (!challenge) {
       throw new TwoFactorError(429, 'A code was just requested. Please wait before trying again.', 60)
@@ -237,7 +237,7 @@ export async function resendStudentOtp({ challengeToken, purpose, authenticatedU
   const claimedChallenge = await EmailOtpChallenge.findOneAndUpdate(
     { _id: challenge._id, verifiedAt: null, invalidatedAt: null, lastSentAt: challenge.lastSentAt },
     { $set: { lastSentAt: new Date() } },
-    { new: true },
+    { returnDocument: 'after' },
   )
   if (!claimedChallenge) {
     throw new TwoFactorError(429, 'A code was just requested. Please wait before trying again.', 60)
@@ -277,7 +277,7 @@ export async function verifyStudentOtp({ challengeToken, code, purpose, authenti
     const updated = await EmailOtpChallenge.findOneAndUpdate(
       { _id: challenge._id, verifiedAt: null, invalidatedAt: null, attempts: { $lt: maxOtpAttempts } },
       { $inc: { attempts: 1 } },
-      { new: true },
+      { returnDocument: 'after' },
     )
     if (!updated || updated.attempts >= maxOtpAttempts) {
       throw new TwoFactorError(429, 'Too many incorrect codes. Request a new code.')
@@ -295,7 +295,7 @@ export async function verifyStudentOtp({ challengeToken, code, purpose, authenti
       attempts: { $lt: maxOtpAttempts },
     },
     { $set: { verifiedAt: new Date() } },
-    { new: true },
+    { returnDocument: 'after' },
   )
   if (!verified) throw new TwoFactorError(409, 'This code has already been used or expired.')
   return payload

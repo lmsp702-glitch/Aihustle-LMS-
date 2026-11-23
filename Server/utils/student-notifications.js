@@ -33,7 +33,7 @@ export async function createStudentNotification({
         metadata,
       },
     },
-    { upsert: true, new: true, setDefaultsOnInsert: true, runValidators: true },
+    { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true, runValidators: true },
   ).lean()
   if (!notification) throw new Error('The student notification could not be saved.')
   return notification

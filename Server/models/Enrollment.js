@@ -1,5 +1,22 @@
 import mongoose from 'mongoose'
 
+const dailyLearningActivitySchema = new mongoose.Schema(
+  {
+    seconds: { type: Number, min: 0, default: 0 },
+    videoLessonIds: { type: [{ type: mongoose.Schema.Types.ObjectId }], default: [] },
+  },
+  { _id: false },
+)
+
+const lessonPlaybackStateSchema = new mongoose.Schema(
+  {
+    watchedPositionSeconds: { type: Number, min: 0, max: 43200, default: 0 },
+    updatedAt: { type: Date },
+    isPlaying: { type: Boolean, default: false },
+  },
+  { _id: false },
+)
+
 const enrollmentSchema = new mongoose.Schema(
   {
     userId: {
@@ -18,7 +35,6 @@ const enrollmentSchema = new mongoose.Schema(
       default: 'active',
       required: true,
     },
-    completedAt: { type: Date },
     completedLessonIds: {
       type: [{ type: mongoose.Schema.Types.ObjectId }],
       default: [],
@@ -32,9 +48,19 @@ const enrollmentSchema = new mongoose.Schema(
       of: { type: Number, min: 0, max: 43200 },
       default: () => new Map(),
     },
+    lessonPlaybackStates: {
+      type: Map,
+      of: lessonPlaybackStateSchema,
+      default: () => new Map(),
+    },
     lessonCompletionDates: {
       type: Map,
       of: Date,
+      default: () => new Map(),
+    },
+    dailyLearningActivity: {
+      type: Map,
+      of: dailyLearningActivitySchema,
       default: () => new Map(),
     },
   },

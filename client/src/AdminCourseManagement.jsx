@@ -32,6 +32,96 @@ const difficultyLabels = {
 }
 const stepLabels = ['Course Details', 'Course Content', 'Settings', 'Review & Publish']
 
+function normalizeLessons(lessons) {
+  if (Array.isArray(lessons)) return lessons
+  if (!lessons) return []
+
+  if (typeof lessons === 'string') {
+    const trimmed = lessons.trim()
+    if ((trimmed.startsWith('[') && trimmed.endsWith(']')) || (trimmed.startsWith('{') && trimmed.endsWith('}'))) {
+      try {
+        const parsed = JSON.parse(trimmed)
+        return normalizeLessons(parsed)
+      } catch {
+        return []
+      }
+    }
+    return []
+  }
+
+  if (typeof lessons === 'object') {
+    if (Array.isArray(lessons.lessons)) return normalizeLessons(lessons.lessons)
+    if (Array.isArray(lessons.items)) return normalizeLessons(lessons.items)
+
+    const entries = Object.entries(lessons)
+    if (entries.length === 0) return []
+
+    const objectEntries = entries.filter(([, val]) => val && typeof val === 'object' && !Array.isArray(val))
+    if (objectEntries.length > 0) {
+      const allNumericKeys = objectEntries.every(([key]) => /^\d+$/.test(key))
+      if (allNumericKeys) {
+        objectEntries.sort(([keyA], [keyB]) => Number(keyA) - Number(keyB))
+      } else {
+        objectEntries.sort(([, a], [, b]) => {
+          if (Number.isFinite(a.order) && Number.isFinite(b.order)) return a.order - b.order
+          return 0
+        })
+      }
+      return objectEntries.map(([, val]) => val)
+    }
+
+    if (
+      typeof lessons.title === 'string'
+      || lessons._id
+      || lessons.videoUrl
+      || lessons.content
+      || lessons.resources
+    ) {
+      return [lessons]
+    }
+
+    return []
+  }
+
+  return []
+}
+
+function normalizeArray(value) {
+  if (Array.isArray(value)) return value
+  if (!value) return []
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if ((trimmed.startsWith('[') && trimmed.endsWith(']')) || (trimmed.startsWith('{') && trimmed.endsWith('}'))) {
+      try {
+        const parsed = JSON.parse(trimmed)
+        return normalizeArray(parsed)
+      } catch {
+        return []
+      }
+    }
+    return []
+  }
+  if (typeof value === 'object') {
+    const entries = Object.entries(value)
+    if (entries.length === 0) return []
+    const objectEntries = entries.filter(([, val]) => val && typeof val === 'object' && !Array.isArray(val))
+    if (objectEntries.length > 0) {
+      const allNumericKeys = objectEntries.every(([key]) => /^\d+$/.test(key))
+      if (allNumericKeys) {
+        objectEntries.sort(([keyA], [keyB]) => Number(keyA) - Number(keyB))
+      } else {
+        objectEntries.sort(([, a], [, b]) => {
+          if (Number.isFinite(a.order) && Number.isFinite(b.order)) return a.order - b.order
+          return 0
+        })
+      }
+      return objectEntries.map(([, val]) => val)
+    }
+    return [value]
+  }
+  return []
+}
+
 function localKey() {
   return globalThis.crypto?.randomUUID?.() || `course-item-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
@@ -54,6 +144,9 @@ function emptyCourse() {
     thumbnailPublicId: '',
     learningObjectives: [],
     prerequisites: [],
+    tags: [],
+    skills: [],
+    practicalBenefits: [],
     estimatedDurationMinutes: 0,
     generateCertificate: true,
     assignments: [],
@@ -128,7 +221,8 @@ function emptyContentItem(type) {
     resources: [],
     ...(type === 'video-lesson' ? { attentionCheck: emptyAttentionCheck() } : {}),
     dueDate: '',
-    points: 0,
+    points: type === 'assignment' ? 100 : 0,
+    ...(type === 'assignment' ? { rubric: [] } : {}),
   }
 }
 
@@ -178,27 +272,32 @@ function courseFromServer(course) {
     generateCertificate: course.generateCertificate !== false,
     learningObjectives: course.learningObjectives || [],
     prerequisites: course.prerequisites || [],
+    tags: course.tags || [],
+    skills: course.skills || [],
+    practicalBenefits: course.practicalBenefits || [],
     assignments: (course.assignments || []).map((assignment) => ({
       ...assignment,
+      points: assignment.points ?? 100,
       requiredForCertificate: assignment.requiredForCertificate !== false,
     })),
     quizzes: (course.quizzes || []).map((quiz) => ({
       ...quiz,
       requiredForCertificate: quiz.requiredForCertificate !== false,
     })),
-    modules: (course.modules || []).map((module) => {
+    modules: normalizeArray(course.modules).map((module) => {
+      const moduleLessons = normalizeLessons(module?.lessons)
       const legacyItems = [
-        ...(module.lessons || []).map((lesson) => ({ ...lesson, type: 'video-lesson' })),
+        ...moduleLessons.map((lesson) => ({ ...lesson, type: 'video-lesson' })),
         ...(module.quiz ? [{ type: 'quiz', title: module.quiz.title, requiredForCertificate: module.quiz.requiredForCertificate !== false, quiz: module.quiz }] : []),
       ]
       return {
         ...module,
         _localId: module._id || localKey(),
-        lessons: (module.lessons || []).map((lesson) => ({
+        lessons: moduleLessons.map((lesson) => ({
           ...lesson,
           _localId: lesson._id || localKey(),
           attentionCheck: attentionCheckDraft(lesson.attentionCheck),
-          resources: (lesson.resources || []).map((resource) => ({ ...resource, _localId: resource._id || localKey() })),
+          resources: normalizeArray(lesson.resources).map((resource) => ({ ...resource, _localId: resource._id || localKey() })),
         })),
         quiz: module.quiz ? {
           ...module.quiz,
@@ -211,6 +310,8 @@ function courseFromServer(course) {
         contentItems: (module.contentItems?.length ? module.contentItems : legacyItems).map((item) => ({
           ...item,
           _localId: item._id || localKey(),
+          points: item.points ?? (item.type === 'assignment' ? 100 : 0),
+          ...(item.type === 'assignment' ? { rubric: (item.rubric || []).map((criterion) => ({ ...criterion })) } : {}),
           requiredForCertificate: item.requiredForCertificate !== false && item.quiz?.requiredForCertificate !== false,
           ...(item.type === 'video-lesson' ? {
             attentionCheck: attentionCheckDraft(item.attentionCheck),
@@ -244,6 +345,9 @@ function serializeCourse(course, status = course.status) {
     thumbnailPublicId: course.thumbnailPublicId,
     learningObjectives: course.learningObjectives,
     prerequisites: course.prerequisites,
+    tags: course.tags,
+    skills: course.skills,
+    practicalBenefits: course.practicalBenefits,
     estimatedDurationMinutes: Number(course.estimatedDurationMinutes) || 0,
     generateCertificate: course.generateCertificate !== false,
     assignments: (course.assignments || []).map((assignment) => ({
@@ -251,7 +355,12 @@ function serializeCourse(course, status = course.status) {
       title: assignment.title,
       description: assignment.description || '',
       dueDate: apiDateValue(assignment.dueDate),
-      points: Number(assignment.points) || 0,
+      points: assignment.points === undefined ? 100 : Number(assignment.points) || 0,
+      rubric: (assignment.rubric || []).map((criterion) => ({
+        name: criterion.name,
+        description: criterion.description || '',
+        maximumMarks: Number(criterion.maximumMarks),
+      })),
       requiredForCertificate: assignment.requiredForCertificate !== false,
     })),
     quizzes: (course.quizzes || []).map((quiz) => ({
@@ -337,7 +446,14 @@ function serializeCourse(course, status = course.status) {
           bytes: Number(resource.bytes) || 0,
         })),
         dueDate: apiDateValue(item.dueDate),
-        points: Number(item.points) || 0,
+        points: item.points === undefined ? (item.type === 'assignment' ? 100 : 0) : Number(item.points) || 0,
+        ...(item.type === 'assignment' ? {
+          rubric: (item.rubric || []).map((criterion) => ({
+            name: criterion.name,
+            description: criterion.description || '',
+            maximumMarks: Number(criterion.maximumMarks),
+          })),
+        } : {}),
         ...(item.type === 'video-lesson' ? {
           transcriptUrl: item.transcriptUrl || '',
           transcriptPublicId: item.transcriptPublicId || '',
@@ -467,14 +583,14 @@ function uploadWithProgress(path, file, onLogout, onProgress, fields = {}) {
 function collectCourseAssets(course) {
   const assets = []
   if (course.thumbnailPublicId) assets.push({ publicId: course.thumbnailPublicId, resourceType: 'image' })
-  for (const module of course.modules || []) {
+  for (const module of normalizeArray(course.modules)) {
     const items = module.contentItems?.length ? module.contentItems : [
-      ...(module.lessons || []),
+      ...normalizeLessons(module.lessons),
     ]
     for (const item of items) {
       if (item.videoPublicId) assets.push({ publicId: item.videoPublicId, resourceType: 'video' })
       if (item.transcriptPublicId) assets.push({ publicId: item.transcriptPublicId, resourceType: 'raw' })
-      for (const resource of item.resources || []) {
+      for (const resource of normalizeArray(item.resources)) {
         if (resource.publicId) assets.push({ publicId: resource.publicId, resourceType: resource.resourceType || 'raw' })
       }
     }
@@ -483,12 +599,12 @@ function collectCourseAssets(course) {
 }
 
 function courseCounts(course) {
-  const lessons = (course.modules || []).reduce((total, module) => total + (
+  const lessons = normalizeArray(course.modules).reduce((total, module) => total + (
     module.contentItems?.length
       ? module.contentItems.filter((item) => item.type === 'video-lesson').length
-      : (module.lessons?.length || 0)
+      : normalizeLessons(module.lessons).length
   ), 0)
-  return { modules: course.modules?.length || 0, lessons }
+  return { modules: (course.modules || []).length, lessons }
 }
 
 function formatDuration(minutes) {
@@ -497,13 +613,6 @@ function formatDuration(minutes) {
   const hours = Math.floor(value / 60)
   const remainder = value % 60
   return remainder ? `${hours} hr ${remainder} min` : `${hours} hr`
-}
-
-function dateTimeLocalValue(value) {
-  if (!value) return ''
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return ''
-  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
 }
 
 function apiDateValue(value) {
@@ -523,7 +632,7 @@ function CourseStats({ stats }) {
     ['Total courses', stats.totalCourses, '▤'],
     ['Published', stats.publishedCourses, '✓'],
     ['Drafts', stats.draftCourses, '◷'],
-    ['Enrolled students', stats.totalEnrolledStudents, '♙'],
+    ['Course enrollments', stats.totalEnrolledStudents, '♙'],
   ]
   return (
     <div className="ac-stats" aria-label="Course statistics">
@@ -553,7 +662,7 @@ function CourseCard({ course, onEdit, onPreview, onToggleStatus, onDelete }) {
         </div>
         <p className="ac-course-card__description">{course.description || course.detailedDescription || 'No course description added yet.'}</p>
         <div className="ac-course-card__meta">
-          <span>{counts.modules} modules</span><span>{counts.lessons} lessons</span><span>{formatDuration(course.estimatedDurationMinutes)}</span>
+          <span>{counts.modules} modules</span><span>{counts.lessons} lessons</span><span>{formatDuration(course.estimatedDurationMinutes)}</span><span>{Number(course.activeEnrolledStudents) || 0} active students enrolled</span>
         </div>
         <div className="ac-course-card__actions">
           <button type="button" className="ac-button ac-button--quiet" onClick={() => onPreview(course)} aria-label={`Preview ${course.title}`}>
@@ -761,7 +870,7 @@ function PreviewContent({ course, onBack, onEdit, onSave, isSaving, error }) {
           <article className="ac-preview-module" key={module._localId || module._id || index}>
             <div><span className="ac-preview-module__number">{String(index + 1).padStart(2, '0')}</span><div><h3>{module.title}</h3>{module.description && <p>{module.description}</p>}</div></div>
             <ul>{(module.contentItems?.length ? module.contentItems : [
-              ...(module.lessons || []).map((lesson) => ({ ...lesson, type: 'video-lesson' })),
+              ...normalizeLessons(module.lessons).map((lesson) => ({ ...lesson, type: 'video-lesson' })),
               ...(module.quiz ? [{ type: 'quiz', title: module.quiz.title, quiz: module.quiz }] : []),
             ]).map((item, itemIndex) => (
               <li key={item._localId || item._id || itemIndex}>
@@ -1844,6 +1953,9 @@ export default function AdminCourseManagement({ onLogout }) {
             <label className="ac-field"><span>Estimated duration (minutes)</span><input type="number" min="0" max="100000" value={course.estimatedDurationMinutes} onChange={(event) => updateCourse('estimatedDurationMinutes', event.target.value)} /></label>
             <label className="ac-field"><span>Learning objectives <small>One per line</small></span><textarea rows="4" value={course.learningObjectives.join('\n')} onChange={(event) => updateCourse('learningObjectives', event.target.value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean))} placeholder="Build responsive web interfaces\nUnderstand modern JavaScript" /></label>
             <label className="ac-field"><span>Prerequisites <small>One per line</small></span><textarea rows="3" value={course.prerequisites.join('\n')} onChange={(event) => updateCourse('prerequisites', event.target.value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean))} placeholder="Basic computer skills" /></label>
+            <label className="ac-field"><span>Tags <small>One per line</small></span><textarea rows="3" value={course.tags.join('\n')} onChange={(event) => updateCourse('tags', event.target.value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean))} placeholder="data analysis\nartificial intelligence" /></label>
+            <label className="ac-field"><span>Skills students will gain <small>One per line</small></span><textarea rows="3" value={course.skills.join('\n')} onChange={(event) => updateCourse('skills', event.target.value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean))} placeholder="Model evaluation\nData visualization" /></label>
+            <label className="ac-field"><span>Practical benefits <small>One per line</small></span><textarea rows="3" value={course.practicalBenefits.join('\n')} onChange={(event) => updateCourse('practicalBenefits', event.target.value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean))} placeholder="Build and evaluate a practical project" /></label>
           </div>
         </div>
         {error && <p className="ac-inline-error" role="alert">{error}</p>}
@@ -1948,7 +2060,7 @@ export default function AdminCourseManagement({ onLogout }) {
                       >
                         <button type="button" className="ac-content-drag" draggable aria-label={`Reorder ${item.title}`} onDragStart={(event) => { event.stopPropagation(); setContentDrag({ kind: 'item', moduleIndex, fromIndex: itemIndex }) }} onDragEnd={() => setContentDrag(null)}>⠿</button>
                         <span className={`ac-content-type ac-content-type--${item.type}`} aria-hidden="true">{item.type === 'video-lesson' ? '▶' : item.type === 'quiz' ? '?' : item.type === 'assignment' ? '✓' : '▤'}</span>
-                        <div className="ac-content-item__text"><strong>{item.title || typeLabels[item.type]}</strong><small>{typeLabels[item.type]}{item.type === 'quiz' ? ` · ${item.quiz?.questions?.length || 0} questions` : item.type === 'assignment' && item.dueDate ? ` · Due ${new Date(item.dueDate).toLocaleDateString()}` : ''}</small></div>
+                        <div className="ac-content-item__text"><strong>{item.title || typeLabels[item.type]}</strong><small>{typeLabels[item.type]}{item.type === 'quiz' ? ` · ${item.quiz?.questions?.length || 0} questions` : ''}</small></div>
                         <div className="ac-content-item__actions">
                           <button type="button" className="ac-icon-button ac-icon-button--small" aria-label={`Edit ${item.title}`} onClick={() => openContentEditor(moduleIndex, item.type, itemIndex)}>✎</button>
                           <button type="button" className="ac-icon-button ac-icon-button--small ac-icon-button--danger" aria-label={`Delete ${item.title}`} onClick={() => deleteContentItem(moduleIndex, itemIndex)}>×</button>
@@ -2071,7 +2183,20 @@ export default function AdminCourseManagement({ onLogout }) {
                       </>}
                       {contentDraft.type === 'assignment' && <>
                         <label className="ac-field"><span>Instructions</span><textarea rows="4" maxLength="10000" value={contentDraft.description} onChange={(event) => updateDraft('description', event.target.value)} /></label>
-                        <div className="ac-form-columns"><label className="ac-field"><span>Due date</span><input type="datetime-local" value={dateTimeLocalValue(contentDraft.dueDate)} onChange={(event) => updateDraft('dueDate', event.target.value)} /></label><label className="ac-field"><span>Points</span><input type="number" min="0" max="100000" value={contentDraft.points} onChange={(event) => updateDraft('points', event.target.value)} /></label></div>
+                        <div className="ac-form-columns"><label className="ac-field"><span>Points</span><input type="number" min="0" max="100000" value={contentDraft.points} onChange={(event) => updateDraft('points', event.target.value)} /></label></div>
+                        <section className="ac-ai-quiz" aria-label="Assignment marking rubric">
+                          <h5>Marking rubric (optional)</h5>
+                          <p className="ac-manual-quiz-help">Add criteria and maximum marks. The criterion marks must total the assignment points.</p>
+                          {(contentDraft.rubric || []).map((criterion, criterionIndex) => (
+                            <div className="ac-quiz-question" key={`rubric-${criterionIndex}`}>
+                              <label className="ac-field"><span>Criterion</span><input maxLength="120" value={criterion.name} onChange={(event) => updateDraft('rubric', contentDraft.rubric.map((entry, index) => index === criterionIndex ? { ...entry, name: event.target.value } : entry))} /></label>
+                              <label className="ac-field"><span>Maximum marks</span><input type="number" min="0.01" max={contentDraft.points} step="any" value={criterion.maximumMarks} onChange={(event) => updateDraft('rubric', contentDraft.rubric.map((entry, index) => index === criterionIndex ? { ...entry, maximumMarks: event.target.value } : entry))} /></label>
+                              <label className="ac-field"><span>Criterion guidance</span><textarea rows="2" maxLength="1000" value={criterion.description || ''} onChange={(event) => updateDraft('rubric', contentDraft.rubric.map((entry, index) => index === criterionIndex ? { ...entry, description: event.target.value } : entry))} /></label>
+                              <button type="button" className="ac-text-button ac-text-button--danger" onClick={() => updateDraft('rubric', contentDraft.rubric.filter((_, index) => index !== criterionIndex))}>Remove criterion</button>
+                            </div>
+                          ))}
+                          <button type="button" className="ac-button ac-button--outline" disabled={(contentDraft.rubric || []).length >= 20} onClick={() => updateDraft('rubric', [...(contentDraft.rubric || []), { name: '', description: '', maximumMarks: '' }])}>+ Add rubric criterion</button>
+                        </section>
                       </>}
                       {contentDraft.type === 'note' && <>
                         <label className="ac-field"><span>Notes</span><textarea rows="5" maxLength="20000" value={contentDraft.content} onChange={(event) => updateDraft('content', event.target.value)} placeholder="Write the lesson notes here." /></label>

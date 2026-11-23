@@ -20,28 +20,17 @@ import EmailOtpChallenge from '../models/EmailOtpChallenge.js'
 import RegistrationEmailVerification from '../models/RegistrationEmailVerification.js'
 import ReferralCode from '../models/ReferralCode.js'
 import ReferralCodeDailyLimit from '../models/ReferralCodeDailyLimit.js'
+import ReferralCodeUserLimit from '../models/ReferralCodeUserLimit.js'
 import RefreshSession from '../models/RefreshSession.js'
-import Notification from '../models/Notification.js'
-import NotificationPreference from '../models/NotificationPreference.js'
-import AcademicEvent from '../models/AcademicEvent.js'
-import Attendance from '../models/Attendance.js'
-import Batch from '../models/Batch.js'
-import CollegeDocument from '../models/CollegeDocument.js'
-import Department from '../models/Department.js'
-import Examination from '../models/Examination.js'
-import Faculty from '../models/Faculty.js'
-import LearningActivity from '../models/LearningActivity.js'
-import PlacementDrive from '../models/PlacementDrive.js'
-import Progress from '../models/Progress.js'
-import Semester from '../models/Semester.js'
-import StudentNote from '../models/StudentNote.js'
-import Resource from '../models/Resource.js'
+import StudentProfile from '../models/StudentProfile.js'
+import { removeLegacyUniqueAssignmentSubmissionIndexes } from '../utils/assignment-submission-indexes.js'
 
 const requiredModels = [
   Admin,
   CollegeAdmin,
   Student,
   CollegeStudent,
+  StudentProfile,
   AccountIdentity,
   Course,
   College,
@@ -60,22 +49,8 @@ const requiredModels = [
   RegistrationEmailVerification,
   ReferralCode,
   ReferralCodeDailyLimit,
+  ReferralCodeUserLimit,
   RefreshSession,
-  Notification,
-  NotificationPreference,
-  AcademicEvent,
-  Attendance,
-  Batch,
-  CollegeDocument,
-  Department,
-  Examination,
-  Faculty,
-  LearningActivity,
-  PlacementDrive,
-  Progress,
-  Semester,
-  StudentNote,
-  Resource,
 ]
 
 async function runDatabaseOperation(operation, collection, callback) {
@@ -123,6 +98,19 @@ export async function connectToDatabase() {
         )
       } catch (error) {
         if (error?.cause?.code !== 48) throw error
+      }
+    }
+    if (model === AssignmentSubmission) {
+      const removedIndexes = await runDatabaseOperation(
+        'removeLegacyUniqueAssignmentIndexes',
+        model.collection.name,
+        () => removeLegacyUniqueAssignmentSubmissionIndexes(model.collection),
+      )
+      if (removedIndexes.length) {
+        console.warn(JSON.stringify({
+          event: 'assignment_submission_legacy_unique_indexes_removed',
+          indexNames: removedIndexes,
+        }))
       }
     }
     await runDatabaseOperation(

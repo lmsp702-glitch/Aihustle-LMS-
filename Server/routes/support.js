@@ -3,7 +3,6 @@ import path from 'node:path'
 import { Router } from 'express'
 import mongoose from 'mongoose'
 import SupportTicket, { ticketCategories, ticketPriorities, ticketStatuses } from '../models/SupportTicket.js'
-import Notification from '../models/Notification.js'
 import { Admin, CollegeStudent, Student } from '../models/account-models.js'
 import { authenticate } from '../middleware/auth.js'
 import {
@@ -54,8 +53,6 @@ function ticketJson(ticket, requester) {
       size: result.attachment.size,
     }
   }
-  result.studentId = result.userId ? String(result.userId) : undefined
-  result.messages = result.replies || []
   if (requester) result.requester = requester
   return result
 }
@@ -123,9 +120,6 @@ function createTicketId() {
 }
 
 function scopedTicketQuery(scope, ticketId) {
-  if (mongoose.isValidObjectId(ticketId)) {
-    return { ...scope, $or: [{ ticketId }, { _id: ticketId }] }
-  }
   return { ...scope, ticketId }
 }
 
@@ -156,10 +150,6 @@ async function includeRequesterDetails(tickets) {
 }
 
 async function findRequester(ticket) {
-  if (!ticket?.userId) return null
-  if (mongoose.connection.readyState === 0 && Student.findById === mongoose.Model.findById) {
-    return null
-  }
   const AccountModel = ticket.userCollection === 'clg_students' ? CollegeStudent : Student
   return AccountModel.findById(ticket.userId).select('fullName email studentId').lean()
 }
@@ -192,41 +182,6 @@ function requireAdmin(req, res) {
   return true
 }
 
-async function emitNotification({ recipientRole, recipientId, collegeId, title, message, link, metadata }) {
-  try {
-    await Notification.create({
-      recipientRole,
-      ...(recipientId ? { recipientId, userId: recipientId } : {}),
-      ...(collegeId ? { collegeId } : {}),
-      type: 'support',
-      title,
-      message,
-      link,
-      metadata: metadata || {},
-    })
-  } catch (err) {
-    // Non-blocking notification emission
-  }
-}
-
-// Compute statistics for a given query scope
-async function computeTicketStats(scope) {
-  const [total, open, inProgress, waitingForStudent, resolved, closed] = await Promise.all([
-    SupportTicket.countDocuments(scope),
-    SupportTicket.countDocuments({ ...scope, status: 'Open' }),
-    SupportTicket.countDocuments({ ...scope, status: 'In Progress' }),
-    SupportTicket.countDocuments({ ...scope, status: { $in: ['Waiting for Student', 'Waiting for User'] } }),
-    SupportTicket.countDocuments({ ...scope, status: 'Resolved' }),
-    SupportTicket.countDocuments({ ...scope, status: 'Closed' }),
-  ])
-  return { total, open, inProgress, waitingForStudent, resolved, closed }
-}
-
-// ---------------------------------------------------------------------------
-// Student Endpoints
-// ---------------------------------------------------------------------------
-
-// POST /tickets - Create a new support ticket
 router.post('/tickets', async (req, res, next) => {
   try {
     if (req.auth.role !== 'student') {
@@ -247,13 +202,9 @@ router.post('/tickets', async (req, res, next) => {
     }
 
     const user = req.auth.user
-    const studentObjectId = new mongoose.Types.ObjectId(req.auth.id)
-    const ticketId = createTicketId()
-
     const ticket = await SupportTicket.create({
-      ticketId,
-      userId: studentObjectId,
-      studentId: studentObjectId,
+      ticketId: createTicketId(),
+      userId: new mongoose.Types.ObjectId(req.auth.id),
       userCollection: req.auth.accountCollection,
       accountType: user.studentType === 'college' ? 'college' : 'independent',
       ...(user.studentType === 'college' && mongoose.isValidObjectId(user.collegeId)
@@ -265,48 +216,25 @@ router.post('/tickets', async (req, res, next) => {
       description: description.trim(),
       attachment: decodeAttachment(attachmentInput),
       status: 'Open',
-      statusHistory: [
-        {
-          to: 'Open',
-          changedBy: studentObjectId,
-          changedByRole: 'student',
-        },
-      ],
+      statusHistory: [{
+        to: 'Open',
+        changedBy: new mongoose.Types.ObjectId(req.auth.id),
+        changedByRole: 'student',
+      }],
     })
-
-    // Notify student of ticket creation
-    await emitNotification({
-      recipientRole: 'student',
-      recipientId: studentObjectId,
-      title: `Support Ticket Received: ${ticketId}`,
-      message: `Your request "${ticket.subject}" has been received. Our support team will review it.`,
-      link: `/student/help/requests/${ticketId}`,
-      metadata: { ticketId },
-    })
-
-
     try {
       await sendSupportTicketComplaintEmail({
         email: user.email,
         fullName: user.fullName,
         ticket,
       })
-    } catch (deliveryError) {
-      logEmailDeliveryFailure('support_ticket_complaint_email', deliveryError, {
+    } catch (emailError) {
+      logEmailDeliveryFailure({
+        event: 'notification.support_ticket_complaint_email.failed',
         accountId: req.auth.id,
+        error: emailError,
       })
     }
-
-    // Notify main admin of new incoming ticket
-    await emitNotification({
-      recipientRole: 'main_admin',
-      collegeId: ticket.collegeId,
-      title: `New Support Request (${ticketId})`,
-      message: `${user.fullName || 'Student'} created ticket: "${ticket.subject}" [${ticket.priority}]`,
-      link: `/admin/support/${ticketId}`,
-      metadata: { ticketId, priority: ticket.priority, category: ticket.category },
-    })
-
     return res.status(201).json({ ticket: ticketJson(ticket) })
   } catch (error) {
     if (error?.statusCode) return res.status(error.statusCode).json({ message: error.message })
@@ -315,252 +243,84 @@ router.post('/tickets', async (req, res, next) => {
   }
 })
 
-// GET /tickets and GET /tickets/mine - List tickets (Role-aware: student sees theirs; admin sees scoped)
-async function handleListTickets(req, res, next) {
+router.get('/tickets/mine', async (req, res, next) => {
   try {
-    const scope = getTicketScope(req)
-    if (!scope) return res.status(403).json({ message: 'You do not have permission to access support tickets.' })
-
-    const filters = validateTicketFilters(req.query)
-    const searchQuery = typeof req.query.search === 'string' ? req.query.search.trim() : ''
-
-    const query = { ...scope, ...filters }
-
-    if (searchQuery) {
-      const searchRegex = new RegExp(searchQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
-      query.$or = [{ ticketId: searchRegex }, { subject: searchRegex }]
+    if (req.auth.role !== 'student') {
+      return res.status(403).json({ message: 'Student access is required.' })
     }
-
-    if (req.auth.role === 'student') {
-      const [tickets, stats] = await Promise.all([
-        SupportTicket.find(query).select('-attachment.data').sort({ updatedAt: -1 }).lean(),
-        computeTicketStats(scope),
-      ])
-      return res.json({
-        tickets: tickets.map((t) => ticketJson(t)),
-        stats,
-      })
-    }
-
-    // Admin listing
-    const tickets = await SupportTicket.find(query)
+    const tickets = await SupportTicket.find(getTicketScope(req))
       .select('-attachment.data')
       .sort({ updatedAt: -1 })
-      .limit(200)
       .lean()
-
-    const stats = await computeTicketStats(scope)
-    return res.json({
-      tickets: await includeRequesterDetails(tickets),
-      stats,
-    })
-  } catch (error) {
-    if (error?.statusCode) return res.status(error.statusCode).json({ message: error.message })
-    return next(error)
-  }
-}
-
-router.get('/tickets', handleListTickets)
-router.get('/tickets/mine', handleListTickets)
-
-// GET /tickets/stats & /tickets/mine/stats - Get ticket stats
-async function handleGetStats(req, res, next) {
-  try {
-    const scope = getTicketScope(req)
-    if (!scope) return res.status(403).json({ message: 'Permission denied.' })
-    const stats = await computeTicketStats(scope)
-    return res.json({ stats })
+    return res.json({ tickets: tickets.map((ticket) => ticketJson(ticket)) })
   } catch (error) {
     return next(error)
   }
-}
+})
 
-router.get('/tickets/stats', handleGetStats)
-router.get('/tickets/mine/stats', handleGetStats)
-
-// GET /tickets/:ticketId & GET /tickets/mine/:ticketId - Get single ticket
-async function handleGetSingleTicket(req, res, next) {
+router.get('/tickets/mine/:ticketId', async (req, res, next) => {
   try {
-    const scope = getTicketScope(req)
-    if (!scope) return res.status(403).json({ message: 'Permission denied.' })
-
-    const ticket = await findScopedTicket(scope, req.params.ticketId, '-attachment.data')
-    if (!ticket) return res.status(404).json({ message: 'Support request not found.' })
-
-    let requester
-    if (['main_admin', 'college_admin'].includes(req.auth.role)) {
-      requester = await findRequester(ticket)
+    if (req.auth.role !== 'student') {
+      return res.status(403).json({ message: 'Student access is required.' })
     }
-
-    return res.json({
-      ticket: ticketJson(ticket, requester ? { fullName: requester.fullName, email: requester.email } : undefined),
-    })
+    const ticket = await findScopedTicket(getTicketScope(req), req.params.ticketId, '-attachment.data')
+    if (!ticket) return res.status(404).json({ message: 'Support request not found.' })
+    return res.json({ ticket: ticketJson(ticket) })
   } catch (error) {
     return next(error)
   }
-}
+})
 
-router.get('/tickets/:ticketId', handleGetSingleTicket)
-router.get('/tickets/mine/:ticketId', handleGetSingleTicket)
-
-// POST /tickets/:ticketId/messages & /tickets/:ticketId/replies & /tickets/mine/:ticketId/replies - Reply to ticket
-async function handleReplyTicket(req, res, next) {
+router.post('/tickets/mine/:ticketId/replies', async (req, res, next) => {
   try {
+    if (req.auth.role !== 'student') {
+      return res.status(403).json({ message: 'Student access is required.' })
+    }
     if (!isValidText(req.body?.message, 1, 5000)) {
       return res.status(400).json({ message: 'Enter a reply of no more than 5,000 characters.' })
     }
-
-    const scope = getTicketScope(req)
-    if (!scope) return res.status(403).json({ message: 'Permission denied.' })
-
-    const ticket = await findScopedTicket(scope, req.params.ticketId)
+    const ticket = await findScopedTicket(getTicketScope(req), req.params.ticketId)
     if (!ticket) return res.status(404).json({ message: 'Support request not found.' })
-
-    if (req.auth.role === 'student') {
-      if (['Resolved', 'Closed'].includes(ticket.status)) {
-        return res.status(409).json({ message: 'Replies are only available while a ticket is open or in progress.' })
-      }
-
-      const previousStatus = ticket.status
-      ticket.replies.push({
-        authorId: req.auth.id,
-        authorRole: 'student',
-        message: req.body.message.trim(),
-      })
-
-      if (['Waiting for Student', 'Waiting for User'].includes(ticket.status)) {
-        ticket.status = 'In Progress'
-        ticket.statusHistory.push({
-          from: previousStatus,
-          to: 'In Progress',
-          changedBy: req.auth.id,
-          changedByRole: 'student',
-        })
-      }
-
-      await ticket.save()
-
-      // Notify admin of student reply
-      await emitNotification({
-        recipientRole: 'main_admin',
-        collegeId: ticket.collegeId,
-        title: `Student Reply on Ticket ${ticket.ticketId}`,
-        message: `Student replied to ticket: "${ticket.subject}"`,
-        link: `/admin/support/${ticket.ticketId}`,
-        metadata: { ticketId: ticket.ticketId },
-      })
-
-      return res.json({ ticket: ticketJson(ticket) })
+    if (!['Open', 'Waiting for User'].includes(ticket.status)) {
+      return res.status(409).json({ message: 'Replies are only available while a ticket is open or waiting for your response.' })
     }
-
-    // Admin reply
-    if (['Closed'].includes(ticket.status)) {
-      return res.status(409).json({ message: 'This support request is closed to replies.' })
-    }
-
     const previousStatus = ticket.status
     ticket.replies.push({
       authorId: req.auth.id,
-      authorRole: 'admin',
+      authorRole: 'student',
       message: req.body.message.trim(),
     })
-
-    ticket.status = 'Waiting for Student'
-    ticket.statusHistory.push({
-      from: previousStatus,
-      to: 'Waiting for Student',
-      changedBy: req.auth.id,
-      changedByRole: 'admin',
-    })
-
+    if (ticket.status === 'Waiting for User') {
+      ticket.status = 'In Progress'
+      ticket.statusHistory.push({
+        from: previousStatus,
+        to: 'In Progress',
+        changedBy: req.auth.id,
+        changedByRole: 'student',
+      })
+    }
     await ticket.save()
-
-    // Notify student of admin reply
-    await emitNotification({
-      recipientRole: 'student',
-      recipientId: ticket.userId,
-      title: `New Reply on Ticket ${ticket.ticketId}`,
-      message: `The support team replied to your ticket "${ticket.subject}".`,
-      link: `/student/help/requests/${ticket.ticketId}`,
-      metadata: { ticketId: ticket.ticketId },
-    })
-
-    const requester = await findRequester(ticket)
-    return res.json({
-      ticket: ticketJson(ticket, requester ? { fullName: requester.fullName, email: requester.email } : undefined),
-    })
+    return res.json({ ticket: ticketJson(ticket) })
   } catch (error) {
     return next(error)
   }
-}
+})
 
-router.post('/tickets/:ticketId/messages', handleReplyTicket)
-router.post('/tickets/:ticketId/replies', handleReplyTicket)
-router.post('/tickets/mine/:ticketId/replies', handleReplyTicket)
-
-// GET /tickets/:ticketId/attachment & /tickets/mine/:ticketId/attachment - Download attachment
-async function handleDownloadAttachment(req, res, next) {
+router.get('/tickets/mine/:ticketId/attachment', async (req, res, next) => {
   try {
-    const scope = getTicketScope(req)
-    if (!scope) return res.status(403).json({ message: 'Permission denied.' })
-
+    if (req.auth.role !== 'student') {
+      return res.status(403).json({ message: 'Student access is required.' })
+    }
     const ticket = await SupportTicket.findOne({
-      ...scopedTicketQuery(scope, req.params.ticketId),
-      ...(req.query.id ? { 'attachment.id': req.query.id } : {}),
+      ...scopedTicketQuery(getTicketScope(req), req.params.ticketId),
+      'attachment.id': req.query.id,
     }).select('+attachment.data')
-
     if (!ticket?.attachment?.data) return res.status(404).json({ message: 'Attachment not found.' })
     res.type(ticket.attachment.contentType)
     res.set('Content-Disposition', `attachment; filename="${ticket.attachment.fileName}"`)
     res.set('X-Content-Type-Options', 'nosniff')
     return res.send(ticket.attachment.data)
   } catch (error) {
-    return next(error)
-  }
-}
-
-router.get('/tickets/:ticketId/attachment', handleDownloadAttachment)
-router.get('/tickets/mine/:ticketId/attachment', handleDownloadAttachment)
-
-// ---------------------------------------------------------------------------
-// Admin Dedicated Endpoints
-// ---------------------------------------------------------------------------
-
-router.get('/admin/stats', async (req, res, next) => {
-  try {
-    if (!requireAdmin(req, res)) return
-    const scope = getTicketScope(req)
-    const stats = await computeTicketStats(scope)
-    return res.json({ stats })
-  } catch (error) {
-    return next(error)
-  }
-})
-
-router.get('/admin/tickets', async (req, res, next) => {
-  try {
-    if (!requireAdmin(req, res)) return
-    const scope = getTicketScope(req)
-    const filters = validateTicketFilters(req.query)
-    const searchQuery = typeof req.query.search === 'string' ? req.query.search.trim() : ''
-
-    const query = { ...scope, ...filters }
-    if (searchQuery) {
-      const searchRegex = new RegExp(searchQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
-      query.$or = [{ ticketId: searchRegex }, { subject: searchRegex }]
-    }
-
-    const [tickets, stats] = await Promise.all([
-      SupportTicket.find(query).select('-attachment.data').sort({ updatedAt: -1 }).limit(200).lean(),
-      computeTicketStats(scope),
-    ])
-
-    return res.json({
-      tickets: await includeRequesterDetails(tickets),
-      stats,
-    })
-  } catch (error) {
-    if (error?.statusCode) return res.status(error.statusCode).json({ message: error.message })
     return next(error)
   }
 })
@@ -584,6 +344,22 @@ router.get('/admin/tickets/handlers', async (req, res, next) => {
   }
 })
 
+router.get('/admin/tickets', async (req, res, next) => {
+  try {
+    if (!requireAdmin(req, res)) return
+    const scope = getTicketScope(req)
+    const filters = validateTicketFilters(req.query)
+    const tickets = await SupportTicket.find({ ...scope, ...filters })
+      .select('-attachment.data')
+      .sort({ updatedAt: -1 })
+      .lean()
+    return res.json({ tickets: await includeRequesterDetails(tickets) })
+  } catch (error) {
+    if (error?.statusCode) return res.status(error.statusCode).json({ message: error.message })
+    return next(error)
+  }
+})
+
 router.get('/admin/tickets/:ticketId', async (req, res, next) => {
   try {
     if (!requireAdmin(req, res)) return
@@ -603,79 +379,72 @@ router.get('/admin/tickets/:ticketId', async (req, res, next) => {
   }
 })
 
-router.post('/admin/tickets/:ticketId/messages', handleReplyTicket)
-router.post('/admin/tickets/:ticketId/replies', handleReplyTicket)
-
-// PATCH /admin/tickets/:ticketId/status & PATCH /tickets/:ticketId/status - Update ticket status
-async function handleUpdateStatus(req, res, next) {
+router.post('/admin/tickets/:ticketId/replies', async (req, res, next) => {
   try {
     if (!requireAdmin(req, res)) return
-    const { status, priority } = req.body ?? {}
-    if (!status || !ticketStatuses.includes(status)) {
-      return res.status(400).json({ message: 'Choose a valid ticket status.' })
+    if (!isValidText(req.body?.message, 1, 5000)) {
+      return res.status(400).json({ message: 'Enter a reply of no more than 5,000 characters.' })
     }
-    if (priority && !ticketPriorities.includes(priority)) {
-      return res.status(400).json({ message: 'Choose a valid priority.' })
-    }
-
     const ticket = await findScopedTicket(getTicketScope(req), req.params.ticketId)
     if (!ticket) return res.status(404).json({ message: 'Support request not found.' })
-
+    if (['Resolved', 'Closed'].includes(ticket.status)) {
+      return res.status(409).json({ message: 'This support request is closed to replies.' })
+    }
     const previousStatus = ticket.status
+    ticket.replies.push({
+      authorId: req.auth.id,
+      authorRole: 'admin',
+      message: req.body.message.trim(),
+    })
+    ticket.status = 'Waiting for User'
+    ticket.statusHistory.push({
+      from: previousStatus,
+      to: ticket.status,
+      changedBy: req.auth.id,
+      changedByRole: 'admin',
+    })
+    await ticket.save()
+    return res.json({ ticket: ticketJson(ticket) })
+  } catch (error) {
+    return next(error)
+  }
+})
+
+router.patch('/admin/tickets/:ticketId/status', async (req, res, next) => {
+  try {
+    if (!requireAdmin(req, res)) return
+    const { status } = req.body ?? {}
+    if (!ticketStatuses.includes(status)) {
+      return res.status(400).json({ message: 'Choose a valid ticket status.' })
+    }
+    const ticket = await findScopedTicket(getTicketScope(req), req.params.ticketId)
+    if (!ticket) return res.status(404).json({ message: 'Support request not found.' })
     if (ticket.status !== status) {
       ticket.statusHistory.push({
-        from: previousStatus,
+        from: ticket.status,
         to: status,
         changedBy: req.auth.id,
         changedByRole: 'admin',
       })
       ticket.status = status
-      if (status === 'Resolved') {
-        ticket.resolvedAt = new Date()
-      } else {
-        ticket.resolvedAt = undefined
-      }
+      await ticket.save()
     }
-
-    if (priority) {
-      ticket.priority = priority
-    }
-
-    await ticket.save()
-
-    // Notify student of status update
-    await emitNotification({
-      recipientRole: 'student',
-      recipientId: ticket.userId,
-      title: `Ticket ${ticket.ticketId} Status: ${status}`,
-      message: `Your ticket "${ticket.subject}" has been marked as ${status}.`,
-      link: `/student/help/requests/${ticket.ticketId}`,
-      metadata: { ticketId: ticket.ticketId, status },
-    })
-
-    const requester = await findRequester(ticket)
-    return res.json({
-      ticket: ticketJson(ticket, requester ? { fullName: requester.fullName, email: requester.email } : undefined),
-    })
+    return res.json({ ticket: ticketJson(ticket) })
   } catch (error) {
     return next(error)
   }
-}
+})
 
-router.patch('/admin/tickets/:ticketId/status', handleUpdateStatus)
-router.patch('/tickets/:ticketId/status', handleUpdateStatus)
-
-async function handleUpdatePriority(req, res, next) {
+router.patch('/admin/tickets/:ticketId/priority', async (req, res, next) => {
   try {
     if (!requireAdmin(req, res)) return
     const { priority } = req.body ?? {}
-    if (!priority || !ticketPriorities.includes(priority)) {
+    if (!ticketPriorities.includes(priority)) {
       return res.status(400).json({ message: 'Choose a valid ticket priority.' })
     }
     const ticket = await findScopedTicket(getTicketScope(req), req.params.ticketId)
     if (!ticket) return res.status(404).json({ message: 'Support request not found.' })
     if (ticket.priority !== priority) {
-      ticket.priorityHistory = ticket.priorityHistory || []
       ticket.priorityHistory.push({
         from: ticket.priority,
         to: priority,
@@ -685,17 +454,11 @@ async function handleUpdatePriority(req, res, next) {
       ticket.priority = priority
       await ticket.save()
     }
-    const requester = await findRequester(ticket)
-    return res.json({
-      ticket: ticketJson(ticket, requester ? { fullName: requester.fullName, email: requester.email } : undefined),
-    })
+    return res.json({ ticket: ticketJson(ticket) })
   } catch (error) {
     return next(error)
   }
-}
-
-router.patch('/admin/tickets/:ticketId/priority', handleUpdatePriority)
-router.patch('/tickets/:ticketId/priority', handleUpdatePriority)
+})
 
 router.patch('/admin/tickets/:ticketId/assignment', async (req, res, next) => {
   try {
@@ -706,7 +469,6 @@ router.patch('/admin/tickets/:ticketId/assignment', async (req, res, next) => {
     }
     const ticket = await findScopedTicket(getTicketScope(req), req.params.ticketId)
     if (!ticket) return res.status(404).json({ message: 'Support request not found.' })
-
     if (assignedTo === null) {
       ticket.assignedTo = undefined
     } else {
@@ -731,7 +493,21 @@ router.patch('/admin/tickets/:ticketId/assignment', async (req, res, next) => {
   }
 })
 
-router.get('/admin/tickets/:ticketId/attachment', handleDownloadAttachment)
+router.get('/admin/tickets/:ticketId/attachment', async (req, res, next) => {
+  try {
+    if (!requireAdmin(req, res)) return
+    const ticket = await SupportTicket.findOne({
+      ...scopedTicketQuery(getTicketScope(req), req.params.ticketId),
+      'attachment.id': req.query.id,
+    }).select('+attachment.data')
+    if (!ticket?.attachment?.data) return res.status(404).json({ message: 'Attachment not found.' })
+    res.type(ticket.attachment.contentType)
+    res.set('Content-Disposition', `attachment; filename="${ticket.attachment.fileName}"`)
+    res.set('X-Content-Type-Options', 'nosniff')
+    return res.send(ticket.attachment.data)
+  } catch (error) {
+    return next(error)
+  }
+})
 
-export { computeTicketStats }
 export default router

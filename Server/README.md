@@ -280,12 +280,54 @@ returns structured question data, including answer indexes, without saving it
 to a course or publishing it. Admins can review and edit the response before
 using it in a quiz.
 
+## AI assignment grading and human re-evaluation
+
+Assignment submissions use the existing `assignment_submissions` collection and
+the backend `GEMINI_API_KEY`. PDF, DOCX, TXT, JPEG, PNG, and WEBP files are
+accepted up to 10 MB. DOCX text is extracted on the backend; PDF and image data
+is sent to Gemini as inline file content. The API key is never sent to React.
+
+An accepted submission is queued in MongoDB and graded by a backend worker,
+independently of the student's browser. Temporary Gemini failures receive up
+to three persisted automatic retries with exponential backoff; pending jobs are
+recovered after backend restarts, and atomic leases prevent duplicate grading.
+Permanent failures and exhausted retries remain mark-free and do not consume
+academic attempts. Students cannot manually retry grading. An optional
+assignment rubric can be configured per criterion; rubric maximums must add up
+to the assignment's points. The workflow statuses are `Submitted`,
+`AI Grading`, `AI Graded`, `AI Grading Failed`, `Re-evaluation Requested`,
+`Human Review`, and `Final Result`.
+
+Students can request one human re-evaluation after receiving AI marks. Main
+Admins can review only those requests in the Reports & Analytics dashboard,
+download the original submission, compare AI and human criterion marks, and
+publish a final result. Human marks and feedback are stored separately from
+the original AI evaluation. Routine submission approvals are disabled; the
+legacy pending-approval endpoint returns no submissions, while `scope=all`
+remains available as read-only history. The legacy admin evaluation-write
+endpoint is also disabled; manual grading is limited to the requested-review
+workflow.
+
+Students may make up to three academically failed attempts in a rolling
+24-hour window. A third failure locks new submissions until that window
+expires; a passing result disables further submissions. Every attempt and its
+AI evaluation remains in submission history, while unreadable files and other
+AI grading failures remain retryable and do not count as academic failures.
+Human re-evaluation requests store the student's selected reasons, an
+explanation when “Other” is selected, and optional comments.
+
+Assignment academic results use `(marks obtained / maximum marks) × 100`:
+75% or higher is `Passed`, and anything lower is `Failed`. This result is stored
+separately from the grading workflow status; completing AI grading does not
+mean the student passed. AI and final human marks use the same threshold.
+
 ## Course certificates
 
-When a student completes every trackable lesson in an enrolled course, the
-learning API stores one certificate record in MongoDB. A unique student/course
-index prevents duplicate awards. Independent and college student records are
-scoped separately; existing completions are not backfilled.
+When a student completes every required trackable lesson and assessment in an
+enrolled course, including passing each required assignment, the learning API
+stores one certificate record in MongoDB. A unique student/course index
+prevents duplicate awards. Independent and college student records are scoped
+separately; existing completions are not backfilled.
 
 Main Admin progress reports read earned certificate records for each student.
 Authenticated certificate documents are available at

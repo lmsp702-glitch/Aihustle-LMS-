@@ -2,15 +2,16 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { CollegesManagement, EnrollmentManagement } from './AdminDataViews.jsx'
 import AdminCourseManagement from './AdminCourseManagement.jsx'
-import AdminResourcesManagement from './AdminResourcesManagement.jsx'
 import { API_BASE_URL } from './api-base-url.js'
 import { isInvalidSessionResponse } from './auth-session.js'
 import IndependentStudentApprovals from './IndependentStudentApprovals.jsx'
+import AdminAssignmentReviews from './AdminAssignmentReviews.jsx'
 import AdminProgressReports from './AdminProgressReports.jsx'
 import AdminFeedback from './AdminFeedback.jsx'
 import AdminSupport from './AdminSupport.jsx'
 import NotificationFeed from './NotificationFeed.jsx'
 import SettingsPage from './SettingsPage.jsx'
+import AdminProfilePage from './AdminProfilePage.jsx'
 import { readStudentFile } from './student-file.js'
 import './AdminDashboard.css'
 import './AdminPageConsistency.css'
@@ -21,12 +22,10 @@ const navigation = [
   { id: 'independent-approvals', label: 'Student Approval', icon: '✓' },
   { id: 'colleges', label: 'Colleges', icon: '▦' },
   { id: 'courses', label: 'Courses', group: 'COURSE MANAGEMENT', icon: '▤' },
-  { id: 'resources', label: 'Resources', icon: 'resources' },
   { id: 'enrollments', label: 'Enrollments', icon: '⇄' },
   { id: 'reports', label: 'Reports & Analytics', icon: '⌁' },
   { id: 'feedback', label: 'Feedback', group: 'COMMUNICATION & SUPPORT', icon: '☷' },
   { id: 'complaints', label: 'Complaints', icon: '▣' },
-  { id: 'notifications', label: 'Notifications', icon: '♧' },
   { id: 'settings', label: 'Settings', group: 'SYSTEM', icon: '⚙' },
 ]
 
@@ -37,7 +36,6 @@ function AdminNavigationIcon({ name }) {
     'independent-approvals': <><path d="M8 3h8l1 3h3v15H4V6h3z" /><path d="m8 13 2.5 2.5L16 10" /></>,
     colleges: <><path d="m3 9 9-5 9 5M5 10v9m4-9v9m6-9v9m4-9v9M3 21h18M2 10h20" /></>,
     courses: <><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v17H6.5A2.5 2.5 0 0 0 4 22z" /><path d="M4 5.5v16M8 7h8m-8 4h8" /></>,
-    resources: <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /><line x1="10" y1="9" x2="8" y2="9" /></>,
     enrollments: <><path d="M5 8h13m0 0-3-3m3 3-3 3M19 16H6m0 0 3-3m-3 3 3 3" /></>,
     reports: <><path d="M3 20V4m0 16h18" /><path d="m6 15 4-4 3 3 6-7m-4 0h4v4" /></>,
     notifications: <><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9m-8 12a2 2 0 0 0 4 0" /></>,
@@ -175,27 +173,6 @@ function formatDateTime(value) {
       minute: '2-digit',
       timeZoneName: 'short',
     }).format(date)
-}
-
-function groupReferralCodesByDate(codes = []) {
-  const groups = new Map()
-  for (const code of codes) {
-    const date = code.createdAt ? new Date(code.createdAt) : null
-    const validDate = date && !Number.isNaN(date.getTime()) ? date : null
-    const key = validDate
-      ? `${validDate.getFullYear()}-${validDate.getMonth()}-${validDate.getDate()}`
-      : 'unavailable'
-    if (!groups.has(key)) groups.set(key, { label: validDate ? formatDate(validDate) : 'Date unavailable', codes: [] })
-    groups.get(key).codes.push(code)
-  }
-  return [...groups.values()]
-}
-
-function createReferralUrl(code) {
-  const url = new URL('/', window.location.origin)
-  url.searchParams.set('mode', 'register')
-  url.searchParams.set('referralCode', code)
-  return url.toString()
 }
 
 function StatusBadge({ status }) {
@@ -365,45 +342,46 @@ function EngagementChart({ engagement, period }) {
 
 function CourseCompletionChart({ courseCompletion }) {
   const metrics = [
-    { label: 'Completed students', value: courseCompletion?.completedStudents, tone: 'completed' },
-    { label: 'In Progress students', value: courseCompletion?.inProgressStudents, tone: 'in-progress' },
-    { label: 'Not Started students', value: courseCompletion?.notStartedStudents, tone: 'not-started' },
+    { label: 'Completed Courses', value: courseCompletion?.completedEnrollments, tone: 'completed' },
+    { label: 'In-Progress Courses', value: courseCompletion?.inProgressEnrollments, tone: 'in-progress' },
+    { label: 'Not-Started Courses', value: courseCompletion?.notStartedEnrollments, tone: 'not-started' },
   ].map((metric) => ({
     ...metric,
     value: Number.isSafeInteger(metric.value) && metric.value >= 0 ? metric.value : null,
   }))
+  const totalEligibleEnrollments = courseCompletion?.totalEnrollments
   const hasCompleteData = metrics.every(({ value }) => value !== null)
-  const enrolledStudents = hasCompleteData
-    ? metrics.reduce((total, { value }) => total + value, 0)
-    : 0
-  const completionPercentage = hasCompleteData && enrolledStudents
-    ? (metrics[0].value / enrolledStudents) * 100
+    && Number.isSafeInteger(totalEligibleEnrollments)
+    && totalEligibleEnrollments >= 0
+    && metrics.reduce((total, { value }) => total + value, 0) === totalEligibleEnrollments
+  const completionPercentage = hasCompleteData && totalEligibleEnrollments
+    ? (metrics[0].value / totalEligibleEnrollments) * 100
     : hasCompleteData ? 0 : null
-  const completionAngle = enrolledStudents ? (metrics[0].value / enrolledStudents) * 360 : 0
-  const progressAngle = enrolledStudents
-    ? ((metrics[0].value + metrics[1].value) / enrolledStudents) * 360
+  const completionAngle = totalEligibleEnrollments ? (metrics[0].value / totalEligibleEnrollments) * 360 : 0
+  const progressAngle = totalEligibleEnrollments
+    ? ((metrics[0].value + metrics[1].value) / totalEligibleEnrollments) * 360
     : 0
   const formatPercentage = (value) => value === null ? '—' : `${Number(value.toFixed(1))}%`
 
   return (
-    <div className="admin-completion" role="group" aria-label="Student course progress">
+    <div className="admin-completion" role="group" aria-label="Enrolled course progress">
       <div
-        className={`admin-completion__donut${hasCompleteData && enrolledStudents ? '' : ' is-empty'}`}
-        style={hasCompleteData && enrolledStudents ? {
+        className={`admin-completion__donut${hasCompleteData && totalEligibleEnrollments ? '' : ' is-empty'}`}
+        style={hasCompleteData && totalEligibleEnrollments ? {
           '--completion-completed-angle': `${completionAngle}deg`,
           '--completion-progress-angle': `${progressAngle}deg`,
         } : undefined}
         role="img"
-        aria-label={`Overall completion ${formatPercentage(completionPercentage)}. ${metrics
+        aria-label={`Overall course completion ${formatPercentage(completionPercentage)}. ${metrics
           .map(({ label, value }) => `${label}: ${value === null ? 'Unavailable' : value}`)
           .join(', ')}`}
       >
         <div className="admin-completion__center">
           <strong>{formatPercentage(completionPercentage)}</strong>
-          <span>complete</span>
+          <span>courses</span>
         </div>
       </div>
-      <ul className="admin-completion__legend" aria-label="Student progress breakdown">
+      <ul className="admin-completion__legend" aria-label="Course progress breakdown">
         {metrics.map(({ label, value, tone }) => (
           <li className={`admin-completion__legend-item is-${tone}`} key={label}>
             <span className="admin-completion__swatch" aria-hidden="true" />
@@ -413,7 +391,7 @@ function CourseCompletionChart({ courseCompletion }) {
               {formatPercentage(
                 value === null || completionPercentage === null
                   ? null
-                  : enrolledStudents ? (value / enrolledStudents) * 100 : 0,
+                  : totalEligibleEnrollments ? (value / totalEligibleEnrollments) * 100 : 0,
               )}
             </span>
           </li>
@@ -559,8 +537,9 @@ function AdminDashboard({
   const [engagementRetry, setEngagementRetry] = useState(0)
   const [activeView, setActiveView] = useState(() => {
     const requestedView = new URLSearchParams(location.search).get('section')
-    if (['feedback', 'notifications'].includes(requestedView)) return requestedView
+    if (['feedback', 'notifications', 'reports'].includes(requestedView)) return requestedView
     if (location.pathname.startsWith('/admin/support')) return 'complaints'
+    if (location.pathname.startsWith('/admin/profile')) return 'profile'
     return location.pathname.startsWith('/admin/settings')
       ? 'settings' : 'overview'
   })
@@ -584,9 +563,6 @@ function AdminDashboard({
   const [studentDetailsError, setStudentDetailsError] = useState('')
   const [studentDetailsLoading, setStudentDetailsLoading] = useState(false)
   const [studentDetailsRetry, setStudentDetailsRetry] = useState(0)
-  const [selectedReferralCode, setSelectedReferralCode] = useState(null)
-  const [copiedReferralCode, setCopiedReferralCode] = useState('')
-  const [referralLinkError, setReferralLinkError] = useState('')
   const [referralCodesStudent, setReferralCodesStudent] = useState(null)
   const [referralCodes, setReferralCodes] = useState([])
   const [referralCodesLoading, setReferralCodesLoading] = useState(false)
@@ -626,10 +602,15 @@ function AdminDashboard({
   const [bulkDataAction, setBulkDataAction] = useState('')
   const [search, setSearch] = useState('')
   const [profileOpen, setProfileOpen] = useState(false)
+  const [notificationOpen, setNotificationOpen] = useState(false)
+  const [unreadNotificationCount, setUnreadNotificationCount] = useState(0)
+  const [notificationCountError, setNotificationCountError] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
   const [mobileSearchOpen, setMobileSearchOpen] = useState(false)
   const searchInputRef = useRef(null)
+  const notificationMenuRef = useRef(null)
   const studentDataActionsRef = useRef(null)
+  const profileMenuRef = useRef(null)
   const [colleges, setColleges] = useState([])
   const [reportColleges, setReportColleges] = useState([])
   const [reportCollegesError, setReportCollegesError] = useState('')
@@ -663,6 +644,55 @@ function AdminDashboard({
   const [isSavingBulkEdit, setIsSavingBulkEdit] = useState(false)
   const [isBulkDeleteConfirmOpen, setIsBulkDeleteConfirmOpen] = useState(false)
   const [isDeletingBulkStudents, setIsDeletingBulkStudents] = useState(false)
+
+  const refreshUnreadNotificationCount = useCallback(async (signal) => {
+    try {
+      const storedAuth = sessionStorage.getItem('lms.auth')
+      const auth = storedAuth ? JSON.parse(storedAuth) : null
+      if (auth?.user?.role !== 'main_admin' || typeof auth.token !== 'string') {
+        onLogout()
+        return
+      }
+      const response = await fetch(`${API_BASE_URL}/notifications/me`, {
+        headers: { Authorization: `Bearer ${auth.token}` },
+        signal,
+      })
+      const result = await readResponse(response, onLogout)
+      if (!Array.isArray(result.notifications)) {
+        throw new Error('The server returned invalid notifications.')
+      }
+      const unreadCount = Number.isSafeInteger(result.unreadCount) && result.unreadCount >= 0
+        ? result.unreadCount
+        : result.notifications.filter((notification) => notification.isRead !== true && !notification.readAt).length
+      setUnreadNotificationCount(unreadCount)
+      setNotificationCountError('')
+    } catch (error) {
+      if (error instanceof Error && error.name !== 'AbortError') {
+        setNotificationCountError(error.message)
+      }
+    }
+  }, [onLogout])
+  const handleUnreadCountChange = useCallback((count) => {
+    setUnreadNotificationCount((current) => (
+      typeof count === 'function' ? count(current) : count
+    ))
+    setNotificationCountError('')
+  }, [])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    const refresh = () => {
+      if (document.visibilityState === 'visible') void refreshUnreadNotificationCount()
+    }
+    void refreshUnreadNotificationCount(controller.signal)
+    const intervalId = window.setInterval(refresh, 60_000)
+    window.addEventListener('focus', refresh)
+    return () => {
+      controller.abort()
+      window.clearInterval(intervalId)
+      window.removeEventListener('focus', refresh)
+    }
+  }, [refreshUnreadNotificationCount])
 
   const loadOverview = useCallback(async (signal) => {
     setIsLoading(true)
@@ -719,6 +749,48 @@ function AdminDashboard({
   }, [bulkDataMenuOpen, singleDataMenuOpen])
 
   useEffect(() => {
+    if (!notificationOpen) return undefined
+
+    function closeOnOutsideClick(event) {
+      if (!notificationMenuRef.current?.contains(event.target)) setNotificationOpen(false)
+    }
+
+    function closeOnEscape(event) {
+      if (event.key === 'Escape') setNotificationOpen(false)
+    }
+
+    document.addEventListener('pointerdown', closeOnOutsideClick)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsideClick)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [notificationOpen])
+
+  useEffect(() => {
+    if (!profileOpen) return undefined
+
+    function closeProfileMenuOnOutsideClick(event) {
+      if (!profileMenuRef.current?.contains(event.target)) {
+        setProfileOpen(false)
+      }
+    }
+
+    function closeProfileMenuOnEscape(event) {
+      if (event.key === 'Escape') {
+        setProfileOpen(false)
+      }
+    }
+
+    document.addEventListener('pointerdown', closeProfileMenuOnOutsideClick)
+    document.addEventListener('keydown', closeProfileMenuOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeProfileMenuOnOutsideClick)
+      document.removeEventListener('keydown', closeProfileMenuOnEscape)
+    }
+  }, [profileOpen])
+
+  useEffect(() => {
     const controller = new AbortController()
     loadOverview(controller.signal)
     return () => controller.abort()
@@ -731,7 +803,7 @@ function AdminDashboard({
       setActiveView('settings')
     } else if (location.pathname.startsWith('/admin/dashboard')) {
       const requestedView = new URLSearchParams(location.search).get('section')
-      if (['feedback', 'notifications'].includes(requestedView)) {
+      if (['feedback', 'notifications', 'reports'].includes(requestedView)) {
         setActiveView(requestedView)
       } else {
         setActiveView((current) => current === 'settings' ? 'overview' : current)
@@ -1087,9 +1159,6 @@ function AdminDashboard({
       setStudentDetails(null)
       setStudentDetailsError('')
       setStudentDetailsLoading(false)
-      setSelectedReferralCode(null)
-      setCopiedReferralCode('')
-      setReferralLinkError('')
       return undefined
     }
 
@@ -1140,7 +1209,6 @@ function AdminDashboard({
   }, [onLogout, selectedStudent, studentDetailsRetry])
 
   function openStudentDetails(student) {
-    setSelectedReferralCode(null)
     setSelectedStudent(student)
   }
 
@@ -1176,17 +1244,6 @@ function AdminDashboard({
       }
     } finally {
       if (requestId === referralCodesRequestRef.current) setReferralCodesLoading(false)
-    }
-  }
-
-  async function copyReferralUrl(code) {
-    try {
-      await navigator.clipboard.writeText(createReferralUrl(code))
-      setCopiedReferralCode(code)
-      setReferralLinkError('')
-    } catch {
-      setCopiedReferralCode('')
-      setReferralLinkError('The referral link could not be copied. Please copy the link manually.')
     }
   }
 
@@ -1602,6 +1659,9 @@ function AdminDashboard({
       const result = await readResponse(response, onLogout)
       setStudentToDelete(null)
       if (selectedStudent?._id === studentToDelete._id) setSelectedStudent(null)
+      setStudents((current) => current.filter((student) => String(student._id) !== String(studentToDelete._id)))
+      setStudentManageStudents((current) => current.filter((student) => String(student._id) !== String(studentToDelete._id)))
+      setStudentTotal((current) => Math.max(0, current - 1))
       setStudentActionMessage(result.message || 'Student and related records deleted.')
       setStudentPage(1)
       setStudentsRetry((retry) => retry + 1)
@@ -1739,14 +1799,21 @@ function AdminDashboard({
 
   function selectView(view) {
     if (view === 'logout') {
+      setProfileOpen(false)
       onLogout()
       return
     }
     if (view === 'settings') {
+      setProfileOpen(false)
       navigate('/admin/settings')
       return
     }
-    if (location.pathname.startsWith('/admin/support') || location.pathname.startsWith('/admin/settings')) {
+    if (view === 'profile') {
+      setProfileOpen(false)
+      navigate('/admin/profile')
+      return
+    }
+    if (location.pathname.startsWith('/admin/support') || location.pathname.startsWith('/admin/settings') || location.pathname.startsWith('/admin/profile')) {
       navigate('/admin/dashboard')
     }
     setActiveView(view)
@@ -1763,6 +1830,24 @@ function AdminDashboard({
     }
   }
 
+  function handleMyProfileClick(event) {
+    if (event) {
+      event.preventDefault()
+      event.stopPropagation()
+    }
+    setProfileOpen(false)
+    navigate('/admin/profile')
+  }
+
+  function handleLogoutClick(event) {
+    if (event) {
+      event.preventDefault()
+      event.stopPropagation()
+    }
+    setProfileOpen(false)
+    onLogout()
+  }
+
   const stats = overview?.stats
   const viewTitles = {
     overview: 'Admin Dashboard',
@@ -1770,32 +1855,28 @@ function AdminDashboard({
     'independent-approvals': 'Student Approval',
     colleges: 'Colleges',
     courses: 'Course Management',
-    resources: 'Resource Management',
     enrollments: 'Enrollments',
     reports: 'Reports & Analytics',
     notifications: 'Notifications',
     feedback: 'Feedback',
     complaints: 'Complaints',
     settings: 'Settings',
+    profile: 'Admin Profile',
   }
   const isDrawerViewport = window.matchMedia('(max-width: 1024px)').matches
 
   return (
     <div className={`admin-app is-main-admin${sidebarCollapsed ? ' admin-app--sidebar-collapsed' : ''}`} data-theme={isDark ? 'dark' : 'light'} data-active-view={activeView}>
       {sidebarOpen && (
-        <button
+        <div
           className="admin-backdrop"
-          type="button"
-          aria-label="Close navigation"
-          onClick={() => {
-            setSidebarOpen(false)
-            setSidebarCollapsed(true)
-          }}
+          aria-hidden="true"
         />
       )}
       <aside className={`admin-sidebar${sidebarOpen ? ' admin-sidebar--open' : ''}`}>
         <a className="admin-brand" href="/admin/dashboard" onClick={(event) => { event.preventDefault(); selectView('overview') }}>
-          <img className="admin-brand__image" src="/logo.png" alt="LMS logo" />
+          <img className="admin-brand__image" src="/logo.png" alt="aiHustle" />
+          <span className="admin-brand__tagline">LEARN. GROW. BECOME.</span>
         </a>
         <nav className="admin-nav" aria-label="Admin navigation">
           {navigation.map((item) => (
@@ -1806,18 +1887,9 @@ function AdminDashboard({
                   className={`admin-nav__item${activeView === item.id ? ' is-active' : ''}`}
                   to={item.to}
                   aria-current={activeView === item.id ? 'page' : undefined}
-                  onClick={() => {
-                    if (isDrawerViewport) {
-                      setSidebarOpen(false)
-                      setSidebarCollapsed(true)
-                    }
-                  }}
                 >
                   <span className="admin-nav__icon"><AdminNavigationIcon name={item.id} /></span>
                   <span>{item.label}</span>
-                  {item.id === 'support-tickets' && overview?.statistics?.pendingSupportTickets > 0 && (
-                    <span className="admin-nav__count">{overview.statistics.pendingSupportTickets}</span>
-                  )}
                 </Link>
               ) : (
                 <button
@@ -1833,9 +1905,6 @@ function AdminDashboard({
             </React.Fragment>
           ))}
         </nav>
-        <div className="admin-sidebar__bottom">
-          <div className="admin-sidebar__help"><span>✦</span><strong>Need a hand?</strong><small>Help center and support</small></div>
-        </div>
       </aside>
 
       <main className="admin-main">
@@ -1947,15 +2016,84 @@ function AdminDashboard({
                 </svg>
               )}
             </button>
-            <button type="button" className="admin-icon-button" aria-label="Notifications" onClick={() => selectView('notifications')}>
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" />
-              </svg>
-              <i />
-            </button>
-            <div className="admin-profile-menu" onBlur={(event) => {
-              if (!event.currentTarget.contains(event.relatedTarget)) setProfileOpen(false)
-            }}>
+            <div className="admin-notification-menu" ref={notificationMenuRef}>
+              <button
+                type="button"
+                className="admin-icon-button"
+                aria-label={notificationCountError
+                  ? 'Notifications, unread count unavailable'
+                  : unreadNotificationCount
+                    ? `Notifications, ${unreadNotificationCount} unread`
+                    : 'Notifications'}
+                title={notificationCountError || undefined}
+                aria-haspopup="dialog"
+                aria-expanded={notificationOpen}
+                aria-controls="admin-notification-dropdown"
+                onClick={() => {
+                  setNotificationOpen((open) => !open)
+                  void refreshUnreadNotificationCount()
+                }}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" />
+                </svg>
+                {unreadNotificationCount > 0 && (
+                  <span className="admin-notification-count" aria-hidden="true">
+                    {unreadNotificationCount > 99 ? '99+' : unreadNotificationCount}
+                  </span>
+                )}
+              </button>
+              {notificationOpen && (
+                <section
+                  className="admin-notification-dropdown"
+                  id="admin-notification-dropdown"
+                  role="dialog"
+                  aria-label="Recent notifications"
+                >
+                  <header className="admin-notification-dropdown__header">
+                    <h2>Recent notifications</h2>
+                    <button
+                      type="button"
+                      aria-label="Close notifications"
+                      onClick={() => setNotificationOpen(false)}
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="m6 6 12 12M18 6 6 18" />
+                      </svg>
+                    </button>
+                  </header>
+                  <div className="admin-notification-dropdown__body">
+                    <NotificationFeed
+                      role="main_admin"
+                      onLogout={onLogout}
+                      limit={5}
+                      onUnreadCountChange={handleUnreadCountChange}
+                      onOpenApprovals={(studentId) => {
+                        setApprovalStudentIdToOpen(typeof studentId === 'string' ? studentId : '')
+                        setNotificationOpen(false)
+                        selectView('independent-approvals')
+                      }}
+                      onOpenAssignmentReviews={() => {
+                        setNotificationOpen(false)
+                        selectView('reports')
+                      }}
+                    />
+                  </div>
+                  <footer className="admin-notification-dropdown__footer">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setNotificationOpen(false)
+                        selectView('notifications')
+                      }}
+                    >
+                      View all notifications
+                    </button>
+                  </footer>
+                </section>
+              )}
+            </div>
+            <div className="admin-profile-menu" ref={profileMenuRef}>
               <button
                 type="button"
                 className="admin-profile"
@@ -1963,7 +2101,13 @@ function AdminDashboard({
                 aria-expanded={profileOpen}
                 onClick={() => setProfileOpen((open) => !open)}
               >
-                <span className="admin-avatar">{(email || 'A').slice(0, 1).toUpperCase()}</span>
+                <span className="admin-avatar">
+                  {user?.avatarUrl ? (
+                    <img src={user.avatarUrl} alt="Avatar" className="admin-avatar__img" />
+                  ) : (
+                    (email || 'A').slice(0, 1).toUpperCase()
+                  )}
+                </span>
                 <span className="admin-profile__label"><strong>Administrator</strong></span>
                 <span className="admin-profile__chevron">⌄</span>
               </button>
@@ -1971,7 +2115,26 @@ function AdminDashboard({
                 <div className="admin-profile-dropdown" role="menu">
                   <strong>Administrator</strong>
                   <span className="admin-profile-dropdown__email">{email || 'Email unavailable'}</span>
-                  <button type="button" role="menuitem" onClick={onLogout}>Logout</button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="admin-profile-dropdown__profile-btn"
+                    onClick={handleMyProfileClick}
+                  >
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                      <circle cx="12" cy="7" r="4" />
+                    </svg>
+                    <span>My Profile</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="admin-profile-dropdown__logout"
+                    onClick={handleLogoutClick}
+                  >
+                    Logout
+                  </button>
                 </div>
               )}
             </div>
@@ -2054,7 +2217,7 @@ function AdminDashboard({
                 </article>
                 <article className="admin-panel">
                   <div className="admin-panel__heading">
-                    <div><h2>Course Completion</h2><p>Progress across enrolled students</p></div>
+                    <div><h2>Course Completion</h2><p>Progress across eligible course enrollments</p></div>
                     <span className="admin-panel__period">All courses</span>
                   </div>
                   {isLoading
@@ -2576,7 +2739,6 @@ function AdminDashboard({
 
           {activeView === 'colleges' && <CollegesManagement onLogout={onLogout} />}
           {activeView === 'courses' && <AdminCourseManagement onLogout={onLogout} />}
-          {activeView === 'resources' && <AdminResourcesManagement onLogout={onLogout} />}
           {activeView === 'enrollments' && <EnrollmentManagement onLogout={onLogout} />}
           {activeView === 'independent-approvals' && (
             <IndependentStudentApprovals
@@ -2601,6 +2763,16 @@ function AdminDashboard({
           )}
           {activeView === 'feedback' && <AdminFeedback />}
 
+          {activeView === 'profile' && (
+            <AdminProfilePage
+              user={user}
+              onAccountUpdated={onAccountUpdated}
+              onLogout={onLogout}
+              isDark={isDark}
+              onBack={() => selectView('overview')}
+            />
+          )}
+
           {['reports', 'notifications', 'settings'].includes(activeView) && (
             <div className="admin-data-page">
               <section className="admin-page-heading admin-page-heading--compact">
@@ -2617,11 +2789,14 @@ function AdminDashboard({
                 </div>
               </section>
               {activeView === 'settings'
-                ? <SettingsPage user={user} onAccountUpdated={onAccountUpdated} themePreference={themePreference} onSetTheme={onSetTheme} />
+                ? <SettingsPage user={user} onAccountUpdated={onAccountUpdated} themePreference={themePreference} onSetTheme={onSetTheme} onLogout={onLogout} />
                 : (
                   <section className="admin-panel admin-view-panel">
                     {activeView === 'reports'
-                      ? <AdminProgressReports onLogout={onLogout} />
+                      ? <>
+                        <AdminAssignmentReviews onLogout={onLogout} />
+                        <AdminProgressReports onLogout={onLogout} />
+                      </>
                       : activeView === 'notifications'
                         ? <NotificationFeed
                           role="main_admin"
@@ -2630,6 +2805,7 @@ function AdminDashboard({
                             setApprovalStudentIdToOpen(typeof studentId === 'string' ? studentId : '')
                             selectView('independent-approvals')
                           }}
+                          onOpenAssignmentReviews={() => selectView('reports')}
                         />
                         : <EmptyState title={`${viewTitles[activeView]} are not connected`}>This section will show live LMS data when its backend API is available.</EmptyState>}
                   </section>
@@ -2966,149 +3142,7 @@ function AdminDashboard({
                     <div><dt>College ID</dt><dd>{studentDetails.student.studentType === 'college' ? studentDetails.student.collegeId || 'No data available yet' : 'Not Applicable'}</dd></div>
                     <div><dt>Registration Date</dt><dd>{studentDetails.student.createdAt ? formatDate(studentDetails.student.createdAt) : 'No data available yet'}</dd></div>
                     <div><dt>Account Status</dt><dd><StatusBadge status={studentDetails.student.status} /></dd></div>
-                    {studentDetails.student.studentType === 'independent' && (
-                      <div>
-                        <dt>How they heard about us</dt>
-                        <dd>
-                          {studentDetails.student.hearAboutUs
-                            ? studentDetails.student.hearAboutUs === 'Other' && studentDetails.student.hearAboutUsOther
-                              ? `Other (${studentDetails.student.hearAboutUsOther})`
-                              : studentDetails.student.hearAboutUs
-                            : 'Not specified'}
-                        </dd>
-                      </div>
-                    )}
                   </dl>
-                </section>
-
-                <section className="admin-student-detail-section" aria-labelledby="admin-student-referral-title">
-                  <div className="admin-student-detail-section__heading">
-                    <h3 id="admin-student-referral-title">Referral Details</h3>
-                  </div>
-                  {selectedReferralCode ? (
-                    <div className="admin-referral-detail">
-                      <div className="admin-referral-detail__actions">
-                        <button
-                          type="button"
-                          className="admin-button admin-button--secondary"
-                          onClick={() => {
-                            setSelectedReferralCode(null)
-                            setReferralLinkError('')
-                          }}
-                        >Back to referral codes</button>
-                        <StatusBadge status={selectedReferralCode.status} />
-                      </div>
-                      <h4>Referral Information</h4>
-                      <dl className="admin-student-details">
-                        <div><dt>Referral Code</dt><dd><code>{selectedReferralCode.code}</code></dd></div>
-                        <div><dt>Generated By - Student Name</dt><dd>{selectedReferralCode.generatedBy.fullName || 'Not provided'}</dd></div>
-                        <div><dt>Generated By - Student ID</dt><dd>{selectedReferralCode.generatedBy.studentId || 'Not provided'}</dd></div>
-                        <div><dt>Generated Date and Time</dt><dd>{formatDateTime(selectedReferralCode.createdAt)}</dd></div>
-                        <div><dt>Expiry Date and Time</dt><dd>{formatDateTime(selectedReferralCode.expiresAt)}</dd></div>
-                        <div><dt>Referral Status</dt><dd><StatusBadge status={selectedReferralCode.status} /></dd></div>
-                      </dl>
-
-                      <h4>Referral Link</h4>
-                      <div className="admin-referral-link">
-                        <a href={createReferralUrl(selectedReferralCode.code)} target="_blank" rel="noreferrer">
-                          {createReferralUrl(selectedReferralCode.code)}
-                        </a>
-                        <button
-                          type="button"
-                          className="admin-button admin-button--secondary"
-                          onClick={() => copyReferralUrl(selectedReferralCode.code)}
-                        >{copiedReferralCode === selectedReferralCode.code ? 'Copied' : 'Copy Link'}</button>
-                      </div>
-                      {referralLinkError && <p className="admin-inline-error" role="alert">{referralLinkError}</p>}
-
-                      <h4>Referral Summary</h4>
-                      <div className="admin-student-course-summary">
-                        {[
-                          ['Total Referrals', selectedReferralCode.referredStudents.length, 'sage'],
-                          ['Successful Registrations', selectedReferralCode.referredStudents.filter(({ status }) => status === 'Approved').length, 'teal'],
-                          ['Pending Registrations', selectedReferralCode.referredStudents.filter(({ status }) => status === 'Pending').length, 'gold'],
-                        ].map(([label, count, tone]) => (
-                          <article className={`admin-student-course-summary__card is-${tone}`} key={label}>
-                            <span>{label}</span>
-                            <strong>{count}</strong>
-                          </article>
-                        ))}
-                      </div>
-
-                      <h4>Students Joined Through This Code</h4>
-                      {selectedReferralCode.referredStudents.length ? (
-                        <div className="admin-table-wrap">
-                          <table className="admin-table">
-                            <thead>
-                              <tr><th>Student Name</th><th>Student ID</th><th>Email Address</th><th>Registration Date</th><th>Account Status</th></tr>
-                            </thead>
-                            <tbody>
-                              {selectedReferralCode.referredStudents.map((referredStudent) => (
-                                <tr key={referredStudent.id}>
-                                  <td>{referredStudent.fullName || 'Student record unavailable'}</td>
-                                  <td>{referredStudent.studentId || 'Not provided'}</td>
-                                  <td>{referredStudent.email || 'Not provided'}</td>
-                                  <td>{formatDateTime(referredStudent.registeredAt)}</td>
-                                  <td><StatusBadge status={referredStudent.status} /></td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      ) : <p className="admin-student-no-data">No students referred yet</p>}
-                    </div>
-                  ) : (
-                    <>
-                      <div className="admin-student-course-summary">
-                        {[
-                          ['Total Students Referred', studentDetails.summary.studentsReferred ?? 0, 'sage'],
-                          ['Successful Registrations', studentDetails.summary.successfulReferrals ?? 0, 'teal'],
-                          ['Pending Registrations', studentDetails.summary.pendingReferrals ?? 0, 'gold'],
-                        ].map(([label, count, tone]) => (
-                          <article className={`admin-student-course-summary__card is-${tone}`} key={label}>
-                            <span>{label}</span>
-                            <strong>{count}</strong>
-                          </article>
-                        ))}
-                      </div>
-
-                      <h4>Referral Codes Generated</h4>
-                      {studentDetails.referralDetails?.codes?.length ? (
-                        groupReferralCodesByDate(studentDetails.referralDetails.codes).map(({ label, codes }) => (
-                          <div className="admin-referral-group" key={label}>
-                            <h4>{label}</h4>
-                            <div className="admin-table-wrap">
-                              <table className="admin-table">
-                                <thead>
-                                  <tr><th>Referral Code</th><th>Date Generated</th><th>Expires</th><th>Status</th></tr>
-                                </thead>
-                                <tbody>
-                                  {codes.map((code) => (
-                                    <tr key={code.code}>
-                                      <td>
-                                        <a
-                                          className="admin-referral-code-link"
-                                          href={`#referral-${encodeURIComponent(code.code)}`}
-                                          onClick={(event) => {
-                                            event.preventDefault()
-                                            setSelectedReferralCode(code)
-                                            setReferralLinkError('')
-                                          }}
-                                        >{code.code}</a>
-                                      </td>
-                                      <td>{formatDateTime(code.createdAt)}</td>
-                                      <td>{formatDateTime(code.expiresAt)}</td>
-                                      <td><StatusBadge status={code.status} /></td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          </div>
-                        ))
-                      ) : <p className="admin-student-no-data">No referral code generated</p>}
-                    </>
-                  )}
                 </section>
 
                 <section className="admin-student-detail-section" aria-labelledby="admin-student-course-summary-title">
@@ -3127,6 +3161,50 @@ function AdminDashboard({
                       </article>
                     ))}
                   </div>
+                </section>
+
+                <section className="admin-student-detail-section" aria-labelledby="admin-student-referral-title">
+                  <div className="admin-student-detail-section__heading">
+                    <h3 id="admin-student-referral-title">Referral Details</h3>
+                  </div>
+                  <div className="admin-student-course-summary">
+                    {[
+                      ['Total Students Referred', studentDetails.summary.studentsReferred ?? 0, 'sage'],
+                      ['Successful Registrations', studentDetails.summary.successfulReferrals ?? 0, 'teal'],
+                      ['Pending Registrations', studentDetails.summary.pendingReferrals ?? 0, 'gold'],
+                    ].map(([label, count, tone]) => (
+                      <article className={`admin-student-course-summary__card is-${tone}`} key={label}>
+                        <span>{label}</span>
+                        <strong>{count}</strong>
+                      </article>
+                    ))}
+                  </div>
+
+                  <h4>Referral Code Used</h4>
+                  {studentDetails.student.referralCodeUsed ? (
+                    <dl className="admin-student-details">
+                      <div>
+                        <dt>Referral Code</dt>
+                        <dd><code>{studentDetails.student.referralCodeUsed}</code></dd>
+                      </div>
+                      <div>
+                        <dt>Referred By</dt>
+                        <dd>{studentDetails.student.referralCodeOwner?.fullName || 'Referrer information unavailable'}</dd>
+                      </div>
+                      {studentDetails.student.referralCodeOwner?.studentId && (
+                        <div>
+                          <dt>Referrer Student ID</dt>
+                          <dd>{studentDetails.student.referralCodeOwner.studentId}</dd>
+                        </div>
+                      )}
+                      {studentDetails.student.referralCodeOwner?.email && (
+                        <div>
+                          <dt>Referrer Email</dt>
+                          <dd>{studentDetails.student.referralCodeOwner.email}</dd>
+                        </div>
+                      )}
+                    </dl>
+                  ) : <p className="admin-student-no-data">No referral code used</p>}
                 </section>
 
               </>
@@ -3404,7 +3482,7 @@ function AdminDashboard({
                   This permanently deletes this student account, its login identity, and enrollment records.
                   Course records will remain.
                 </p>
-                <dl className="admin-student-delete-summary">
+                <dl className="admin-student-details admin-student-delete-summary">
                   <div><dt>Name</dt><dd>{studentToDelete.fullName || 'Unnamed student'}</dd></div>
                   <div><dt>ID / Username</dt><dd>{studentToDelete.studentId || studentToDelete.username || 'Not available'}</dd></div>
                   <div><dt>Email</dt><dd>{studentToDelete.email || 'Not available'}</dd></div>

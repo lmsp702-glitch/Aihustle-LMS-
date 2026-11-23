@@ -8,18 +8,17 @@ import { config } from '../config/env.js'
 import AccountIdentity from '../models/AccountIdentity.js'
 import Notification from '../models/Notification.js'
 import RegistrationEmailVerification from '../models/RegistrationEmailVerification.js'
+import PasswordResetToken from '../models/PasswordResetToken.js'
 import {
   accountModelsByCollection,
   accountModelsByRole,
   CollegeAdmin,
-  Student,
   matchesStoredAccountRole,
   roleForAccountCollection,
 } from '../models/account-models.js'
 import { authenticate, requireRoles } from '../middleware/auth.js'
 import ReferralCode from '../models/ReferralCode.js'
 import RefreshSession from '../models/RefreshSession.js'
-import { sendNotification } from '../utils/notification-service.js'
 import { findTakenEmails, findTakenUsernames } from '../utils/account-identity-availability.js'
 import {
   cancelStudentOtp,
@@ -36,6 +35,8 @@ import {
 } from '../utils/independent-approval.js'
 import {
   logEmailDeliveryFailure,
+  requireClientOrigin,
+  sendPasswordResetEmail,
   sendRegistrationEmailVerificationCodeEmail,
   sendStudentRegistrationConfirmationEmail,
 } from '../utils/email.js'
@@ -49,18 +50,6 @@ import {
 
 const router = Router()
 const registrationRoles = new Set(['student'])
-export const HEAR_ABOUT_US_OPTIONS = [
-  'College / University Referral',
-  'Friend / Student Referral',
-  'Social Media',
-  'Online Advertisement',
-  'Google / Search Engine',
-  'YouTube',
-  'College Event / Workshop',
-  'Other Website / Blog',
-  'Other',
-]
-const hearAboutUsSet = new Set(HEAR_ABOUT_US_OPTIONS)
 const usernamePattern = /^[a-zA-Z0-9._-]{3,30}$/
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const usernameCheckRateLimits = new Map()
@@ -75,6 +64,24 @@ const registrationEmailRequestWindowMs = 60 * 60 * 1000
 const registrationEmailMaxAttempts = 5
 const refreshCookieName = 'lms.refresh'
 const refreshTokenLifetimeMs = 7 * 24 * 60 * 60 * 1000
+const passwordResetRateLimits = new Map()
+const passwordResetWindowMs = 15 * 60 * 1000
+const passwordResetMaxRequests = 5
+
+function checkPasswordResetRateLimit(key) {
+  const now = Date.now()
+  const entry = passwordResetRateLimits.get(key)
+  if (!entry || now - entry.windowStart > passwordResetWindowMs) {
+    passwordResetRateLimits.set(key, { count: 1, windowStart: now })
+    return { allowed: true }
+  }
+  if (entry.count >= passwordResetMaxRequests) {
+    const retryAfterSeconds = Math.ceil((entry.windowStart + passwordResetWindowMs - now) / 1000)
+    return { allowed: false, retryAfterSeconds }
+  }
+  entry.count += 1
+  return { allowed: true }
+}
 
 const allowedRoles = new Set(['main_admin', 'college_admin', 'student'])
 const protectedRegistrationField = /(password|token|secret|credential|auth|otp|hash)/i
@@ -171,15 +178,12 @@ function readRefreshCookie(req) {
   return cookie ? cookie.slice(prefix.length) : ''
 }
 
-export function clearRefreshCookie(res) {
+function clearRefreshCookie(res) {
   const { maxAge, ...options } = refreshCookieOptions()
   res.clearCookie(refreshCookieName, options)
 }
 
 async function issueStudentRefreshSession(user, accountCollection, res) {
-  if (mongoose.connection.readyState === 0 && RefreshSession.create === mongoose.Model.create) {
-    return
-  }
   const refreshToken = randomBytes(32).toString('base64url')
   const expiresAt = new Date(Date.now() + refreshTokenLifetimeMs)
   await RefreshSession.create({
@@ -206,17 +210,13 @@ function serializeAccount(user, role = user.role) {
     email: user.email,
     role,
     status: user.status,
-    isActive: typeof user.isActive === 'boolean' ? user.isActive : user.status === 'active',
     collegeId: user.collegeId ? String(user.collegeId) : undefined,
     studentType: user.studentType,
-    approvalStatus: user.approvalStatus,
     ...(role === 'student'
       ? {
           twoFactorEnabled: user.twoFactorEnabled === true,
           twoFactorEnabledAt: user.twoFactorEnabledAt || null,
           approvalStatus: user.approvalStatus,
-          hearAboutUs: user.hearAboutUs || undefined,
-          hearAboutUsOther: user.hearAboutUsOther || undefined,
         }
       : {}),
   }
@@ -331,7 +331,20 @@ router.post('/registration/email/send', async (req, res, next) => {
     const now = new Date()
     let verification = await RegistrationEmailVerification.findOne({ email }).select('+hashedOtp')
     if (verification?.consumedAt) {
-      return res.status(409).json({ message: 'An account with this email already exists.' })
+      const currentTakenEmails = await findTakenEmails([email])
+      if (currentTakenEmails.has(email)) {
+        return res.status(409).json({ message: 'An account with this email already exists.' })
+      }
+
+      const staleVerification = await RegistrationEmailVerification.deleteOne({
+        _id: verification._id,
+        email,
+        consumedAt: verification.consumedAt,
+      })
+      if (staleVerification.deletedCount !== 1) {
+        return res.status(409).json({ message: 'An account with this email already exists.' })
+      }
+      verification = null
     }
     if (
       verification &&
@@ -389,7 +402,7 @@ router.post('/registration/email/send', async (req, res, next) => {
       verification = await RegistrationEmailVerification.findOneAndUpdate(
         { _id: verification._id, lastSentAt: previousLastSentAt, consumedAt: null },
         { $set: verificationData },
-        { new: true },
+        { returnDocument: 'after' },
       )
       if (!verification) {
         return res.status(429).json({
@@ -500,7 +513,7 @@ router.post('/registration/email/verify', async (req, res, next) => {
           attempts: { $lt: registrationEmailMaxAttempts },
         },
         { $inc: { attempts: 1 } },
-        { new: true },
+        { returnDocument: 'after' },
       )
       if (!updated || updated.attempts >= registrationEmailMaxAttempts) {
         await RegistrationEmailVerification.updateOne(
@@ -529,7 +542,7 @@ router.post('/registration/email/verify', async (req, res, next) => {
           cleanupAt: new Date(now.getTime() + registrationEmailCleanupLifetimeMs),
         },
       },
-      { new: true },
+      { returnDocument: 'after' },
     )
     if (!verified) {
       return res.status(400).json({ message: 'This verification code is no longer valid. Please request a new code.' })
@@ -564,8 +577,6 @@ router.post('/register', async (req, res, next) => {
       accountType,
       collegeId,
       referralCode: submittedReferralCode,
-      hearAboutUs,
-      hearAboutUsOther,
     } = req.body ?? {}
     const normalizedRole = typeof role === 'string' ? role.trim().toLowerCase() : ''
 
@@ -608,47 +619,25 @@ router.post('/register', async (req, res, next) => {
     if (typeof confirmPassword !== 'string' || password !== confirmPassword) {
       return res.status(400).json({ message: 'Your passwords do not match.' })
     }
-    const normalizedHearAboutUs = typeof hearAboutUs === 'string' && hearAboutUsSet.has(hearAboutUs.trim())
-      ? hearAboutUs.trim()
-      : 'Other'
-    let normalizedHearAboutUsOther = ''
-    if (normalizedHearAboutUs === 'Other' && typeof hearAboutUsOther === 'string') {
-      normalizedHearAboutUsOther = hearAboutUsOther.trim().slice(0, 200)
+    let referralCode
+    if (submittedReferralCode !== undefined) {
+      if (typeof submittedReferralCode !== 'string' || submittedReferralCode.trim().length < 6 || submittedReferralCode.trim().length > 64) {
+        return res.status(400).json({ message: 'Enter a valid referral code.' })
+      }
+      referralCode = submittedReferralCode.trim().toUpperCase()
+      const availableReferral = await ReferralCode.findOne({
+        code: referralCode,
+        status: 'active',
+        expiresAt: { $gt: new Date() },
+        usedBy: null,
+      }).select('_id').lean()
+      if (!availableReferral) {
+        return res.status(400).json({ message: 'This referral code is invalid, expired, or already used.' })
+      }
     }
     const normalizedName = fullName.trim()
     const normalizedEmail = email.trim().toLowerCase()
     const normalizedUsername = username.trim().toLowerCase()
-    let referralCode
-    let availableReferral = null
-    if (submittedReferralCode !== undefined) {
-      if (typeof submittedReferralCode !== 'string' || submittedReferralCode.trim().length < 8 || submittedReferralCode.trim().length > 64) {
-        return res.status(400).json({ message: 'Enter a valid referral code.' })
-      }
-      referralCode = submittedReferralCode.trim().toUpperCase()
-      availableReferral = await ReferralCode.findOne({
-        code: referralCode,
-        status: 'active',
-        isDeactivated: { $ne: true },
-        expiresAt: { $gt: new Date() },
-        usedBy: null,
-      }).select('_id generatedBy code').lean()
-      if (!availableReferral) {
-        return res.status(400).json({ message: 'This referral code is invalid, expired, or already used.' })
-      }
-      const referrer = await Student.findById(availableReferral.generatedBy)
-      if (!referrer || referrer.status === 'deleted' || referrer.isActive === false) {
-        return res.status(400).json({ message: 'This referral code is no longer valid.' })
-      }
-      const emailHash = createHash('sha256').update(normalizedEmail).digest('hex')
-      const priorReferral = await ReferralCode.findOne({
-        referredEmailHash: emailHash,
-      }).select('_id').lean()
-      if (priorReferral) {
-        return res.status(400).json({
-          message: 'This email address has already been attributed to a referral code and is not eligible for another referral invitation.',
-        })
-      }
-    }
     const emailVerificationId = readRegistrationEmailVerificationToken(
       emailVerificationToken,
       normalizedEmail,
@@ -672,24 +661,22 @@ router.post('/register', async (req, res, next) => {
 
     try {
       await session.withTransaction(async () => {
-        if (emailVerificationId) {
-          const verifiedEmail = await RegistrationEmailVerification.findOneAndUpdate(
-            {
-              _id: emailVerificationId,
-              email: normalizedEmail,
-              verifiedAt: { $ne: null },
-              verificationExpiresAt: { $gt: new Date() },
-              consumedAt: null,
-              invalidatedAt: null,
-            },
-            { $set: { consumedAt: new Date() } },
-            { new: true, session },
-          )
-          if (!verifiedEmail) {
-            const error = new Error('Please verify this email address before creating an account.')
-            error.statusCode = 400
-            throw error
-          }
+        const verifiedEmail = await RegistrationEmailVerification.findOneAndUpdate(
+          {
+            _id: emailVerificationId,
+            email: normalizedEmail,
+            verifiedAt: { $ne: null },
+            verificationExpiresAt: { $gt: new Date() },
+            consumedAt: null,
+            invalidatedAt: null,
+          },
+          { $set: { consumedAt: new Date() } },
+          { returnDocument: 'after', session },
+        )
+        if (!verifiedEmail) {
+          const error = new Error('Please verify this email address before creating an account.')
+          error.statusCode = 400
+          throw error
         }
         const duplicate = await AccountIdentity.findOne({
           $or: [{ email: normalizedEmail }, { username: normalizedUsername }],
@@ -713,7 +700,6 @@ router.post('/register', async (req, res, next) => {
           }],
           { session },
         )
-        const referralUsedAt = referralCode ? new Date() : null
         ;[account] = await AccountModel.create(
           [{
             _id: accountId,
@@ -726,11 +712,6 @@ router.post('/register', async (req, res, next) => {
             status: 'pending',
             isActive: false,
             approvalStatus: 'pending',
-            hearAboutUs: normalizedHearAboutUs,
-            hearAboutUsOther: normalizedHearAboutUsOther,
-            referredBy: availableReferral?.generatedBy || null,
-            referredByCode: referralCode || null,
-            referralRedeemedAt: referralUsedAt,
             registrationDetails: createRegistrationDetails(req.body?.registrationDetails, {
               fullName: normalizedName,
               email: normalizedEmail,
@@ -753,7 +734,6 @@ router.post('/register', async (req, res, next) => {
         )
         if (referralCode) {
           const usedAt = new Date()
-          const emailHash = createHash('sha256').update(normalizedEmail).digest('hex')
           const referral = await ReferralCode.findOneAndUpdate(
             createReferralRedemptionFilter(referralCode, accountId, usedAt),
             {
@@ -762,11 +742,9 @@ router.post('/register', async (req, res, next) => {
                 usedBy: accountId,
                 usedAt,
                 registrationStatus: account.status === 'active' ? 'approved' : 'awaiting_approval',
-                rewardStatus: 'pending',
-                referredEmailHash: emailHash,
               },
             },
-            { new: true, session },
+            { returnDocument: 'after', session },
           )
           if (!referral) {
             const error = new Error('This referral code is invalid, expired, or already used.')
@@ -790,31 +768,6 @@ router.post('/register', async (req, res, next) => {
         accountId: account._id,
         error: emailError,
       })
-    }
-
-    if (referralCode && availableReferral?.generatedBy) {
-      try {
-        const referrer = await Student.findById(availableReferral.generatedBy)
-        if (referrer && referrer.status !== 'deleted') {
-          await sendNotification({
-            recipientRole: 'student',
-            recipientId: availableReferral.generatedBy,
-            category: 'referral_notifications',
-            type: 'referral_registered',
-            title: 'New referral registration',
-            message: `${normalizedName} registered using your referral code.`,
-            link: '/student/referrals',
-            metadata: { referralCode, referredStudentId: String(account._id) },
-            emailOptions: referrer.email ? {
-              to: referrer.email,
-              subject: 'A friend joined aiHustle using your referral code',
-              text: `Hello${referrer.fullName ? ` ${referrer.fullName}` : ''},\n\n${normalizedName} registered on aiHustle using your referral code ${referralCode}.\n\nYou can track your referrals in your student dashboard: ${config.clientOrigin || 'https://aihustle.com'}/student/referrals\n`,
-            } : null,
-          })
-        }
-      } catch {
-        // Non-fatal background notification
-      }
     }
 
     return res.status(201).json({
@@ -1151,27 +1104,15 @@ router.post('/login', async (req, res, next) => {
     if (
       typeof identifier !== 'string' ||
       typeof password !== 'string' ||
+      typeof role !== 'string' ||
       !identifier.trim() ||
       !password
     ) {
       return res.status(400).json({ message: 'Enter your username or email and password.' })
     }
 
-    let requestedRole = null
-    if (role !== undefined && role !== null && typeof role === 'string' && role.trim()) {
-      const normalizedInputRole = role.trim().toLowerCase()
-      const roleMap = {
-        college: 'college_admin',
-        college_admin: 'college_admin',
-        admin: 'main_admin',
-        main_admin: 'main_admin',
-        student: 'student',
-      }
-      requestedRole = roleMap[normalizedInputRole] || normalizedInputRole
-      if (!allowedRoles.has(requestedRole)) {
-        return res.status(400).json({ message: 'Choose a valid account type.' })
-      }
-    } else if (role !== undefined && (typeof role !== 'string' || !role.trim())) {
+    const requestedRole = role.trim().toLowerCase()
+    if (!allowedRoles.has(requestedRole)) {
       return res.status(400).json({ message: 'Choose a valid account type.' })
     }
     if (!config.jwtSecret || !config.jwtSecret.trim()) {
@@ -1184,8 +1125,7 @@ router.post('/login', async (req, res, next) => {
     }).lean()
     const accountCollection = identity?.accountCollection
     const AccountModel = accountModelsByCollection[accountCollection]
-    const detectedRole = roleForAccountCollection(accountCollection)
-    if (!identity || !AccountModel || !detectedRole || (requestedRole && detectedRole !== requestedRole)) {
+    if (!identity || !AccountModel || roleForAccountCollection(accountCollection) !== requestedRole) {
       return res.status(401).json({ message: 'Invalid username/email or password.' })
     }
     const user = await AccountModel.findById(identity.accountId).select('+passwordHash')
@@ -1211,9 +1151,7 @@ router.post('/login', async (req, res, next) => {
       })
     }
 
-    const effectiveRole = requestedRole || detectedRole || user.role
-
-    if (effectiveRole === 'student' && user.twoFactorEnabled === true) {
+    if (requestedRole === 'student' && user.twoFactorEnabled === true) {
       if (rejectOtpRateLimit(res, getOtpRateLimitDelay(req, 'request'))) return
       const challenge = await issueStudentOtpChallenge({
         user,
@@ -1223,12 +1161,12 @@ router.post('/login', async (req, res, next) => {
       return res.json({ requiresTwoFactor: true, ...challenge })
     }
 
-    if (effectiveRole === 'student') await issueStudentRefreshSession(user, accountCollection, res)
+    if (requestedRole === 'student') await issueStudentRefreshSession(user, accountCollection, res)
     const token = createAuthToken(user, accountCollection)
 
     return res.json({
       token,
-      user: serializeAccount(user, effectiveRole),
+      user: serializeAccount(user, requestedRole),
     })
   } catch (error) {
     if (error instanceof TwoFactorError || error?.statusCode) {
@@ -1346,13 +1284,214 @@ router.post('/activate', async (req, res, next) => {
         $set: { passwordHash, status: 'active', isActive: true },
         $unset: { activationTokenHash: '', activationTokenExpiresAt: '' },
       },
-      { new: true, runValidators: true },
+      { returnDocument: 'after', runValidators: true },
     ).select('fullName email username role status collegeId')
 
     if (!account) {
       return res.status(400).json({ message: 'The activation link is invalid, expired, or already used.' })
     }
     return res.json({ message: 'Your account is active. You can now log in.' })
+  } catch (error) {
+    return next(error)
+  }
+})
+
+router.post('/forgot-password', async (req, res, next) => {
+  try {
+    const { email } = req.body ?? {}
+    if (typeof email !== 'string' || !email.trim()) {
+      return res.status(400).json({ message: 'Enter your registered email address.' })
+    }
+    const normalizedEmail = email.trim().toLowerCase()
+    if (!emailPattern.test(normalizedEmail) || normalizedEmail.length > 254) {
+      return res.status(400).json({ message: 'Enter a valid email address.' })
+    }
+
+    const clientIp = req.ip || req.socket?.remoteAddress || 'unknown'
+    const ipLimit = checkPasswordResetRateLimit(`ip:${clientIp}`)
+    const emailLimit = checkPasswordResetRateLimit(`email:${normalizedEmail}`)
+    if (!ipLimit.allowed || !emailLimit.allowed) {
+      const retryAfter = Math.max(ipLimit.retryAfterSeconds || 0, emailLimit.retryAfterSeconds || 0) || 60
+      res.set('Retry-After', String(retryAfter))
+      return res.status(429).json({
+        message: 'Too many password reset requests. Please wait a few minutes before trying again.',
+        retryAfterSeconds: retryAfter,
+      })
+    }
+
+    const genericSuccessResponse = {
+      message: "If an account with that email address exists, we've sent password reset instructions to your inbox.",
+    }
+
+    let identity = await AccountIdentity.findOne({ email: normalizedEmail }).lean()
+    let accountCollection = identity?.accountCollection
+    let accountId = identity?.accountId
+    let user = null
+
+    if (identity && accountCollection && accountId) {
+      const AccountModel = accountModelsByCollection[accountCollection]
+      if (AccountModel) {
+        user = await AccountModel.findById(accountId).lean()
+      }
+    } else {
+      for (const [colName, Model] of Object.entries(accountModelsByCollection)) {
+        const found = await Model.findOne({ email: normalizedEmail }).lean()
+        if (found) {
+          accountCollection = colName
+          accountId = found._id
+          user = found
+          break
+        }
+      }
+    }
+
+    if (!user || user.isActive === false) {
+      return res.json(genericSuccessResponse)
+    }
+
+    await PasswordResetToken.updateMany(
+      { accountId: user._id, usedAt: null },
+      { $set: { usedAt: new Date() } },
+    )
+
+    const rawToken = randomBytes(32).toString('hex')
+    const tokenHash = createHash('sha256').update(rawToken).digest('hex')
+    const expiresInMinutes = 15
+    const expiresAt = new Date(Date.now() + expiresInMinutes * 60 * 1000)
+    const cleanupAt = new Date(Date.now() + 24 * 60 * 60 * 1000)
+
+    await PasswordResetToken.create({
+      email: normalizedEmail,
+      accountId: user._id,
+      accountCollection,
+      tokenHash,
+      expiresAt,
+      cleanupAt,
+    })
+
+    const clientOrigin = requireClientOrigin()
+    const resetUrl = `${clientOrigin}/reset-password?token=${encodeURIComponent(rawToken)}`
+
+    try {
+      await sendPasswordResetEmail({
+        to: normalizedEmail,
+        fullName: user.fullName || user.username || '',
+        resetUrl,
+        expiresInMinutes,
+      })
+    } catch (mailError) {
+      logEmailDeliveryFailure({
+        event: 'password_reset_email_failed',
+        accountId: user._id,
+        error: mailError,
+      })
+    }
+
+    return res.json(genericSuccessResponse)
+  } catch (error) {
+    return next(error)
+  }
+})
+
+router.get('/reset-password/validate', async (req, res, next) => {
+  try {
+    const token = typeof req.query?.token === 'string' ? req.query.token.trim() : ''
+    if (!token) {
+      return res.status(400).json({ valid: false, message: 'Password reset token is missing.' })
+    }
+
+    const tokenHash = createHash('sha256').update(token).digest('hex')
+    const tokenRecord = await PasswordResetToken.findOne({ tokenHash }).lean()
+
+    if (!tokenRecord) {
+      return res.status(400).json({ valid: false, message: 'This password reset link is invalid. Please request a new one.' })
+    }
+
+    if (tokenRecord.usedAt) {
+      return res.status(400).json({ valid: false, message: 'This password reset link has already been used. Please request a new one.' })
+    }
+
+    if (new Date(tokenRecord.expiresAt) < new Date()) {
+      return res.status(400).json({ valid: false, message: 'This password reset link has expired. Please request a new one.' })
+    }
+
+    const AccountModel = accountModelsByCollection[tokenRecord.accountCollection]
+    if (!AccountModel) {
+      return res.status(400).json({ valid: false, message: 'The account associated with this link is not available.' })
+    }
+
+    const userExists = await AccountModel.exists({ _id: tokenRecord.accountId })
+    if (!userExists) {
+      return res.status(400).json({ valid: false, message: 'The account associated with this reset link no longer exists.' })
+    }
+
+    return res.json({ valid: true, message: 'Token is valid.' })
+  } catch (error) {
+    return next(error)
+  }
+})
+
+router.post('/reset-password', async (req, res, next) => {
+  try {
+    const { token, password, confirmPassword } = req.body ?? {}
+    if (typeof token !== 'string' || !token.trim()) {
+      return res.status(400).json({ message: 'Password reset token is required.' })
+    }
+    if (typeof password !== 'string' || !password) {
+      return res.status(400).json({ message: 'Enter your new password.' })
+    }
+    if (password.length < 8) {
+      return res.status(400).json({ message: 'Password must be at least 8 characters long.' })
+    }
+    if (password.length > 72) {
+      return res.status(400).json({ message: 'Password cannot exceed 72 characters.' })
+    }
+    if (password !== confirmPassword) {
+      return res.status(400).json({ message: 'Your passwords do not match.' })
+    }
+
+    const tokenHash = createHash('sha256').update(token.trim()).digest('hex')
+    const tokenRecord = await PasswordResetToken.findOne({ tokenHash })
+
+    if (!tokenRecord) {
+      return res.status(400).json({ message: 'This password reset link is invalid. Please request a new reset link.' })
+    }
+
+    if (tokenRecord.usedAt) {
+      return res.status(400).json({ message: 'This password reset link has already been used. Please request a new reset link.' })
+    }
+
+    if (tokenRecord.expiresAt < new Date()) {
+      return res.status(400).json({ message: 'This password reset link has expired. Please request a new reset link.' })
+    }
+
+    const AccountModel = accountModelsByCollection[tokenRecord.accountCollection]
+    if (!AccountModel) {
+      return res.status(400).json({ message: 'Account type not supported.' })
+    }
+
+    const user = await AccountModel.findById(tokenRecord.accountId)
+    if (!user) {
+      return res.status(404).json({ message: 'Account not found.' })
+    }
+
+    const passwordHash = await bcrypt.hash(password, 12)
+    user.passwordHash = passwordHash
+    await user.save()
+
+    tokenRecord.usedAt = new Date()
+    await tokenRecord.save()
+
+    await PasswordResetToken.updateMany(
+      { accountId: user._id, usedAt: null },
+      { $set: { usedAt: new Date() } },
+    )
+
+    await RefreshSession.deleteMany({ userId: user._id }).catch(() => {})
+
+    return res.json({
+      message: 'Your password has been successfully reset. You can now log in with your new password.',
+    })
   } catch (error) {
     return next(error)
   }
@@ -1371,14 +1510,6 @@ router.get('/dashboard/main_admin', authenticate, requireRoles('main_admin'), (r
 })
 
 router.get('/dashboard/college_admin', authenticate, requireRoles('college_admin'), (req, res) => {
-  return res.json({ user: req.auth.user })
-})
-
-router.get('/dashboard/college', authenticate, requireRoles('college_admin'), (req, res) => {
-  return res.json({ user: req.auth.user })
-})
-
-router.get('/dashboard/admin', authenticate, requireRoles('main_admin'), (req, res) => {
   return res.json({ user: req.auth.user })
 })
 

@@ -3,7 +3,6 @@ import Certificate from '../models/Certificate.js'
 import Enrollment from '../models/Enrollment.js'
 import { authenticate, requireRoles } from '../middleware/auth.js'
 import { createCertificateSvg } from '../utils/certificate-document.js'
-import { generateCertificatePdf } from '../utils/certificates.js'
 
 const router = Router()
 const requireCertificateAccess = [authenticate, requireRoles('main_admin', 'student')]
@@ -59,24 +58,6 @@ async function sendCertificate(req, res, next, disposition) {
 
     const certificate = await findCertificate(req, certificateId)
     if (!certificate) return res.status(404).json({ message: 'The certificate was not found.' })
-
-    if (req.query.format === 'pdf' || req.headers.accept?.includes('application/pdf')) {
-      const pdf = await generateCertificatePdf(certificate)
-      const courseSlug = (certificate.courseName || certificate.name || 'Course')
-        .replace(/[^a-zA-Z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '')
-      const filename = courseSlug
-        ? `aiHustle-${courseSlug}-Certificate.pdf`
-        : `aiHustle-certificate-${certificate.certificateId}.pdf`
-
-      res.set({
-        'Content-Type': 'application/pdf',
-        'Content-Disposition': `${disposition}; filename="${filename}"`,
-        'Cache-Control': 'private, no-store',
-        'X-Content-Type-Options': 'nosniff',
-      })
-      return res.send(pdf)
-    }
 
     const document = Buffer.from(createCertificateSvg(certificate), 'utf8')
     res.set({

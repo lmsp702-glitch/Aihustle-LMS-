@@ -1,10 +1,33 @@
 import bcrypt from 'bcryptjs'
-import crypto, { randomBytes } from 'node:crypto'
+import { randomBytes } from 'node:crypto'
+import { Readable } from 'node:stream'
 import mongoose from 'mongoose'
 import multer from 'multer'
 import path from 'node:path'
 import { Router } from 'express'
-
+import cloudinary from '../config/cloudinary.js'
+import AccountIdentity from '../models/AccountIdentity.js'
+import College from '../models/College.js'
+import Course from '../models/Course.js'
+import Certificate from '../models/Certificate.js'
+import Enrollment from '../models/Enrollment.js'
+import AssignmentSubmission from '../models/AssignmentSubmission.js'
+import Notification from '../models/Notification.js'
+import QuizAttempt from '../models/QuizAttempt.js'
+import {
+  CollegeAdmin,
+  CollegeStudent,
+  Student,
+  accountModelsByCollection,
+} from '../models/account-models.js'
+import { authenticate, requireRoles } from '../middleware/auth.js'
+import {
+  assertCollegeStudentCapacity,
+  countCollegeStudents,
+  getCollegeStudentLimit,
+} from '../utils/college-student-capacity.js'
+import { parseStudentCsv } from '../utils/student-csv.js'
+import { toMongoBuffer } from '../utils/mongo-binary.js'
 import QuizAttemptState from '../models/QuizAttemptState.js'
 import VideoAttentionResponse from '../models/VideoAttentionResponse.js'
 import CertificateTemplate from '../models/CertificateTemplate.js'
@@ -16,50 +39,106 @@ import {
   getRequiredCertificateActivities,
   issueCertificateIfEligible,
 } from '../utils/certificates.js'
-import { parseStudentCsv } from '../utils/student-csv.js'
 import {
-  assertCollegeStudentCapacity,
-  countCollegeStudents,
-  getCollegeStudentLimit,
-} from '../utils/college-student-capacity.js'
-import { toMongoBuffer } from '../utils/mongo-binary.js'
-
-import AccountIdentity from '../models/AccountIdentity.js'
-import College from '../models/College.js'
-import Course from '../models/Course.js'
-import Enrollment from '../models/Enrollment.js'
-import Progress from '../models/Progress.js'
-import LearningActivity from '../models/LearningActivity.js'
-import Certificate from '../models/Certificate.js'
-import StudentNote from '../models/StudentNote.js'
-import Resource from '../models/Resource.js'
-import AssignmentSubmission from '../models/AssignmentSubmission.js'
-import QuizAttempt from '../models/QuizAttempt.js'
-import { CollegeAdmin, CollegeStudent, Student, accountModelsByCollection } from '../models/account-models.js'
-import { authenticate, requireRoles } from '../middleware/auth.js'
-import {
-  buildCourseActivitySequence,
   calculateCourseProgress,
-  findSequencedQuiz,
-  findSequencedAssessment,
-} from '../utils/course-sequencing.js'
-import { generateStudentNotesPdf } from '../utils/notes-export.js'
-import {
-  getSignedResourceDeliveryUrls,
-  fetchResourcePdfBuffer,
-} from '../utils/resource-delivery.js'
+  calculateCourseActivityProgress,
+  getCourseActivityProgression,
+  getCourseActivitySequence,
+  isCourseActivityCompleted,
+  recalculateEnrollmentCourseProgress,
+  recalculateEnrollmentsCourseProgress,
+  syncEnrollmentStatus,
+} from '../utils/course-progress.js'
 import { createStudentNotification } from '../utils/student-notifications.js'
+import { normalizeLessons, normalizeArray } from '../utils/course-validation.js'
+import { generateCourseRecommendations, isAvailableCourse } from '../utils/course-recommendations.js'
+import {
+  GeminiGradingError,
+  gradeAssignmentSubmission,
+} from '../utils/assignment-grader.js'
+import { calculateAssignmentAcademicResult } from '../utils/assignment-result.js'
+import {
+  getAssignmentAttemptState,
+} from '../utils/assignment-attempts.js'
+import {
+  wakeAssignmentGradingWorker,
+} from '../utils/assignment-grading-worker.js'
+import { normalizeHumanReviewRequest } from '../utils/assignment-human-review.js'
 
 const router = Router()
-
+const requireStudent = [authenticate, requireRoles('student')]
+const requireCollegeAdmin = [authenticate, requireRoles('college_admin')]
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-const usernamePattern = /^[a-zA-Z0-9._-]{3,30}$/
 const maxAssignmentSubmissionBytes = 10 * 1024 * 1024
 const maxCertificateTemplateBytes = 4 * 1024 * 1024
 const quizAttemptLimit = 3
 const quizAttemptCooldownMs = 24 * 60 * 60 * 1000
+const assignmentDeadlineMs = 7 * 24 * 60 * 60 * 1000
 const attentionCheckResponseTimeoutMs = 10 * 1000
 const loggedInvalidAttentionConfigurations = new Set()
+const assignmentFileTypes = new Map([
+  ['.pdf', 'application/pdf'],
+  ['.txt', 'text/plain'],
+  ['.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+  ['.jpg', 'image/jpeg'],
+  ['.jpeg', 'image/jpeg'],
+  ['.png', 'image/png'],
+  ['.webp', 'image/webp'],
+])
+const assignmentUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: maxAssignmentSubmissionBytes, files: 1, fields: 0, parts: 1 },
+  fileFilter(_req, file, callback) {
+    const extension = path.extname(file.originalname || '').toLowerCase()
+    if (assignmentFileTypes.get(extension) !== file.mimetype) {
+      const error = new Error('Upload a supported PDF, DOCX, TXT, JPEG, PNG, or WEBP file whose extension matches its file type.')
+      error.statusCode = 415
+      callback(error)
+      return
+    }
+    callback(null, true)
+  },
+})
+
+function certificateImageBuffer(imageData) {
+  if (Buffer.isBuffer(imageData)) return imageData
+  if (imageData instanceof Uint8Array) return Buffer.from(imageData)
+  if (imageData?._bsontype === 'Binary' && Buffer.isBuffer(imageData.buffer)) {
+    const length = Number.isInteger(imageData.position) ? imageData.position : imageData.buffer.length
+    return Buffer.from(imageData.buffer.subarray(0, length))
+  }
+  return null
+}
+
+async function loadCertificateTemplateImage(template) {
+  const storedImageData = certificateImageBuffer(template?.imageData)
+  if (storedImageData?.length) return storedImageData
+  if (typeof template?.secureUrl !== 'string' || !config.cloudinaryCloudName) {
+    throw new Error('The certificate background used for this certificate is unavailable.')
+  }
+
+  const imageUrl = new URL(template.secureUrl)
+  const expectedPath = `/${config.cloudinaryCloudName}/image/upload/`
+  if (
+    imageUrl.protocol !== 'https:'
+    || imageUrl.hostname !== 'res.cloudinary.com'
+    || !imageUrl.pathname.startsWith(expectedPath)
+  ) {
+    throw new Error('The certificate background URL is invalid.')
+  }
+
+  const response = await fetch(imageUrl, { redirect: 'error', signal: AbortSignal.timeout(10000) })
+  if (!response.ok) throw new Error('The certificate background could not be loaded.')
+  const contentLength = Number(response.headers.get('content-length'))
+  if (Number.isFinite(contentLength) && contentLength > maxCertificateTemplateBytes) {
+    throw new Error('The certificate background exceeds the supported file size.')
+  }
+  const imageData = Buffer.from(await response.arrayBuffer())
+  if (!imageData.length || imageData.length > maxCertificateTemplateBytes) {
+    throw new Error('The certificate background could not be loaded.')
+  }
+  return imageData
+}
 
 function isValidObjectId(value) {
   return typeof value === 'string' && mongoose.isValidObjectId(value)
@@ -102,6 +181,19 @@ function getLessonPlaybackPositions(enrollment) {
   return positions && typeof positions === 'object' ? { ...positions } : {}
 }
 
+function getLessonWatchedPositions(enrollment) {
+  const positions = getLessonPlaybackPositions(enrollment)
+  const states = enrollment?.lessonPlaybackStates
+  const entries = states instanceof Map ? states.entries() : Object.entries(states || {})
+  for (const [lessonId, state] of entries) {
+    const watchedPosition = Number(state?.watchedPositionSeconds)
+    if (Number.isFinite(watchedPosition) && watchedPosition >= 0) {
+      positions[lessonId] = Math.max(Number(positions[lessonId]) || 0, watchedPosition)
+    }
+  }
+  return positions
+}
+
 function getMapValue(values, key) {
   if (values instanceof Map) return values.get(key)
   return values && typeof values === 'object' ? values[key] : undefined
@@ -116,7 +208,9 @@ function getCertificateCourseProgress(activities, pendingRequirements = [], earn
   return {
     completedActivities,
     totalActivities,
-    percentage: earned ? 100 : totalActivities ? Math.round((completedActivities / totalActivities) * 100) : 0,
+    percentage: earned ? 100 : totalActivities
+      ? Math.min(99, Math.floor((completedActivities / totalActivities) * 100))
+      : 0,
   }
 }
 
@@ -127,106 +221,6 @@ function canonicalObjectId(value) {
   return new mongoose.Types.ObjectId(value).toString()
 }
 
-async function issueCourseCertificate(req, enrollment) {
-  const course = enrollment.courseId
-  if (course?.generateCertificate === false) return null
-  const lessonIds = [...new Set(getCourseLessonIds(course))]
-  const completedIds = new Set((enrollment.completedLessonIds || []).map(String))
-  if (!lessonIds.length || !lessonIds.every((lessonId) => completedIds.has(lessonId))) return null
-
-  const studentType = req.auth.accountCollection === 'clg_students' ? 'college' : 'independent'
-  const studentName = req.auth.user.fullName || req.auth.user.username || req.auth.user.email
-  const courseName = course?.title?.trim()
-  if (!studentName || !courseName) {
-    throw new Error('A student name and course name are required to issue a certificate.')
-  }
-
-  const studentId = new mongoose.Types.ObjectId(req.auth.id)
-  const courseId = new mongoose.Types.ObjectId(course._id)
-  const legacyCertificate = await Certificate.findOne({
-    userId: studentId,
-    courseId,
-    $or: [{ studentId: { $exists: false } }, { studentId: null }],
-  }).lean()
-  if (legacyCertificate) {
-    const legacyEnrollment = await Enrollment.findOne({
-      _id: legacyCertificate.enrollmentId,
-      userId: studentId,
-      courseId,
-      ...(studentType === 'college'
-        ? { collegeId: req.auth.user.collegeId }
-        : { $or: [{ collegeId: { $exists: false } }, { collegeId: null }] }),
-    }).select('_id').lean()
-    if (legacyEnrollment) return legacyCertificate
-  }
-
-  const certificateId = `AIH-${crypto.randomBytes(16).toString('hex').toUpperCase()}`
-  const identity = { studentType, studentId, courseId }
-  const certificateData = {
-    ...identity,
-    userId: studentId,
-    ...(studentType === 'college' ? { collegeId: req.auth.user.collegeId } : {}),
-    studentName,
-    courseName,
-    enrollmentId: enrollment._id,
-    certificateId,
-    name: `${courseName} Certificate of Completion`,
-    issuedAt: new Date(),
-    viewUrl: `/certificates/${certificateId}/view`,
-    downloadUrl: `/certificates/${certificateId}/download`,
-  }
-
-  try {
-    return await Certificate.findOneAndUpdate(
-      identity,
-      { $setOnInsert: certificateData },
-      { upsert: true, new: true, setDefaultsOnInsert: true },
-    ).lean()
-  } catch (error) {
-    if (error?.code !== 11000) throw error
-    return Certificate.findOne(identity).lean()
-  }
-}
-
-function certificateImageBuffer(imageData) {
-  if (Buffer.isBuffer(imageData)) return imageData
-  if (imageData instanceof Uint8Array) return Buffer.from(imageData)
-  if (imageData?._bsontype === 'Binary' && Buffer.isBuffer(imageData.buffer)) {
-    const length = Number.isInteger(imageData.position) ? imageData.position : imageData.buffer.length
-    return Buffer.from(imageData.buffer.subarray(0, length))
-  }
-  return null
-}
-
-async function loadCertificateTemplateImage(template) {
-  const storedImageData = certificateImageBuffer(template?.imageData)
-  if (storedImageData?.length) return storedImageData
-  if (typeof template?.secureUrl !== 'string' || !config.cloudinaryCloudName) {
-    throw new Error('The certificate background used for this certificate is unavailable.')
-  }
-
-  const imageUrl = new URL(template.secureUrl)
-  const expectedPath = `/${config.cloudinaryCloudName}/image/upload/`
-  if (
-    imageUrl.protocol !== 'https:'
-    || imageUrl.hostname !== 'res.cloudinary.com'
-    || !imageUrl.pathname.startsWith(expectedPath)
-  ) {
-    throw new Error('The certificate background URL is invalid.')
-  }
-
-  const response = await fetch(imageUrl, { redirect: 'error', signal: AbortSignal.timeout(10000) })
-  if (!response.ok) throw new Error('The certificate background could not be loaded.')
-  const contentLength = Number(response.headers.get('content-length'))
-  if (Number.isFinite(contentLength) && contentLength > maxCertificateTemplateBytes) {
-    throw new Error('The certificate background exceeds the supported file size.')
-  }
-  const imageData = Buffer.from(await response.arrayBuffer())
-  if (!imageData.length || imageData.length > maxCertificateTemplateBytes) {
-    throw new Error('The certificate background could not be loaded.')
-  }
-  return imageData
-}
 function sanitizeStudentAttentionCheck(attentionCheck) {
   if (!attentionCheck) return attentionCheck
   return {
@@ -239,11 +233,14 @@ function sanitizeStudentAttentionCheck(attentionCheck) {
 }
 
 function logInvalidAttentionCheckConfigurations(course) {
-  for (const [moduleIndex, module] of (course.modules || []).entries()) {
+  const modules = normalizeArray(course?.modules)
+  for (const [moduleIndex, module] of modules.entries()) {
+    const rawLessons = normalizeLessons(module?.lessons)
+    const rawContentItems = normalizeArray(module?.contentItems)
     const videoLessons = [
-      ...(module.lessons || []).map((lesson) => ({ lesson, source: 'legacy' })),
-      ...(module.contentItems || [])
-        .filter((item) => item.type === 'video-lesson')
+      ...rawLessons.map((lesson) => ({ lesson, source: 'legacy' })),
+      ...rawContentItems
+        .filter((item) => item?.type === 'video-lesson')
         .map((lesson) => ({ lesson, source: 'contentItem' })),
     ]
     for (const { lesson, source } of videoLessons) {
@@ -308,85 +305,38 @@ function logInvalidAttentionCheckConfigurations(course) {
   }
 }
 
-function findVideoLesson(course, lessonId) {
-  for (const module of course?.modules || []) {
-    const lessons = [
-      ...(module.lessons || []),
-      ...(module.contentItems || []).filter((item) => item.type === 'video-lesson'),
-    ]
-    const lesson = lessons.find((item) => canonicalObjectId(item._id) === lessonId)
-    if (lesson) return lesson
-  }
-  return null
-}
-
-function getSelectedAttentionQuestions(attentionCheck) {
-  const questions = attentionCheck?.questions || []
-  const isLegacy = attentionCheck?.questionsDuringVideo === undefined
-    && questions.every((question) => question.selectedForPlayback === undefined)
-  return questions.filter((question) => isLegacy || question.selectedForPlayback === true)
-}
-
-function isCorrectAttentionAnswer(selectedIndices, correctIndices) {
-  const sortedSelected = [...selectedIndices].sort((a, b) => a - b)
-  const sortedCorrect = [...correctIndices].sort((a, b) => a - b)
-  return sortedSelected.length === sortedCorrect.length
-    && sortedSelected.every((index, position) => index === sortedCorrect[position])
-}
-
-const requireStudent = [authenticate, requireRoles('student')]
-const requireCollegeAdmin = [authenticate, requireRoles('college_admin')]
-const assignmentFileTypes = new Map([
-  ['.pdf', 'application/pdf'],
-  ['.txt', 'text/plain'],
-  ['.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
-])
-const assignmentUpload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: maxAssignmentSubmissionBytes, files: 1, fields: 0, parts: 1 },
-  fileFilter(_req, file, callback) {
-    const extension = path.extname(file.originalname || '').toLowerCase()
-    if (assignmentFileTypes.get(extension) !== file.mimetype) {
-      const error = new Error('Upload a PDF, DOCX, or TXT file whose extension matches its file type.')
-      error.statusCode = 415
-      callback(error)
-      return
-    }
-    callback(null, true)
-  },
-})
-
-function hideQuizAnswers(course) {
+export function hideQuizAnswers(course) {
   if (!course) return course
+  logInvalidAttentionCheckConfigurations(course)
   return {
     ...course,
-    quizzes: course.quizzes?.map(({ questions, ...quiz }) => ({
+    quizzes: normalizeArray(course.quizzes).map(({ questions, ...quiz }) => ({
       ...quiz,
-      questions: questions?.map(({ correctOptionIndex, ...question }) => question),
+      questions: normalizeArray(questions).map(({ correctOptionIndex, ...question }) => question),
     })),
-    modules: course.modules?.map(({ quiz, lessons, contentItems, ...module }) => ({
-      ...module,
-      ...(lessons ? {
-        lessons: lessons.map(({ attentionCheck, ...lesson }) => ({
+    modules: normalizeArray(course.modules).map(({ quiz, lessons, contentItems, ...module }) => {
+      const normalizedLessons = normalizeLessons(lessons)
+      const normalizedContentItems = normalizeArray(contentItems)
+      return {
+        ...module,
+        lessons: normalizedLessons.map(({ attentionCheck, ...lesson }) => ({
           ...lesson,
           ...(attentionCheck ? { attentionCheck: sanitizeStudentAttentionCheck(attentionCheck) } : {}),
         })),
-      } : {}),
-      ...(quiz ? {
-        quiz: {
-          ...quiz,
-          questions: quiz.questions?.map(({ correctOptionIndices, ...question }) => question),
-        },
-      } : {}),
-      ...(contentItems ? {
-        contentItems: contentItems.map(({ quiz: itemQuiz, attentionCheck, ...item }) => {
+        ...(quiz ? {
+          quiz: {
+            ...quiz,
+            questions: normalizeArray(quiz.questions).map(({ correctOptionIndices, ...question }) => question),
+          },
+        } : {}),
+        contentItems: normalizedContentItems.map(({ quiz: itemQuiz, attentionCheck, ...item }) => {
           let legacyTranscriptCues
           if (item.type === 'video-lesson') {
             const matchingLegacyLesson = item._id
-              ? lessons?.find((lesson) => String(lesson._id) === String(item._id))
+              ? normalizedLessons.find((lesson) => String(lesson._id) === String(item._id))
               : null
             const titleAndVideoMatches = !matchingLegacyLesson && item.videoUrl
-              ? (lessons || []).filter((lesson) => lesson.title === item.title && lesson.videoUrl === item.videoUrl)
+              ? normalizedLessons.filter((lesson) => lesson.title === item.title && lesson.videoUrl === item.videoUrl)
               : []
             const transcriptLesson = matchingLegacyLesson
               || (titleAndVideoMatches.length === 1 ? titleAndVideoMatches[0] : null)
@@ -401,41 +351,123 @@ function hideQuizAnswers(course) {
             ...(itemQuiz ? {
               quiz: {
                 ...itemQuiz,
-                questions: itemQuiz.questions?.map(({ correctOptionIndices, ...question }) => question),
+                questions: normalizeArray(itemQuiz.questions).map(({ correctOptionIndices, ...question }) => question),
               },
             } : {}),
           }
         }),
-      } : {}),
+      }
+    }),
+  }
+}
+
+function omitFields(value, fields) {
+  const result = { ...value }
+  for (const field of fields) delete result[field]
+  return result
+}
+
+function hideLockedCourseActivityContent(course, accessibleActivityKeys) {
+  const isAccessible = (type, activity) => activity?._id
+    && accessibleActivityKeys.has(`${type}:${String(activity._id)}`)
+  const hideVideo = (video) => {
+    const result = omitFields(video, [
+      'description',
+      'content',
+      'videoUrl',
+      'videoPublicId',
+      'videoFileName',
+      'videoFormat',
+      'videoBytes',
+      'transcriptUrl',
+      'transcriptPublicId',
+      'transcriptFileName',
+      'transcriptFormat',
+      'transcriptBytes',
+      'transcriptCues',
+      'resources',
+    ])
+    result._progressionLocked = true
+    if (video.attentionCheck) {
+      result.attentionCheck = sanitizeStudentAttentionCheck({
+        ...video.attentionCheck,
+        questions: [],
+      })
+    }
+    return result
+  }
+  const hideQuiz = (quiz) => ({
+    ...omitFields(quiz, ['description', 'questions']),
+    questions: [],
+    _progressionLocked: true,
+  })
+  const hideAssignment = (assignment) => ({
+    ...omitFields(assignment, ['description', 'content', 'resources']),
+    _progressionLocked: true,
+  })
+
+  return {
+    ...course,
+    quizzes: course.quizzes?.map((quiz) => (
+      isAccessible('quiz', quiz) ? quiz : hideQuiz(quiz)
+    )),
+    assignments: course.assignments?.map((assignment) => (
+      isAccessible('assignment', assignment) ? assignment : hideAssignment(assignment)
+    )),
+    modules: course.modules?.map((module) => ({
+      ...module,
+      lessons: module.lessons?.map((lesson) => (
+        isAccessible('video-lesson', lesson) ? lesson : hideVideo(lesson)
+      )),
+      quiz: module.quiz && !isAccessible('quiz', module.quiz) ? hideQuiz(module.quiz) : module.quiz,
+      contentItems: module.contentItems?.map((item) => {
+        if (item.type === 'video-lesson' && !isAccessible('video-lesson', item)) return hideVideo(item)
+        if (item.type === 'assignment' && !isAccessible('assignment', item)) return hideAssignment(item)
+        if (item.type !== 'quiz') return item
+        const quizId = item.quiz?._id ? item.quiz : item
+        if (isAccessible('quiz', quizId)) return item
+        return {
+          ...omitFields(item, ['description', 'content']),
+          _progressionLocked: true,
+          ...(item.quiz ? { quiz: hideQuiz(item.quiz) } : { questions: [] }),
+        }
+      }),
     })),
   }
 }
 
-function getCourseAllLessons(course) {
-  const allLessons = []
-  for (const module of course?.modules || []) {
-    const videoItems = module.contentItems?.filter((item) => item.type === 'video-lesson') || []
-    const lessons = videoItems.length ? videoItems : module.lessons || []
-    for (const lesson of lessons) {
-      allLessons.push({
-        module,
-        moduleId: module._id,
-        lesson,
-        lessonId: lesson._id,
-        title: lesson.title,
-        videoUrl: lesson.videoUrl,
-      })
-    }
+function getAccessibleCourseActivityKeys(course, enrollment, quizAttempts, assignmentSubmissions) {
+  const progression = getCourseActivityProgression({
+    course,
+    enrollment,
+    quizAttempts,
+    assignmentSubmissions,
+  })
+  return new Set(progression.activities
+    .filter((activity) => activity.completed || activity.key === progression.nextActivity?.key)
+    .map((activity) => activity.key))
+}
+
+function findCourseLesson(course, lessonId) {
+  for (const module of normalizeArray(course?.modules)) {
+    const videoItems = normalizeArray(module?.contentItems).filter((item) => item?.type === 'video-lesson')
+    const lessons = videoItems.length ? videoItems : normalizeLessons(module.lessons)
+    const lesson = lessons.find((item) => String(item?._id) === String(lessonId))
+    if (lesson) return lesson
   }
-  return allLessons
+  return null
 }
 
 function courseHasLesson(course, lessonId) {
-  return getCourseAllLessons(course).some((item) => String(item.lessonId) === String(lessonId))
+  return Boolean(findCourseLesson(course, lessonId))
 }
 
 function getCourseLessonIds(course) {
-  return getCourseAllLessons(course).map((item) => String(item.lessonId)).filter(Boolean)
+  return normalizeArray(course?.modules).flatMap((module) => {
+    const videoItems = normalizeArray(module.contentItems).filter((item) => item.type === 'video-lesson')
+    const lessons = videoItems.length ? videoItems : normalizeLessons(module.lessons)
+    return lessons.map((lesson) => String(lesson._id)).filter(Boolean)
+  })
 }
 
 function getCourseAssignmentCount(course) {
@@ -446,6 +478,131 @@ function getCourseAssignmentCount(course) {
     }
   }
   return ids
+}
+
+function extractCloudinaryDetails(url) {
+  if (!url || typeof url !== 'string' || !url.includes('cloudinary.com')) return null
+  try {
+    const parsed = new URL(url)
+    const segments = parsed.pathname.split('/').filter(Boolean)
+    if (segments.length < 4) return null
+    const resourceType = segments[1]
+    const deliveryType = segments[2]
+    let pathSegments = segments.slice(3)
+    if (pathSegments[0]?.startsWith('s--') && pathSegments[0]?.endsWith('--')) {
+      pathSegments = pathSegments.slice(1)
+    }
+    while (pathSegments[0] && (pathSegments[0].includes(',') || pathSegments[0].includes(':') || pathSegments[0].startsWith('w_') || pathSegments[0].startsWith('fl_'))) {
+      pathSegments = pathSegments.slice(1)
+    }
+    if (pathSegments[0] && /^v\d+$/.test(pathSegments[0])) {
+      pathSegments = pathSegments.slice(1)
+    }
+    const publicId = decodeURIComponent(pathSegments.join('/'))
+    return { resourceType, deliveryType, publicId }
+  } catch {
+    return null
+  }
+}
+
+function findResourceInCourse(course, targetId, publicId = null, url = null) {
+  function match(res) {
+    if (!res) return false
+    const resId = String(res._id || '')
+    const resPublicId = String(res.publicId || '')
+    const resUrl = String(res.url || '')
+    const resTitle = String(res.title || '')
+    const target = String(targetId || '').trim()
+
+    if (target && (
+      resId === target
+      || resPublicId === target
+      || resUrl === target
+      || path.basename(resPublicId) === target
+      || path.basename(resUrl) === target
+      || resTitle === target
+    )) {
+      return true
+    }
+    if (publicId && (resPublicId === publicId || path.basename(resPublicId) === path.basename(publicId))) {
+      return true
+    }
+    if (url && (resUrl === url || resUrl.split('?')[0] === url.split('?')[0])) {
+      return true
+    }
+    return false
+  }
+
+  for (const res of normalizeArray(course?.resources)) {
+    if (match(res)) return res
+  }
+  for (const module of normalizeArray(course?.modules)) {
+    for (const res of normalizeArray(module?.resources)) {
+      if (match(res)) return res
+    }
+    for (const lesson of normalizeLessons(module?.lessons)) {
+      for (const res of normalizeArray(lesson?.resources)) {
+        if (match(res)) return res
+      }
+    }
+    for (const item of normalizeArray(module?.contentItems)) {
+      for (const res of normalizeArray(item?.resources)) {
+        if (match(res)) return res
+      }
+    }
+  }
+  return null
+}
+
+const resourceHashCache = new Map()
+
+async function resolveResourceHash(resource) {
+  if (!resource) return null
+  const publicId = resource.publicId || extractCloudinaryDetails(resource.url)?.publicId
+  if (!publicId) return null
+  if (resourceHashCache.has(publicId)) return resourceHashCache.get(publicId)
+
+  try {
+    const extension = (resource.format || path.extname(publicId).slice(1) || 'pdf').toLowerCase()
+    const resourceType = resource.resourceType || (extension === 'pdf' ? 'raw' : 'image')
+    const signedUrl = cloudinary.utils.private_download_url(publicId, extension, {
+      resource_type: resourceType,
+      type: 'upload',
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+    })
+    const headResponse = await fetch(signedUrl, { method: 'HEAD', signal: AbortSignal.timeout(2500) })
+    if (headResponse.ok) {
+      const etag = headResponse.headers.get('etag')?.replace(/["']/g, '') || null
+      if (etag) {
+        resourceHashCache.set(publicId, etag)
+        return etag
+      }
+    }
+  } catch {}
+  return null
+}
+
+export async function populateResourceHashes(course) {
+  if (!course) return course
+  const allResources = []
+  for (const res of normalizeArray(course.resources)) allResources.push(res)
+  for (const module of normalizeArray(course.modules)) {
+    for (const res of normalizeArray(module.resources)) allResources.push(res)
+    for (const lesson of normalizeLessons(module.lessons)) {
+      for (const res of normalizeArray(lesson.resources)) allResources.push(res)
+    }
+    for (const item of normalizeArray(module.contentItems)) {
+      for (const res of normalizeArray(item.resources)) allResources.push(res)
+    }
+  }
+  await Promise.allSettled(allResources.map(async (res) => {
+    const hash = await resolveResourceHash(res)
+    if (hash) {
+      res.fileHash = hash
+      res.etag = hash
+    }
+  }))
+  return course
 }
 
 function getLearningStreak(dates, now = new Date()) {
@@ -469,7 +626,58 @@ function getLearningStreak(dates, now = new Date()) {
   return streak
 }
 
-function summarizeStudentLearning(enrollments, assignmentSubmissions, now = new Date()) {
+function isValidLearningActivityDate(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const date = new Date(`${value}T00:00:00.000Z`)
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value
+}
+
+function summarizeLearningActivity(enrollments, dateKeys) {
+  const activityByDate = new Map(dateKeys.map((date) => [date, {
+    seconds: 0,
+    videoLessonIds: new Set(),
+    completedLessonIds: new Set(),
+  }]))
+
+  for (const enrollment of enrollments) {
+    const dailyActivity = enrollment.dailyLearningActivity instanceof Map
+      ? [...enrollment.dailyLearningActivity.entries()]
+      : Object.entries(enrollment.dailyLearningActivity || {})
+    for (const [date, activity] of dailyActivity) {
+      const summary = activityByDate.get(date)
+      if (!summary) continue
+      const seconds = Number(activity?.seconds)
+      if (Number.isFinite(seconds) && seconds > 0) summary.seconds += seconds
+      for (const lessonId of activity?.videoLessonIds || []) {
+        summary.videoLessonIds.add(String(lessonId))
+      }
+    }
+
+    const completionDates = enrollment.lessonCompletionDates instanceof Map
+      ? [...enrollment.lessonCompletionDates.entries()]
+      : Object.entries(enrollment.lessonCompletionDates || {})
+    for (const [lessonId, completedAt] of completionDates) {
+      const date = new Date(completedAt)
+      if (!Number.isFinite(date.getTime())) continue
+      const summary = activityByDate.get(date.toISOString().slice(0, 10))
+      if (!summary) continue
+      summary.completedLessonIds.add(String(lessonId))
+      summary.videoLessonIds.add(String(lessonId))
+    }
+  }
+
+  return dateKeys.map((date) => {
+    const summary = activityByDate.get(date)
+    return {
+      date,
+      seconds: Math.floor(summary.seconds),
+      videosWatched: summary.videoLessonIds.size,
+      lessonsCompleted: summary.completedLessonIds.size,
+    }
+  })
+}
+
+function summarizeStudentLearning(enrollments, assignmentSubmissions, quizAttempts, now = new Date()) {
   const enrollmentsByCourse = new Map()
   for (const enrollment of enrollments) {
     const course = enrollment.courseId
@@ -485,6 +693,8 @@ function summarizeStudentLearning(enrollments, assignmentSubmissions, now = new 
   let inProgressLessons = 0
   let notStartedLessons = 0
   let totalLessons = 0
+  let completedActivities = 0
+  let totalActivities = 0
   let pendingAssignments = 0
   const completionDates = []
   const submittedAssignments = new Map()
@@ -495,15 +705,30 @@ function summarizeStudentLearning(enrollments, assignmentSubmissions, now = new 
 
   for (const enrollment of enrollmentsByCourse.values()) {
     const course = enrollment.courseId
+    const enrollmentAssignments = assignmentSubmissions.filter(
+      (submission) => String(submission.enrollmentId) === String(enrollment._id),
+    )
+    const enrollmentQuizzes = quizAttempts.filter(
+      (attempt) => String(attempt.enrollmentId) === String(enrollment._id),
+    )
+    const courseProgress = calculateCourseActivityProgress(
+      course,
+      enrollment,
+      enrollmentQuizzes,
+      enrollmentAssignments,
+    )
+    completedActivities += courseProgress.completedActivities
+    totalActivities += courseProgress.totalActivities
+    if (
+      courseProgress.totalActivities > 0
+      && courseProgress.completedActivities === courseProgress.totalActivities
+    ) completedCourses += 1
     const lessonIds = getCourseLessonIds(course)
     const lessonIdSet = new Set(lessonIds)
     const completedIds = new Set((enrollment.completedLessonIds || []).map(String))
     const startedIds = new Set((enrollment.startedLessonIds || []).map(String))
-    let completedInCourse = 0
-
     for (const lessonId of lessonIdSet) {
       if (completedIds.has(lessonId)) {
-        completedInCourse += 1
         completedLessons += 1
       } else if (startedIds.has(lessonId)) {
         inProgressLessons += 1
@@ -513,7 +738,6 @@ function summarizeStudentLearning(enrollments, assignmentSubmissions, now = new 
     }
 
     totalLessons += lessonIdSet.size
-    if (lessonIdSet.size > 0 && completedInCourse === lessonIdSet.size) completedCourses += 1
     for (const assignmentId of getCourseAssignmentCount(course)) {
       if (!submittedAssignments.has(`${enrollment._id}:${assignmentId}`)) pendingAssignments += 1
     }
@@ -537,7 +761,9 @@ function summarizeStudentLearning(enrollments, assignmentSubmissions, now = new 
     inProgressLessons,
     notStartedLessons,
     totalLessons,
-    completionPercentage: totalLessons ? Math.round((completedLessons / totalLessons) * 100) : 0,
+    completedActivities,
+    totalActivities,
+    completionPercentage: totalActivities ? Math.round((completedActivities / totalActivities) * 100) : 0,
   }
 }
 
@@ -561,7 +787,7 @@ function findQuiz(course, quizId) {
   for (const quiz of course?.quizzes || []) {
     if (canonicalObjectId(quiz._id) === requestedQuizId) return quiz
   }
-  return findSequencedQuiz(course, quizId)
+  return null
 }
 
 function getQuizAttemptStatus(state, now = new Date()) {
@@ -623,7 +849,7 @@ async function getQuizAttemptState(key, now = new Date()) {
             lockedUntil,
           },
         },
-        { new: true, upsert: true, setDefaultsOnInsert: true },
+        { returnDocument: 'after', upsert: true, setDefaultsOnInsert: true },
       ).lean()
     } catch (error) {
       if (error?.code !== 11000) throw error
@@ -639,7 +865,7 @@ async function getQuizAttemptState(key, now = new Date()) {
         $set: { attemptsUsed: 0, lockedUntil: null },
         $inc: { cycleNumber: 1 },
       },
-      { new: true },
+      { returnDocument: 'after' },
     ).lean()
     state = resetState || await QuizAttemptState.findOne(key).lean()
   }
@@ -665,7 +891,7 @@ async function reserveQuizAttempt(key, now = new Date()) {
       ],
     },
     { $inc: { attemptsUsed: 1 } },
-    { new: true },
+    { returnDocument: 'after' },
   ).lean()
   if (reservedState) return { state: reservedState, attemptNumber: reservedState.attemptsUsed }
 
@@ -673,6 +899,32 @@ async function reserveQuizAttempt(key, now = new Date()) {
   if (state.passed) return { state, reason: 'passed' }
   if (state.lockedUntil && new Date(state.lockedUntil) > now) return { state, reason: 'locked' }
   return { state, reason: 'exhausted' }
+}
+
+function findVideoLesson(course, lessonId) {
+  for (const module of normalizeArray(course?.modules)) {
+    const lessons = [
+      ...normalizeLessons(module.lessons),
+      ...normalizeArray(module.contentItems).filter((item) => item.type === 'video-lesson'),
+    ]
+    const lesson = lessons.find((item) => canonicalObjectId(item._id) === lessonId)
+    if (lesson) return lesson
+  }
+  return null
+}
+
+function getSelectedAttentionQuestions(attentionCheck) {
+  const questions = attentionCheck?.questions || []
+  const isLegacy = attentionCheck?.questionsDuringVideo === undefined
+    && questions.every((question) => question.selectedForPlayback === undefined)
+  return questions.filter((question) => isLegacy || question.selectedForPlayback === true)
+}
+
+function isCorrectAttentionAnswer(selectedIndices, correctIndices) {
+  const sortedSelected = [...selectedIndices].sort((a, b) => a - b)
+  const sortedCorrect = [...correctIndices].sort((a, b) => a - b)
+  return sortedSelected.length === sortedCorrect.length
+    && sortedSelected.every((index, position) => index === sortedCorrect[position])
 }
 
 function getQuizQuestionSnapshot(quiz) {
@@ -732,76 +984,83 @@ function findAssignment(course, assignmentId) {
     ))
     if (assignment) return assignment
   }
-  return findSequencedAssessment(course, assignmentId)
+  return null
 }
 
-async function safeFindQuizAttempts(query, selectFields) {
-  try {
-    if (mongoose.connection.readyState === 0 && QuizAttempt.find === mongoose.Model.find) {
-      return []
-    }
-    let q = QuizAttempt.find(query)
-    if (selectFields) q = q.select(selectFields)
-    return await q.lean()
-  } catch {
-    return []
+async function getCourseActivityAccess(course, enrollment, type, id) {
+  const activities = getCourseActivitySequence(course)
+  const targetIndex = activities.findIndex((activity) => activity.type === type && activity.id === String(id))
+  if (targetIndex < 0) return { found: false, allowed: false, nextActivity: null }
+
+  const prerequisites = activities.slice(0, targetIndex)
+  const quizIds = prerequisites.filter(({ type: activityType }) => activityType === 'quiz').map(({ id: quizId }) => quizId)
+  const assignmentIds = prerequisites
+    .filter(({ type: activityType }) => activityType === 'assignment')
+    .map(({ id: assignmentId }) => assignmentId)
+  const [quizAttempts, assignmentSubmissions] = await Promise.all([
+    quizIds.length
+      ? QuizAttempt.find({
+        userId: enrollment.userId,
+        enrollmentId: enrollment._id,
+        quizId: { $in: quizIds },
+        status: 'submitted',
+        passed: true,
+      }).select('quizId status passed').lean()
+      : [],
+    assignmentIds.length
+      ? AssignmentSubmission.find({
+        userId: enrollment.userId,
+        enrollmentId: enrollment._id,
+        assignmentId: { $in: assignmentIds },
+      }).select('_id assignmentId reviewStatus submittedAt').lean()
+      : [],
+  ])
+  const nextActivity = prerequisites.find((activity) => !isCourseActivityCompleted(activity, {
+    enrollment,
+    quizAttempts,
+    assignmentSubmissions,
+  }))
+  return {
+    found: true,
+    allowed: !nextActivity,
+    nextActivity: nextActivity || activities[targetIndex],
   }
 }
 
-async function safeFindAssignmentSubmissions(query, selectFields) {
-  try {
-    if (mongoose.connection.readyState === 0 && AssignmentSubmission.find === mongoose.Model.find) {
-      return []
-    }
-    let q = AssignmentSubmission.find(query)
-    if (selectFields) q = q.select(selectFields)
-    return await q.lean()
-  } catch {
-    return []
+function respondIfCourseActivityLocked(res, access) {
+  if (!access.found) {
+    res.status(404).json({ message: 'This activity is not available in the enrolled course.' })
+    return true
   }
+  if (!access.allowed) {
+    res.status(409).json({
+      message: 'Complete the previous course activity before accessing this one.',
+      nextActivity: access.nextActivity,
+    })
+    return true
+  }
+  return false
 }
 
-async function safeFindEnrollmentById(id) {
-  try {
-    if (mongoose.connection.readyState === 0 && Enrollment.findById === mongoose.Model.findById) {
-      return null
-    }
-    if (typeof Enrollment.findById !== 'function') return null
-    const res = Enrollment.findById(id)
-    if (res && typeof res.select === 'function') {
-      const s = res.select('courseId')
-      return s && typeof s.lean === 'function' ? await s.lean() : await s
-    }
-    if (res && typeof res.lean === 'function') return await res.lean()
-    return await res
-  } catch {
-    return null
-  }
+function getAssignmentDeadline(enrollmentCreatedAt) {
+  if (!enrollmentCreatedAt) return null
+  const enrollmentTime = new Date(enrollmentCreatedAt).getTime()
+  return Number.isFinite(enrollmentTime)
+    ? new Date(enrollmentTime + assignmentDeadlineMs)
+    : null
 }
 
-async function safeFindProgressOne(query) {
-  try {
-    if (mongoose.connection.readyState === 0 && Progress.findOne === mongoose.Model.findOne) {
-      return null
-    }
-    if (typeof Progress.findOne !== 'function') return null
-    const res = Progress.findOne(query)
-    return res && typeof res.lean === 'function' ? await res.lean() : await res
-  } catch {
-    return null
-  }
-}
-
-async function safeFindProgress(query) {
-  try {
-    if (mongoose.connection.readyState === 0 && Progress.find === mongoose.Model.find) {
-      return []
-    }
-    if (typeof Progress.find !== 'function') return []
-    const res = Progress.find(query)
-    return res && typeof res.lean === 'function' ? await res.lean() : await res
-  } catch {
-    return []
+function applyAssignmentDeadline(course, enrollmentCreatedAt) {
+  const dueDate = getAssignmentDeadline(enrollmentCreatedAt)
+  return {
+    ...course,
+    assignments: normalizeArray(course.assignments).map((assignment) => ({ ...assignment, dueDate })),
+    modules: normalizeArray(course.modules).map((module) => ({
+      ...module,
+      contentItems: normalizeArray(module.contentItems).map((item) => (
+        item.type === 'assignment' ? { ...item, dueDate } : item
+      )),
+    })),
   }
 }
 
@@ -812,6 +1071,17 @@ function sanitizeSubmissionFileName(fileName) {
 function isValidAssignmentFile(file) {
   if (!file?.buffer?.length || file.buffer.length > maxAssignmentSubmissionBytes) return false
   if (file.mimetype === 'application/pdf') return file.buffer.subarray(0, 5).toString('ascii') === '%PDF-'
+  if (file.mimetype === 'image/jpeg') {
+    return file.buffer.length >= 3 && file.buffer[0] === 0xff && file.buffer[1] === 0xd8 && file.buffer[2] === 0xff
+  }
+  if (file.mimetype === 'image/png') {
+    return file.buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  }
+  if (file.mimetype === 'image/webp') {
+    return file.buffer.length >= 12
+      && file.buffer.subarray(0, 4).toString('ascii') === 'RIFF'
+      && file.buffer.subarray(8, 12).toString('ascii') === 'WEBP'
+  }
   if (file.mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
     return file.buffer.length >= 4
       && file.buffer[0] === 0x50
@@ -838,6 +1108,160 @@ function receiveAssignmentSubmission(req, res, next) {
     if (error.statusCode === 415) return res.status(415).json({ message: error.message })
     return next(error)
   })
+}
+
+async function getCurrentAssignmentAttemptState({ enrollmentId, assignmentId, maximumMarks }) {
+  const submissions = await AssignmentSubmission.find({ enrollmentId, assignmentId })
+    .select('_id submittedAt updatedAt attemptNumber gradingStatus gradingError gradingLeaseUntil gradingNextRetryAt +activeSubmissionKey evaluatedAt aiEvaluation humanEvaluation finalMarks marksObtained scorePercentage academicStatus lockoutUntil')
+    .sort({ submittedAt: -1, _id: -1 })
+    .lean()
+  return getAssignmentAttemptState(submissions, maximumMarks)
+}
+
+function serializeAssignmentSubmission(submission, attemptState) {
+  const source = submission?.toObject ? submission.toObject() : submission
+  if (!source) return null
+  return {
+    _id: source._id,
+    assignmentId: source.assignmentId,
+    fileName: source.fileName,
+    contentType: source.contentType,
+    fileSize: source.fileSize,
+    submittedAt: source.submittedAt,
+    attemptNumber: source.attemptNumber,
+    lockoutStartedAt: source.lockoutStartedAt,
+    lockoutUntil: source.lockoutUntil,
+    reviewStatus: source.reviewStatus,
+    reviewedAt: source.reviewedAt,
+    reviewComment: source.reviewComment,
+    marksObtained: source.marksObtained,
+    evaluationStatus: source.evaluationStatus,
+    correctness: source.correctness,
+    feedback: source.feedback,
+    evaluatedAt: source.evaluatedAt,
+    gradingStatus: source.gradingStatus,
+    gradingError: source.gradingError,
+    aiEvaluation: source.aiEvaluation,
+    humanReviewRequest: source.humanReviewRequest,
+    humanEvaluation: source.humanEvaluation,
+    finalMarks: source.finalMarks,
+    finalFeedback: source.finalFeedback,
+    scorePercentage: source.scorePercentage,
+    academicStatus: source.academicStatus,
+    ...(attemptState ? { attemptState } : {}),
+  }
+}
+
+export async function processAssignmentGradingJob(submission) {
+  const [enrollment, course] = await Promise.all([
+    Enrollment.findById(submission.enrollmentId).lean(),
+    Course.findById(submission.courseId).select('title assignments modules quizzes').lean(),
+  ])
+  const assignment = findAssignment(course, String(submission.assignmentId))
+  const traceId = submission.gradingTraceId
+  if (!enrollment || !course || !assignment) {
+    throw new GeminiGradingError('The assignment is no longer available for grading.', {
+      category: 'assignment_configuration',
+      traceId,
+    })
+  }
+  const fileData = toMongoBuffer(submission.fileData)
+  if (!fileData?.length) {
+    throw new GeminiGradingError('The saved submission file is unavailable.', {
+      category: 'file_processing',
+      traceId,
+    })
+  }
+  const operation = submission.gradingRetryCount > 0 ? 'automatic_retry' : 'initial'
+  const evaluation = await gradeAssignmentSubmission(
+    { assignment, courseTitle: course.title, fileData, contentType: submission.contentType },
+    { apiKey: config.geminiApiKey, operation, traceId },
+  )
+
+  const evaluatedAt = new Date()
+  const academicResult = calculateAssignmentAcademicResult(
+    evaluation.totalMarks,
+    evaluation.maximumMarks,
+  )
+  if (!academicResult) throw new Error('The assignment evaluation returned invalid marks.')
+  const lockoutStartedAt = academicResult.academicStatus === 'Failed'
+    && submission.attemptNumber === 3
+    ? evaluatedAt
+    : null
+  const updatedSubmission = await AssignmentSubmission.findOneAndUpdate(
+    {
+      _id: submission._id,
+      gradingStatus: 'AI Grading',
+      gradingLeaseToken: submission.gradingLeaseToken,
+    },
+    {
+      $set: {
+        gradingStatus: 'AI Graded',
+        gradingError: '',
+        aiEvaluation: { ...evaluation, evaluatedAt },
+        marksObtained: evaluation.totalMarks,
+        ...academicResult,
+        feedback: evaluation.overallFeedback,
+        correctness: evaluation.totalMarks === evaluation.maximumMarks
+          ? 'correct'
+          : evaluation.totalMarks > 0 ? 'partially_correct' : 'incorrect',
+        evaluationStatus: 'evaluated',
+        evaluatedAt,
+        reviewStatus: 'approved',
+        ...(lockoutStartedAt ? {
+          lockoutStartedAt,
+          lockoutUntil: new Date(lockoutStartedAt.getTime() + 24 * 60 * 60 * 1000),
+        } : {}),
+      },
+      $unset: {
+        activeSubmissionKey: '',
+        gradingLeaseUntil: '',
+        gradingLeaseToken: '',
+        gradingNextRetryAt: '',
+      },
+    },
+    { returnDocument: 'after', runValidators: true },
+  )
+  if (!updatedSubmission) throw new Error('The assignment evaluation could not be saved.')
+
+  const courseProgress = await recalculateEnrollmentCourseProgress({ enrollment, course })
+  try {
+    await createStudentNotification({
+      recipientId: updatedSubmission.userId,
+      eventKey: `assignment-ai-graded:${updatedSubmission._id}`,
+      type: 'assignment_ai_graded',
+      title: 'Assignment graded',
+      message: `Your assignment received ${evaluation.totalMarks} out of ${evaluation.maximumMarks}.`,
+      link: '/student/assignments',
+      metadata: {
+        courseId: String(updatedSubmission.courseId),
+        assignmentId: String(updatedSubmission.assignmentId),
+        submissionId: String(updatedSubmission._id),
+      },
+    })
+  } catch (error) {
+    console.error(JSON.stringify({
+      event: 'assignment.ai_grade_notification_failed',
+      submissionId: String(updatedSubmission._id),
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+    }))
+  }
+
+  const populatedEnrollment = await Enrollment.findById(enrollment._id)
+    .populate('courseId', 'title modules assignments quizzes generateCertificate')
+    .lean()
+  const student = await Student.findById(updatedSubmission.userId).select('fullName').lean()
+    || await CollegeStudent.findById(updatedSubmission.userId).select('fullName').lean()
+  if (populatedEnrollment && student?.fullName?.trim()) {
+    await issueCertificateIfEligible({
+      userId: updatedSubmission.userId,
+      studentName: student.fullName,
+      enrollment: populatedEnrollment,
+      course: populatedEnrollment.courseId,
+    })
+  }
+
+  return { submission: updatedSubmission, courseProgress }
 }
 
 router.post('/college/students', ...requireCollegeAdmin, async (req, res, next) => {
@@ -1058,10 +1482,61 @@ router.post('/college/students/import', ...requireCollegeAdmin, async (req, res,
 router.get('/courses', ...requireStudent, async (req, res, next) => {
   try {
     const courses = await Course.find({ status: 'published' })
-      .select('title description detailedDescription category difficulty thumbnailUrl learningObjectives prerequisites estimatedDurationMinutes modules assignments quizzes status createdAt')
+      .select('title description detailedDescription category difficulty thumbnailUrl learningObjectives prerequisites tags skills practicalBenefits estimatedDurationMinutes modules assignments quizzes status createdAt')
       .sort({ title: 1 })
       .lean()
-    return res.json({ courses: courses.map(hideQuizAnswers) })
+    return res.json({
+      courses: courses.map((course) => (
+        hideLockedCourseActivityContent(hideQuizAnswers(course), new Set())
+      )),
+    })
+  } catch (error) {
+    return next(error)
+  }
+})
+
+router.get('/courses/recommendations', ...requireStudent, async (req, res, next) => {
+  try {
+    const enrollments = await Enrollment.find({
+      userId: req.auth.id,
+      ...getStudentEnrollmentScope(req),
+      status: { $ne: 'cancelled' },
+    })
+      .populate(
+        'courseId',
+        'title description detailedDescription category difficulty thumbnailUrl learningObjectives prerequisites tags skills practicalBenefits estimatedDurationMinutes modules assignments quizzes status isDeleted deletedAt isAvailable available',
+      )
+      .sort({ createdAt: -1 })
+      .lean()
+    const enrollmentsWithProgress = await recalculateEnrollmentsCourseProgress(enrollments)
+    const completedCourses = enrollmentsWithProgress
+      .filter((enrollment) => enrollment.courseProgress?.isComplete === true)
+      .map((enrollment) => enrollment.courseId)
+      .filter((course) => course && typeof course === 'object' && course.title)
+    const enrolledCourseIds = enrollments
+      .map((enrollment) => enrollment.courseId?._id || enrollment.courseId)
+      .filter(Boolean)
+    const catalog = await Course.find({ status: 'published' })
+      .select('title description detailedDescription category difficulty thumbnailUrl learningObjectives prerequisites tags skills practicalBenefits estimatedDurationMinutes status isDeleted deletedAt isAvailable available')
+      .sort({ title: 1 })
+      .lean()
+    const availableCourseIds = new Set(
+      catalog.filter(isAvailableCourse).map((course) => String(course._id)),
+    )
+    const completedCourseIds = new Set(
+      completedCourses.map((course) => String(course._id)).filter(Boolean),
+    )
+    const completedAvailableCourseCount = [...completedCourseIds]
+      .filter((courseId) => availableCourseIds.has(courseId))
+      .length
+
+    return res.json({
+      recommendations: generateCourseRecommendations({ completedCourses, enrolledCourseIds, catalog }),
+      completedCourseCount: completedCourseIds.size,
+      availableCourseCount: availableCourseIds.size,
+      allAvailableCoursesCompleted: availableCourseIds.size > 0
+        && completedAvailableCourseCount === availableCourseIds.size,
+    })
   } catch (error) {
     return next(error)
   }
@@ -1078,861 +1553,59 @@ router.get('/learning/summary', ...requireStudent, async (req, res, next) => {
       status: { $ne: 'cancelled' },
     }
     const enrollments = await Enrollment.find(enrollmentQuery)
-      .populate('courseId', 'modules assignments')
+      .populate('courseId', 'modules assignments quizzes')
       .sort({ createdAt: -1 })
       .lean()
-    const assignmentSubmissions = enrollments.length
-      ? await AssignmentSubmission.find({
-        userId: req.auth.id,
-        enrollmentId: { $in: enrollments.map((enrollment) => enrollment._id) },
-      }).select('enrollmentId assignmentId').lean()
-      : []
-    return res.json({ summary: summarizeStudentLearning(enrollments, assignmentSubmissions) })
+    const enrollmentsWithProgress = await recalculateEnrollmentsCourseProgress(enrollments)
+    const [assignmentSubmissions, quizAttempts] = enrollments.length
+      ? await Promise.all([
+        AssignmentSubmission.find({
+          userId: req.auth.id,
+          enrollmentId: { $in: enrollments.map((enrollment) => enrollment._id) },
+        }).select('enrollmentId assignmentId submittedAt reviewStatus').lean(),
+        QuizAttempt.find({
+          userId: req.auth.id,
+          enrollmentId: { $in: enrollments.map((enrollment) => enrollment._id) },
+          status: 'submitted',
+        }).select('enrollmentId quizId status passed').lean(),
+      ])
+      : [[], []]
+    return res.json({
+      summary: summarizeStudentLearning(enrollmentsWithProgress, assignmentSubmissions, quizAttempts),
+    })
   } catch (error) {
     return next(error)
   }
 })
 
-async function handleGetStudentActivities(req, res, next) {
+router.get('/learning/activity', ...requireStudent, async (req, res, next) => {
   try {
-    const scope = getStudentEnrollmentScope(req)
-    const enrollments = await Enrollment.find({
+    const { start, end } = req.query
+    if (!isValidLearningActivityDate(start) || !isValidLearningActivityDate(end)) {
+      return res.status(400).json({ message: 'Select a valid learning activity date range.' })
+    }
+    const startTime = Date.parse(`${start}T00:00:00.000Z`)
+    const endTime = Date.parse(`${end}T00:00:00.000Z`)
+    const dayCount = Math.floor((endTime - startTime) / 86400000) + 1
+    if (dayCount < 1 || dayCount > 14) {
+      return res.status(400).json({ message: 'The learning activity range must cover between 1 and 14 days.' })
+    }
+    const dateKeys = Array.from({ length: dayCount }, (_value, index) => (
+      new Date(startTime + index * 86400000).toISOString().slice(0, 10)
+    ))
+    const enrollmentQuery = {
       userId: req.auth.id,
-      ...scope,
+      ...getStudentEnrollmentScope(req),
       status: { $ne: 'cancelled' },
-    })
-      .populate('courseId', 'title category difficulty thumbnailUrl modules assignments quizzes status')
-      .sort({ createdAt: -1 })
+    }
+    const enrollments = await Enrollment.find(enrollmentQuery)
+      .select('dailyLearningActivity lessonCompletionDates')
       .lean()
-
-    const validEnrollments = enrollments.filter((e) => e.courseId && typeof e.courseId === 'object')
-    const enrollmentIds = validEnrollments.map((e) => e._id)
-
-    // Batch fetch student attempts and submissions
-    const [allQuizAttempts, allAssignmentSubmissions] = await Promise.all([
-      safeFindQuizAttempts(
-        { userId: req.auth.id, enrollmentId: { $in: enrollmentIds } },
-        '_id enrollmentId courseId quizId status startedAt scorePercentage earnedPoints totalPoints correctAnswers incorrectAnswers passed submittedAt createdAt',
-      ),
-      safeFindAssignmentSubmissions(
-        { userId: req.auth.id, enrollmentId: { $in: enrollmentIds } },
-        '_id enrollmentId courseId assignmentId fileName fileSize contentType status grade feedback submittedAt',
-      ),
-    ])
-
-    // Group attempts by enrollmentId + quizId
-    const attemptsByQuiz = new Map()
-    for (const qa of allQuizAttempts || []) {
-      const key = `${qa.enrollmentId}:${qa.quizId}`
-      const list = attemptsByQuiz.get(key) || []
-      list.push(qa)
-      attemptsByQuiz.set(key, list)
-    }
-
-    // Group submissions by enrollmentId + assignmentId
-    const submissionsByAssignment = new Map()
-    for (const as of allAssignmentSubmissions || []) {
-      const key = `${as.enrollmentId}:${as.assignmentId}`
-      const list = submissionsByAssignment.get(key) || []
-      list.push(as)
-      submissionsByAssignment.set(key, list)
-    }
-
-    const now = new Date()
-    const activities = []
-
-    for (const enrollment of validEnrollments) {
-      const course = enrollment.courseId
-      const courseId = String(course._id)
-      const courseName = course.title || 'Untitled Course'
-
-      const sequence = buildCourseActivitySequence(course)
-      const activityItems = sequence.filter((item) => item.type === 'quiz' || item.type === 'assessment')
-
-      for (const item of activityItems) {
-        if (item.type === 'quiz') {
-          const quizId = String(item.quizId || item.id)
-          const attempts = attemptsByQuiz.get(`${enrollment._id}:${quizId}`) || []
-          attempts.sort((a, b) => new Date(b.submittedAt || b.createdAt || b.startedAt) - new Date(a.submittedAt || a.createdAt || a.startedAt))
-
-          const passedAttempt = attempts.find((a) => a.passed === true)
-          const latestAttempt = attempts[0] || null
-          const isPassed = Boolean(passedAttempt)
-          const hasInProgress = attempts.some((a) => a.status === 'started')
-          const isFailed = !isPassed && attempts.some((a) => a.status === 'submitted' && a.passed === false)
-
-          let status = 'pending'
-          if (isPassed) {
-            status = 'completed'
-          } else if (hasInProgress) {
-            status = 'in_progress'
-          } else if (isFailed) {
-            status = 'failed'
-          }
-
-          const dueDate = item.dueDate ? new Date(item.dueDate) : null
-          const isOverdue = !isPassed && Boolean(dueDate && dueDate < now)
-
-          let score = null
-          if (isPassed) {
-            score = `${passedAttempt.scorePercentage ?? latestAttempt?.scorePercentage ?? 0}%`
-          } else if (latestAttempt && latestAttempt.scorePercentage != null) {
-            score = `${latestAttempt.scorePercentage}%`
-          }
-
-          activities.push({
-            id: quizId,
-            activityId: quizId,
-            type: 'quiz',
-            title: item.title || `Quiz ${item.quizIndex || ''}`.trim(),
-            courseId,
-            courseName,
-            enrollmentId: String(enrollment._id),
-            moduleId: item.moduleId ? String(item.moduleId) : null,
-            moduleTitle: item.moduleTitle || 'Course Checkpoint',
-            status,
-            score,
-            earnedPoints: latestAttempt?.earnedPoints ?? null,
-            totalPoints: latestAttempt?.totalPoints ?? (item.questions?.length || null),
-            passingPercentage: item.passingPercentage || 70,
-            maxAttempts: item.maxAttempts || 3,
-            attemptsCount: attempts.filter((a) => a.status === 'submitted').length,
-            timeLimitMinutes: item.timeLimitMinutes || 0,
-            dueDate: item.dueDate || null,
-            isOverdue,
-            latestAttempt: latestAttempt ? {
-              _id: String(latestAttempt._id),
-              status: latestAttempt.status,
-              scorePercentage: latestAttempt.scorePercentage,
-              passed: latestAttempt.passed,
-              submittedAt: latestAttempt.submittedAt,
-            } : null,
-            navigationUrl: `/student/course/${encodeURIComponent(courseId)}/learn?activity=${encodeURIComponent(quizId)}&type=quiz`,
-          })
-        } else if (item.type === 'assessment') {
-          const assignmentId = String(item.assignmentId || item.id)
-          const submissions = submissionsByAssignment.get(`${enrollment._id}:${assignmentId}`) || []
-          submissions.sort((a, b) => new Date(b.submittedAt || b.createdAt) - new Date(a.submittedAt || a.createdAt))
-          const latestSubmission = submissions[0] || null
-
-          const isSubmitted = Boolean(latestSubmission)
-          const dueDate = item.dueDate ? new Date(item.dueDate) : null
-          const isOverdue = !isSubmitted && Boolean(dueDate && dueDate < now)
-
-          let status = 'pending'
-          if (isSubmitted) {
-            status = (latestSubmission.grade != null || latestSubmission.status === 'graded') ? 'graded' : (latestSubmission.status || 'submitted')
-          } else if (isOverdue) {
-            status = 'overdue'
-          }
-
-          let score = null
-          if (latestSubmission && (latestSubmission.grade != null || latestSubmission.score != null)) {
-            score = `${latestSubmission.grade ?? latestSubmission.score} / ${item.points || 100}`
-          }
-
-          activities.push({
-            id: assignmentId,
-            activityId: assignmentId,
-            type: 'assignment',
-            title: item.title || `Assignment ${item.assessmentIndex || ''}`.trim(),
-            description: item.description || '',
-            courseId,
-            courseName,
-            enrollmentId: String(enrollment._id),
-            moduleId: item.moduleId ? String(item.moduleId) : null,
-            moduleTitle: item.moduleTitle || 'Practical Milestone',
-            status,
-            score,
-            points: item.points || 100,
-            dueDate: item.dueDate || null,
-            isOverdue,
-            latestSubmission: latestSubmission ? {
-              _id: String(latestSubmission._id),
-              fileName: latestSubmission.fileName,
-              fileSize: latestSubmission.fileSize,
-              submittedAt: latestSubmission.submittedAt,
-            } : null,
-            navigationUrl: `/student/course/${encodeURIComponent(courseId)}/learn?activity=${encodeURIComponent(assignmentId)}&type=assignment`,
-          })
-        }
-      }
-    }
-
-    const uniqueActivities = []
-    const seen = new Set()
-    for (const act of activities) {
-      const key = `${act.enrollmentId}:${act.id}`
-      if (!seen.has(key)) {
-        seen.add(key)
-        uniqueActivities.push(act)
-      }
-    }
-
-    const totalActivities = uniqueActivities.length
-    const completedActivities = uniqueActivities.filter((a) => a.status === 'completed' || a.status === 'submitted' || a.status === 'graded').length
-    const remainingActivities = totalActivities - completedActivities
-    const overdueActivities = uniqueActivities.filter((a) => a.isOverdue || a.status === 'overdue').length
-
-    const quizzes = uniqueActivities.filter((a) => a.type === 'quiz')
-    const totalQuizzes = quizzes.length
-    const completedQuizzes = quizzes.filter((q) => q.status === 'completed').length
-    const remainingQuizzes = totalQuizzes - completedQuizzes
-    const quizCompletionPercentage = totalQuizzes > 0 ? Math.round((completedQuizzes / totalQuizzes) * 100) : 0
-
-    const assignments = uniqueActivities.filter((a) => a.type === 'assignment')
-    const totalAssignments = assignments.length
-    const completedAssignments = assignments.filter((a) => a.status === 'submitted' || a.status === 'graded').length
-    const remainingAssignments = totalAssignments - completedAssignments
-    const assignmentCompletionPercentage = totalAssignments > 0 ? Math.round((completedAssignments / totalAssignments) * 100) : 0
-
-    return res.json({
-      summary: {
-        total: totalActivities,
-        completed: completedActivities,
-        remaining: remainingActivities,
-        overdue: overdueActivities,
-      },
-      quizStats: {
-        total: totalQuizzes,
-        completed: completedQuizzes,
-        remaining: remainingQuizzes,
-        percentage: quizCompletionPercentage,
-      },
-      assignmentStats: {
-        total: totalAssignments,
-        completed: completedAssignments,
-        remaining: remainingAssignments,
-        percentage: assignmentCompletionPercentage,
-      },
-      activities: uniqueActivities,
-    })
+    return res.json({ days: summarizeLearningActivity(enrollments, dateKeys) })
   } catch (error) {
     return next(error)
   }
-}
-
-router.get('/learning/activities', ...requireStudent, handleGetStudentActivities)
-router.get('/learning/quizzes-and-assignments', ...requireStudent, handleGetStudentActivities)
-
-function sanitizeCourseOverview(course) {
-  if (!course) return null
-  let instructorName = 'aiHustle Certified Instructor'
-  let instructorEmail = ''
-  if (course.instructor && typeof course.instructor === 'object') {
-    instructorName = course.instructor.name || instructorName
-    instructorEmail = course.instructor.email || instructorEmail
-  } else if (course.createdBy && typeof course.createdBy === 'object') {
-    instructorName = course.createdBy.fullName || course.createdBy.name || course.createdBy.username || instructorName
-    instructorEmail = course.createdBy.email || instructorEmail
-  }
-  return {
-    _id: String(course._id),
-    title: course.title || 'Untitled Course',
-    description: course.description || '',
-    detailedDescription: course.detailedDescription || course.description || '',
-    category: course.category || 'Other',
-    difficulty: course.difficulty || 'beginner',
-    thumbnailUrl: course.thumbnailUrl || '',
-    learningObjectives: Array.isArray(course.learningObjectives) ? course.learningObjectives : [],
-    prerequisites: Array.isArray(course.prerequisites) ? course.prerequisites : [],
-    targetAudience: course.targetAudience || 'Beginners, professionals, and students seeking practical skills.',
-    estimatedDurationMinutes: Number(course.estimatedDurationMinutes) || 0,
-    instructor: {
-      name: instructorName,
-      email: instructorEmail,
-    },
-    status: course.status || 'published',
-  }
-}
-
-function buildCurriculumOverview(course, sequence = [], isEnrolled = false) {
-  const modules = []
-  for (let mIdx = 0; mIdx < (course.modules || []).length; mIdx += 1) {
-    const mod = course.modules[mIdx]
-    const moduleId = String(mod._id || `mod-${mIdx}`)
-    const moduleTitle = mod.title || `Module ${mIdx + 1}`
-    const moduleDesc = mod.description || ''
-
-    const moduleSequenceItems = sequence.filter((item) => String(item.moduleId) === moduleId)
-    
-    let items = []
-    if (moduleSequenceItems.length > 0) {
-      items = moduleSequenceItems.map((seqItem) => ({
-        id: String(seqItem.id),
-        type: seqItem.type,
-        title: seqItem.title || (seqItem.type === 'video-lesson' ? 'Video Lesson' : seqItem.type === 'quiz' ? 'Quiz Checkpoint' : 'Assessment Milestone'),
-        description: seqItem.description || '',
-        durationSeconds: Number(seqItem.durationSeconds) || 0,
-        points: Number(seqItem.points) || 0,
-        passingPercentage: seqItem.passingPercentage || null,
-        isCompleted: isEnrolled ? Boolean(seqItem.isCompleted) : false,
-        isFailed: isEnrolled ? Boolean(seqItem.isFailed) : false,
-        isSubmitted: isEnrolled ? Boolean(seqItem.isSubmitted) : false,
-      }))
-    } else {
-      const videoItems = (mod.contentItems || []).filter((i) => i.type === 'video-lesson')
-      const lessons = videoItems.length ? videoItems : mod.lessons || []
-      items = lessons.map((l) => ({
-        id: String(l._id),
-        type: 'video-lesson',
-        title: l.title || 'Lesson',
-        description: l.content ? l.content.slice(0, 150) : '',
-        durationSeconds: Number(l.durationSeconds) || 0,
-        points: 0,
-        isCompleted: false,
-        isFailed: false,
-        isSubmitted: false,
-      }))
-    }
-
-    modules.push({
-      moduleId,
-      title: moduleTitle,
-      description: moduleDesc,
-      itemCount: items.length,
-      items,
-    })
-  }
-
-  return modules
-}
-
-async function handleGetCourseDetails(req, res, next) {
-  try {
-    let { courseId } = req.params
-    if (typeof courseId === 'string') {
-      courseId = courseId.trim().replace(/\/details\/?$/, '').trim()
-    }
-    if (!isValidObjectId(courseId)) {
-      return res.status(400).json({ message: 'Select a valid course.' })
-    }
-
-    let course = null
-    try {
-      course = await Course.findById(courseId)
-        .populate('createdBy', 'fullName name username email')
-        .lean()
-    } catch {
-      course = await Course.findById(courseId).lean().catch(() => null)
-    }
-
-    if (!course && isValidObjectId(courseId)) {
-      // If courseId happens to be an enrollment ID, resolve the course from enrollment
-      const enr = await safeFindEnrollmentById(courseId)
-      if (enr?.courseId) {
-        try {
-          course = await Course.findById(enr.courseId)
-            .populate('createdBy', 'fullName name username email')
-            .lean()
-        } catch {
-          course = await Course.findById(enr.courseId).lean().catch(() => null)
-        }
-        if (course) {
-          courseId = String(course._id)
-        }
-      }
-    }
-
-    if (!course) {
-      return res.status(404).json({ message: 'Course not found.' })
-    }
-
-    const sequence = buildCourseActivitySequence(course)
-    const videoLessons = sequence.filter((item) => item.type === 'video-lesson')
-    const quizzes = sequence.filter((item) => item.type === 'quiz')
-    const assessments = sequence.filter((item) => item.type === 'assessment')
-
-    let lessonCount = videoLessons.length
-    if (lessonCount === 0 && Array.isArray(course.modules)) {
-      lessonCount = course.modules.reduce((acc, m) => {
-        const items = m.contentItems || []
-        const vItems = items.filter((i) => i.type === 'video-lesson')
-        return acc + (vItems.length || (m.lessons || []).length)
-      }, 0)
-    }
-
-    let quizCount = quizzes.length
-    if (quizCount === 0) {
-      quizCount = (course.quizzes?.length || 0) + (course.modules || []).reduce((acc, m) => acc + (m.quiz ? 1 : 0), 0)
-    }
-
-    let assignmentCount = assessments.length
-    if (assignmentCount === 0) {
-      assignmentCount = (course.assignments?.length || 0) + (course.modules || []).reduce((acc, m) => {
-        const aItems = (m.contentItems || []).filter((i) => i.type === 'assignment')
-        return acc + aItems.length
-      }, 0)
-    }
-
-    const counts = {
-      modules: course.modules?.length || 0,
-      lessons: lessonCount,
-      quizzes: quizCount,
-      assignments: assignmentCount,
-      assessments: assignmentCount,
-      durationMinutes: course.estimatedDurationMinutes || 0,
-    }
-
-    const enrollmentQuery = {
-      userId: req.auth.id,
-      courseId: course._id,
-      status: { $ne: 'cancelled' },
-    }
-    if (req.auth?.user?.studentType === 'college' && req.auth.user.collegeId) {
-      enrollmentQuery.collegeId = req.auth.user.collegeId
-    }
-    const enrollment = await Enrollment.findOne(enrollmentQuery).sort({ createdAt: -1 })
-
-    if (enrollment) {
-      const [assignmentSubmissions, quizAttempts, progressDoc] = await Promise.all([
-        safeFindAssignmentSubmissions({ userId: req.auth.id, enrollmentId: enrollment._id }),
-        safeFindQuizAttempts({ userId: req.auth.id, enrollmentId: enrollment._id }),
-        safeFindProgressOne({
-          $or: [
-            { userId: req.auth.id, courseId: course._id },
-            { studentId: req.auth.id, courseId: course._id },
-          ],
-        }),
-      ])
-
-      const progress = calculateCourseProgress({
-        course,
-        enrollment,
-        progress: progressDoc,
-        quizAttempts,
-        assignmentSubmissions,
-      })
-
-      if (progress.isCompleted && enrollment.status !== 'completed') {
-        enrollment.status = 'completed'
-        enrollment.completedAt = enrollment.completedAt || new Date()
-        await enrollment.save().catch(() => {})
-      }
-
-      let certificate = null
-      if (progress.isCompleted || enrollment.status === 'completed') {
-        certificate = await Certificate.findOne({
-          userId: req.auth.id,
-          courseId: course._id,
-          status: 'issued',
-        }).lean().catch(() => null)
-
-        if (!certificate) {
-          try {
-            const certId = `AH-${new Date().getFullYear()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
-            const studentName = req.auth?.user?.fullName || req.auth?.user?.name || req.auth?.user?.username || req.auth?.name || 'Student'
-            const [createdCert] = await Certificate.create([{
-              certificateId: certId,
-              userId: req.auth.id,
-              collegeId: enrollment.collegeId || null,
-              courseId: course._id,
-              enrollmentId: enrollment._id,
-              studentName,
-              studentEmail: req.auth?.user?.email || '',
-              courseTitle: course.title,
-              courseCategory: course.category || 'Professional Certification',
-              issueDate: new Date(),
-              completionDate: enrollment.completedAt || new Date(),
-              verificationUrl: `/student/certificates/verify/${certId}`,
-              status: 'issued',
-              metadata: {
-                totalLessons: progress.videoStats?.total || lessonCount,
-                totalQuizzes: progress.quizStats?.total || quizCount,
-                totalAssessments: progress.assessmentStats?.total || assignmentCount,
-              },
-            }])
-            certificate = createdCert?.toObject ? createdCert.toObject() : createdCert
-          } catch {
-            // non-fatal
-          }
-        }
-      }
-
-      return res.json({
-        isEnrolled: true,
-        enrollment: {
-          _id: String(enrollment._id),
-          status: enrollment.status,
-          enrolledAt: enrollment.createdAt,
-          completedAt: enrollment.completedAt,
-          isCompleted: Boolean(progress.isCompleted || enrollment.status === 'completed'),
-          progressPercentage: progress.progressPercentage || 0,
-        },
-        course: sanitizeCourseOverview(course),
-        counts,
-        curriculum: buildCurriculumOverview(course, progress.sequence, true),
-        progress: {
-          progressPercentage: progress.progressPercentage || 0,
-          totalRequiredActivities: progress.totalRequiredActivities || 0,
-          completedActivities: progress.completedActivities || 0,
-          isCompleted: Boolean(progress.isCompleted || enrollment.status === 'completed'),
-          videoStats: progress.videoStats || { total: lessonCount, completed: 0 },
-          quizStats: progress.quizStats || { total: quizCount, completed: 0 },
-          assessmentStats: progress.assessmentStats || { total: assignmentCount, completed: 0 },
-          nextActivity: progress.nextActivity || null,
-        },
-        certificate: certificate ? {
-          certificateId: certificate.certificateId,
-          studentName: certificate.studentName,
-          courseTitle: certificate.courseTitle,
-          courseCategory: certificate.courseCategory,
-          issueDate: certificate.issueDate,
-          completionDate: certificate.completionDate,
-          verificationUrl: certificate.verificationUrl,
-        } : null,
-        canUnenroll: Boolean(!progress.isCompleted && enrollment.status !== 'completed'),
-      })
-    }
-
-    return res.json({
-      isEnrolled: false,
-      enrollment: null,
-      course: sanitizeCourseOverview(course),
-      counts,
-      curriculum: buildCurriculumOverview(course, sequence, false),
-      progress: null,
-      certificate: null,
-      canUnenroll: false,
-    })
-  } catch (error) {
-    return next(error)
-  }
-}
-
-async function handleEnrollCourse(req, res, next) {
-  try {
-    const courseId = req.params.courseId || req.body?.courseId
-    if (!isValidObjectId(courseId)) {
-      return res.status(400).json({ message: 'Select a valid course.' })
-    }
-
-    if (req.auth.user.studentType !== 'independent' || req.auth.user.collegeId) {
-      return res.status(403).json({ message: 'College students must be enrolled by their college sub-admin.' })
-    }
-
-    const student = await Student.findOne({ _id: req.auth.id, role: 'student', studentType: 'independent' })
-      .select('_id fullName username email')
-      .lean()
-    if (!student) return res.status(404).json({ message: 'The student account was not found.' })
-
-    const course = await Course.findOne({ _id: courseId, status: 'published' }).select('_id title')
-    if (!course) return res.status(404).json({ message: 'The published course was not found.' })
-
-    const existing = await Enrollment.findOne({
-      userId: student._id,
-      courseId: course._id,
-    }).sort({ createdAt: -1 })
-
-    if (existing && existing.status !== 'cancelled') {
-      return res.status(409).json({ message: 'You are already enrolled in this course.' })
-    }
-
-    let enrollment
-    if (existing && existing.status === 'cancelled') {
-      existing.status = 'active'
-      existing.assignedBy = student._id
-      await existing.save()
-      enrollment = existing
-    } else {
-      const [created] = await Enrollment.create([{
-        userId: student._id,
-        courseId: course._id,
-        assignedBy: student._id,
-        status: 'active',
-      }])
-      enrollment = created
-    }
-
-    return res.status(201).json({ message: 'You are now enrolled in this course.', enrollment })
-  } catch (error) {
-    return next(error)
-  }
-}
-
-async function handleUnenrollCourse(req, res, next) {
-  try {
-    let courseId = req.params.courseId || req.body?.courseId
-    if (typeof courseId === 'string') {
-      courseId = courseId.trim().replace(/\/details\/?$/, '').trim()
-    }
-    if (!isValidObjectId(courseId)) {
-      return res.status(400).json({ message: 'Select a valid course.' })
-    }
-
-    const enrollmentQuery = {
-      userId: req.auth.id,
-      courseId,
-      status: { $ne: 'cancelled' },
-    }
-    if (req.auth?.user?.studentType === 'college' && req.auth.user.collegeId) {
-      enrollmentQuery.collegeId = req.auth.user.collegeId
-    }
-
-    let enrollment = await Enrollment.findOne(enrollmentQuery)
-    if (!enrollment) {
-      // Check if courseId was passed as enrollmentId
-      enrollment = await Enrollment.findOne({
-        _id: courseId,
-        userId: req.auth.id,
-        status: { $ne: 'cancelled' },
-      })
-    }
-
-    if (!enrollment) {
-      return res.status(404).json({ message: 'No active enrollment found for this course.' })
-    }
-
-    if (enrollment.status === 'completed') {
-      return res.status(400).json({ message: 'Completed courses cannot be unenrolled.' })
-    }
-
-    const targetCourseId = enrollment.courseId
-    const course = await Course.findById(targetCourseId).lean().catch(() => null)
-    if (course) {
-      const [assignmentSubmissions, quizAttempts, progressDoc] = await Promise.all([
-        safeFindAssignmentSubmissions({ userId: req.auth.id, enrollmentId: enrollment._id }),
-        safeFindQuizAttempts({ userId: req.auth.id, enrollmentId: enrollment._id }),
-        safeFindProgressOne({
-          $or: [
-            { userId: req.auth.id, courseId: course._id },
-            { studentId: req.auth.id, courseId: course._id },
-          ],
-        }),
-      ])
-
-      const progress = calculateCourseProgress({
-        course,
-        enrollment,
-        progress: progressDoc,
-        quizAttempts,
-        assignmentSubmissions,
-      })
-
-      if (progress.isCompleted) {
-        enrollment.status = 'completed'
-        enrollment.completedAt = enrollment.completedAt || new Date()
-        await enrollment.save().catch(() => {})
-        return res.status(400).json({ message: 'Completed courses cannot be unenrolled.' })
-      }
-    }
-
-    enrollment.status = 'cancelled'
-    await enrollment.save()
-
-    return res.json({ message: 'Successfully unenrolled from the course.', enrollmentId: enrollment._id })
-  } catch (error) {
-    return next(error)
-  }
-}
-
-async function handleGetCourseProgress(req, res, next) {
-  try {
-    let { courseId } = req.params
-    if (typeof courseId === 'string') {
-      courseId = courseId.trim().replace(/\/details\/?$/, '').trim()
-    }
-    if (!isValidObjectId(courseId)) {
-      return res.status(400).json({ message: 'Select a valid course.' })
-    }
-
-    let course = await Course.findById(courseId).lean().catch(() => null)
-    if (!course && isValidObjectId(courseId)) {
-      const enr = await safeFindEnrollmentById(courseId)
-      if (enr?.courseId) {
-        course = await Course.findById(enr.courseId).lean().catch(() => null)
-      }
-    }
-    if (!course) return res.status(404).json({ message: 'Course not found.' })
-
-    const enrollmentQuery = {
-      userId: req.auth.id,
-      courseId: course._id,
-      status: { $ne: 'cancelled' },
-    }
-    if (req.auth?.user?.studentType === 'college' && req.auth.user.collegeId) {
-      enrollmentQuery.collegeId = req.auth.user.collegeId
-    }
-    let enrollment = await Enrollment.findOne(enrollmentQuery)
-    if (!enrollment) {
-      enrollment = await Enrollment.findOne({
-        _id: courseId,
-        userId: req.auth.id,
-        status: { $ne: 'cancelled' },
-      })
-    }
-
-    if (!enrollment) {
-      return res.status(404).json({ message: 'You are not enrolled in this course.' })
-    }
-
-    const [assignmentSubmissions, quizAttempts, progressDoc] = await Promise.all([
-      safeFindAssignmentSubmissions({ userId: req.auth.id, enrollmentId: enrollment._id }),
-      safeFindQuizAttempts({ userId: req.auth.id, enrollmentId: enrollment._id }),
-      safeFindProgressOne({
-        $or: [
-          { userId: req.auth.id, courseId: course._id },
-          { studentId: req.auth.id, courseId: course._id },
-        ],
-      }),
-    ])
-
-    const progress = calculateCourseProgress({
-      course,
-      enrollment,
-      progress: progressDoc,
-      quizAttempts,
-      assignmentSubmissions,
-    })
-
-    return res.json({
-      isEnrolled: true,
-      enrollmentId: enrollment._id,
-      progress,
-    })
-  } catch (error) {
-    return next(error)
-  }
-}
-
-async function handleGetCourseCertificate(req, res, next) {
-  try {
-    let { courseId } = req.params
-    if (typeof courseId === 'string') {
-      courseId = courseId.trim().replace(/\/details\/?$/, '').trim()
-    }
-    if (!isValidObjectId(courseId)) {
-      return res.status(400).json({ message: 'Select a valid course.' })
-    }
-
-    let course = await Course.findById(courseId).lean().catch(() => null)
-    if (!course && isValidObjectId(courseId)) {
-      const enr = await safeFindEnrollmentById(courseId)
-      if (enr?.courseId) {
-        course = await Course.findById(enr.courseId).lean().catch(() => null)
-      }
-    }
-    if (!course) return res.status(404).json({ message: 'Course not found.' })
-
-    const enrollmentQuery = {
-      userId: req.auth.id,
-      courseId: course._id,
-      status: { $ne: 'cancelled' },
-    }
-    if (req.auth?.user?.studentType === 'college' && req.auth.user.collegeId) {
-      enrollmentQuery.collegeId = req.auth.user.collegeId
-    }
-    let enrollment = await Enrollment.findOne(enrollmentQuery)
-    if (!enrollment) {
-      enrollment = await Enrollment.findOne({
-        _id: courseId,
-        userId: req.auth.id,
-        status: { $ne: 'cancelled' },
-      })
-    }
-
-    if (!enrollment) {
-      return res.status(404).json({ message: 'You are not enrolled in this course.' })
-    }
-
-    const [assignmentSubmissions, quizAttempts, progressDoc] = await Promise.all([
-      safeFindAssignmentSubmissions({ userId: req.auth.id, enrollmentId: enrollment._id }),
-      safeFindQuizAttempts({ userId: req.auth.id, enrollmentId: enrollment._id }),
-      safeFindProgressOne({
-        $or: [
-          { userId: req.auth.id, courseId: course._id },
-          { studentId: req.auth.id, courseId: course._id },
-        ],
-      }),
-    ])
-
-    const progress = calculateCourseProgress({
-      course,
-      enrollment,
-      progress: progressDoc,
-      quizAttempts,
-      assignmentSubmissions,
-    })
-
-    if (!progress.isCompleted && enrollment.status !== 'completed') {
-      return res.status(403).json({
-        message: 'Certificate is only available upon successful completion of all required course activities.',
-      })
-    }
-
-    let certificate = await Certificate.findOne({
-      userId: req.auth.id,
-      courseId: course._id,
-      status: 'issued',
-    }).lean().catch(() => null)
-
-    if (!certificate) {
-      try {
-        const certId = `AH-${new Date().getFullYear()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
-        const studentName = req.auth?.user?.fullName || req.auth?.user?.name || req.auth?.user?.username || req.auth?.name || 'Student'
-        const [createdCert] = await Certificate.create([{
-          certificateId: certId,
-          userId: req.auth.id,
-          collegeId: enrollment.collegeId || null,
-          courseId: course._id,
-          enrollmentId: enrollment._id,
-          studentName,
-          studentEmail: req.auth?.user?.email || '',
-          courseTitle: course.title,
-          courseCategory: course.category || 'Professional Certification',
-          issueDate: new Date(),
-          completionDate: enrollment.completedAt || new Date(),
-          verificationUrl: `/student/certificates/verify/${certId}`,
-          status: 'issued',
-          metadata: {
-            totalLessons: progress.videoStats.total,
-            totalQuizzes: progress.quizStats.total,
-            totalAssessments: progress.assessmentStats.total,
-          },
-        }])
-        certificate = createdCert?.toObject ? createdCert.toObject() : createdCert
-      } catch {
-        // non-fatal
-      }
-    }
-
-    return res.json({ certificate })
-  } catch (error) {
-    return next(error)
-  }
-}
-
-async function handleGetStudentCertificates(req, res, next) {
-  try {
-    const certificates = await Certificate.find({
-      userId: req.auth.id,
-      status: 'issued',
-    })
-      .populate('courseId', 'title category thumbnailUrl difficulty')
-      .sort({ issueDate: -1 })
-      .lean()
-
-    return res.json({ certificates })
-  } catch (error) {
-    return next(error)
-  }
-}
-
-router.get('/courses/:courseId', ...requireStudent, handleGetCourseDetails)
-router.get('/courses/:courseId/details', ...requireStudent, handleGetCourseDetails)
-router.get('/student/courses/:courseId', ...requireStudent, handleGetCourseDetails)
-router.get('/student/courses/:courseId/details', ...requireStudent, handleGetCourseDetails)
-router.post('/courses/:courseId/enroll', ...requireStudent, handleEnrollCourse)
-router.post('/student/courses/:courseId/enroll', ...requireStudent, handleEnrollCourse)
-router.post('/courses/:courseId/unenroll', ...requireStudent, handleUnenrollCourse)
-router.post('/student/courses/:courseId/unenroll', ...requireStudent, handleUnenrollCourse)
-router.post('/enrollments/:courseId/unenroll', ...requireStudent, handleUnenrollCourse)
-router.get('/courses/:courseId/progress', ...requireStudent, handleGetCourseProgress)
-router.get('/student/courses/:courseId/progress', ...requireStudent, handleGetCourseProgress)
-router.get('/courses/:courseId/certificate', ...requireStudent, handleGetCourseCertificate)
-router.get('/student/courses/:courseId/certificate', ...requireStudent, handleGetCourseCertificate)
-router.get('/student/certificates', ...requireStudent, handleGetStudentCertificates)
-router.get('/certificates/me', ...requireStudent, handleGetStudentCertificates)
+})
 
 router.get('/courses/:courseId/learning-content', ...requireStudent, async (req, res, next) => {
   try {
@@ -1950,88 +1623,435 @@ router.get('/courses/:courseId/learning-content', ...requireStudent, async (req,
       .select('+modules.quiz.questions.correctOptionIndices +modules.contentItems.quiz.questions.correctOptionIndices +quizzes.questions.correctOptionIndex')
       .lean()
     if (!course) return res.status(404).json({ message: 'The enrolled course could not be found.' })
-
-    try {
-      if (mongoose.connection.readyState !== 0 || Resource.find !== mongoose.Model.find) {
-        const extraResources = await Resource.find({ courseId }).lean()
-        if (extraResources?.length) {
-          course.resources = [...(course.resources || []), ...extraResources]
-        }
-      }
-    } catch {
-      // safe fallback
-    }
+    const courseWithAssignmentDeadlines = applyAssignmentDeadline(course, enrollment.createdAt)
 
     const [assignmentSubmissions, quizAttempts] = await Promise.all([
-      (mongoose.connection.readyState === 0 && AssignmentSubmission.find === mongoose.Model.find
-        ? Promise.resolve([])
-        : AssignmentSubmission.find({ userId: req.auth.id, enrollmentId: enrollment._id })
-            .select('_id assignmentId fileName contentType fileSize submittedAt reviewStatus reviewedAt reviewComment marksObtained evaluationStatus correctness feedback evaluatedAt')
-            .sort({ submittedAt: -1, _id: -1 })
-            .lean()),
-      (mongoose.connection.readyState === 0 && QuizAttempt.find === mongoose.Model.find
-        ? Promise.resolve([])
-        : QuizAttempt.find({ userId: req.auth.id, enrollmentId: enrollment._id })
-            .select('_id quizId status startedAt passingPercentage timeLimitMinutes timeTakenSeconds answers earnedPoints totalPoints correctAnswers incorrectAnswers scorePercentage passed submittedAt createdAt +questionSnapshot')
-            .sort({ createdAt: -1 })
-            .lean()),
+      AssignmentSubmission.find({ userId: req.auth.id, enrollmentId: enrollment._id })
+        .select('_id assignmentId fileName contentType fileSize submittedAt updatedAt +activeSubmissionKey gradingLeaseUntil gradingNextRetryAt attemptNumber lockoutStartedAt lockoutUntil reviewStatus reviewedAt reviewComment marksObtained evaluationStatus correctness feedback evaluatedAt gradingStatus gradingError aiEvaluation humanReviewRequest humanEvaluation finalMarks finalFeedback scorePercentage academicStatus')
+        .sort({ submittedAt: -1, _id: -1 })
+        .lean(),
+      QuizAttempt.find({ userId: req.auth.id, enrollmentId: enrollment._id })
+        .select('_id quizId status startedAt passingPercentage timeLimitMinutes timeTakenSeconds answers earnedPoints totalPoints correctAnswers incorrectAnswers scorePercentage passed submittedAt createdAt +questionSnapshot')
+        .sort({ createdAt: -1 })
+        .lean(),
     ])
-
-    let prog = null
-    try {
-      prog = await safeFindProgressOne({ userId: req.auth.id, courseId })
-    } catch {
-      // Safe fallback
-    }
-
-    const completedIdsSet = new Set((enrollment.completedLessonIds || []).map(String))
-    if (prog?.completedLessons) {
-      for (const cl of prog.completedLessons) {
-        if (cl.lessonId) completedIdsSet.add(String(cl.lessonId))
-      }
-    }
-
-    const originalCompletedIds = enrollment.completedLessonIds || []
-    const originalCompletedSet = new Set(originalCompletedIds.map(String))
-    const additionalCompletedIds = [...completedIdsSet].filter((id) => !originalCompletedSet.has(id))
-    const mergedCompletedLessonIds = [...originalCompletedIds, ...additionalCompletedIds]
-
-    const courseProgress = calculateCourseProgress({
+    await populateResourceHashes(courseWithAssignmentDeadlines)
+    const certificateProgress = calculateCourseProgress({
       course,
-      enrollment: { ...enrollment, completedLessonIds: mergedCompletedLessonIds },
-      progress: prog,
+      enrollment,
       quizAttempts,
       assignmentSubmissions,
     })
-
-    const status = courseProgress.status
-    const completedAt = courseProgress.isCompleted
-      ? (enrollment.completedAt || new Date())
-      : null
-
-    if (courseProgress.isCompleted && enrollment.status !== 'completed') {
-      try {
-        await Enrollment.updateOne(
-          { _id: enrollment._id },
-          { $set: { status: 'completed', completedAt } },
-        )
-      } catch {
-        // Safe fallback
-      }
+    const enrollmentStatus = await syncEnrollmentStatus(enrollment, certificateProgress)
+    const courseProgress = calculateCourseActivityProgress(
+      course,
+      enrollment,
+      quizAttempts,
+      assignmentSubmissions,
+    )
+    const attemptStateByAssignment = new Map()
+    for (const submission of assignmentSubmissions) {
+      const key = String(submission.assignmentId)
+      if (attemptStateByAssignment.has(key)) continue
+      const assignment = findAssignment(course, key)
+      const relatedSubmissions = assignmentSubmissions.filter(
+        (entry) => String(entry.assignmentId) === key,
+      )
+      attemptStateByAssignment.set(
+        key,
+        getAssignmentAttemptState(relatedSubmissions, Number(assignment?.points)),
+      )
     }
-
     return res.json({
       enrollment: {
         ...enrollment,
-        status,
-        completedAt,
-        completedLessonIds: mergedCompletedLessonIds,
-        courseId: hideQuizAnswers(course),
+        status: enrollmentStatus,
+        courseProgress,
+        lessonPlaybackPositions: getLessonPlaybackPositions(enrollment),
+        lessonWatchedPositions: getLessonWatchedPositions(enrollment),
+        courseId: hideLockedCourseActivityContent(
+          hideQuizAnswers(courseWithAssignmentDeadlines),
+          getAccessibleCourseActivityKeys(course, enrollment, quizAttempts, assignmentSubmissions),
+        ),
       },
-      progress: courseProgress,
-      assignmentSubmissions,
+      assignmentSubmissions: assignmentSubmissions.map((submission) => ({
+        ...submission,
+        attemptState: attemptStateByAssignment.get(String(submission.assignmentId)),
+        reviewStatus: ['approved', 'rejected'].includes(submission.reviewStatus)
+          ? submission.reviewStatus
+          : 'pending',
+      })),
       quizAttempts: quizAttempts.map(serializeQuizAttempt),
     })
+  } catch (error) {
+    return next(error)
+  }
+})
+
+router.get('/courses/:courseId/resources/:resourceId/file', ...requireStudent, async (req, res, next) => {
+  try {
+    const { courseId, resourceId } = req.params
+    if (!isValidObjectId(courseId)) {
+      return res.status(400).json({ message: 'Select a valid course.' })
+    }
+    if (!resourceId || typeof resourceId !== 'string' || !resourceId.trim()) {
+      return res.status(400).json({ message: 'Select a valid resource.' })
+    }
+
+    const enrollmentQuery = {
+      userId: req.auth.id,
+      courseId,
+      ...getStudentEnrollmentScope(req),
+      status: { $ne: 'cancelled' },
+    }
+    const enrollment = await Enrollment.findOne(enrollmentQuery).select('_id').lean()
+    if (!enrollment) {
+      return res.status(403).json({ message: 'Enroll in this course before accessing its resources.' })
+    }
+
+    const course = await Course.findById(courseId).lean()
+    if (!course) {
+      return res.status(404).json({ message: 'The enrolled course could not be found.' })
+    }
+
+    const decodedResourceId = decodeURIComponent(resourceId.trim())
+    const decodedPublicId = typeof req.query?.publicId === 'string' ? decodeURIComponent(req.query.publicId.trim()) : null
+    const decodedUrl = typeof req.query?.url === 'string' ? decodeURIComponent(req.query.url.trim()) : null
+
+    const resource = findResourceInCourse(course, decodedResourceId, decodedPublicId, decodedUrl)
+    if (!resource) {
+      return res.status(404).json({ message: 'The requested resource could not be found in this course.' })
+    }
+
+    const publicId = resource.publicId || extractCloudinaryDetails(resource.url)?.publicId || decodedPublicId
+    let streamUrl = resource.url
+    const format = (resource.format || (publicId ? path.extname(publicId).slice(1) : '') || 'pdf').toLowerCase()
+    const resourceType = resource.resourceType || (format === 'pdf' ? 'raw' : 'image')
+
+    if (publicId) {
+      streamUrl = cloudinary.utils.private_download_url(publicId, format, {
+        resource_type: resourceType,
+        type: 'upload',
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+      })
+    }
+
+    if (!streamUrl) {
+      return res.status(404).json({ message: 'Resource file location is unavailable.' })
+    }
+
+    const upstreamResponse = await fetch(streamUrl, {
+      signal: AbortSignal.timeout(30000),
+    })
+
+    if (!upstreamResponse.ok) {
+      return res.status(upstreamResponse.status >= 400 && upstreamResponse.status < 500 ? 404 : 502).json({
+        message: 'The requested resource file could not be retrieved.',
+      })
+    }
+
+    const mimeTypes = {
+      pdf: 'application/pdf',
+      doc: 'application/msword',
+      docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      ppt: 'application/vnd.ms-powerpoint',
+      pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      xls: 'application/vnd.ms-excel',
+      xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      zip: 'application/zip',
+      png: 'image/png',
+      jpg: 'image/jpeg',
+      jpeg: 'image/jpeg',
+      txt: 'text/plain',
+    }
+    const contentType = mimeTypes[format] || upstreamResponse.headers.get('content-type') || 'application/octet-stream'
+    res.setHeader('Content-Type', contentType)
+
+    const contentLength = upstreamResponse.headers.get('content-length')
+    if (contentLength) {
+      res.setHeader('Content-Length', contentLength)
+    }
+
+    const isDownload = req.query.download === 'true' || req.query.download === '1'
+    let baseTitle = resource.title?.trim() || path.basename(publicId || 'document')
+    if (!path.extname(baseTitle) && format) {
+      baseTitle = `${baseTitle}.${format}`
+    }
+    const safeAscii = baseTitle.replace(/[^a-zA-Z0-9._-]/g, '_')
+    const encodedName = encodeURIComponent(baseTitle)
+    const dispositionType = isDownload ? 'attachment' : 'inline'
+    res.setHeader('Content-Disposition', `${dispositionType}; filename="${safeAscii}"; filename*=UTF-8''${encodedName}`)
+    res.setHeader('Cache-Control', 'private, no-cache, no-store, must-revalidate')
+
+    const readable = Readable.fromWeb(upstreamResponse.body)
+    req.on('close', () => {
+      if (!res.writableEnded) {
+        upstreamResponse.body?.cancel().catch(() => {})
+      }
+    })
+    return readable.pipe(res)
+  } catch (error) {
+    return next(error)
+  }
+})
+
+router.post('/courses/:courseId/attention-checks/:lessonId/start', ...requireStudent, async (req, res, next) => {
+  try {
+    const { courseId, lessonId } = req.params
+    const { sessionId, triggerIndex, positionSeconds } = req.body ?? {}
+    if (
+      !isValidObjectId(courseId)
+      || !isValidObjectId(lessonId)
+      || typeof sessionId !== 'string'
+      || !/^[a-f\d-]{36}$/i.test(sessionId)
+      || !Number.isInteger(triggerIndex)
+      || triggerIndex < 0
+      || triggerIndex > 99
+      || !Number.isFinite(positionSeconds)
+      || positionSeconds < 0
+      || positionSeconds > 43200
+    ) {
+      return res.status(400).json({ message: 'A valid course, lesson, playback session, question number, and video position are required.' })
+    }
+
+    const enrollment = await Enrollment.findOne({
+      userId: req.auth.id,
+      courseId,
+      ...getStudentEnrollmentScope(req),
+      status: { $ne: 'cancelled' },
+    }).sort({ createdAt: -1 }).lean()
+    if (!enrollment) return res.status(404).json({ message: 'An active enrollment is required to answer this attention check.' })
+
+    const course = await Course.findById(courseId)
+      .select('+modules.lessons.attentionCheck.questions.correctOptionIndices +modules.contentItems.attentionCheck.questions.correctOptionIndices')
+      .lean()
+    if (!course) return res.status(404).json({ message: 'The enrolled course could not be found.' })
+    const lesson = findVideoLesson(course, lessonId)
+    const attentionCheck = lesson?.attentionCheck
+    if (!attentionCheck?.enabled) return res.status(404).json({ message: 'Attention checks are not enabled for this lesson.' })
+    const activityAccess = await getCourseActivityAccess(course, enrollment, 'video-lesson', lessonId)
+    if (respondIfCourseActivityLocked(res, activityAccess)) return
+
+    const questions = getSelectedAttentionQuestions(attentionCheck)
+    const questionCount = attentionCheck.questionsDuringVideo ?? questions.length
+    if (!questions.length || questions.length !== questionCount || triggerIndex >= questionCount) {
+      return res.status(409).json({ message: 'The attention check configuration for this lesson is incomplete.' })
+    }
+
+    const scope = {
+      userId: req.auth.id,
+      enrollmentId: enrollment._id,
+      courseId,
+      lessonId,
+      sessionId,
+      triggerIndex,
+    }
+    const previousResponse = await VideoAttentionResponse.findOne(scope).select('+correctOptionIndices').lean()
+    if (previousResponse && previousResponse.status !== 'presented') {
+      return res.json({
+        recorded: true,
+        status: previousResponse.status,
+        responseTimeMs: previousResponse.responseTimeMs,
+        presentedAt: previousResponse.presentedAt,
+        serverTime: new Date(),
+      })
+    }
+    if (previousResponse) {
+      return res.json({
+        responseId: String(previousResponse._id),
+        question: {
+          _id: String(previousResponse.questionId),
+          prompt: previousResponse.questionPrompt,
+          type: previousResponse.questionType,
+          options: previousResponse.options,
+        },
+        presentedAt: previousResponse.presentedAt,
+        serverTime: new Date(),
+      })
+    }
+
+    const priorResponses = await VideoAttentionResponse.find({
+      userId: req.auth.id,
+      enrollmentId: enrollment._id,
+      lessonId,
+      sessionId,
+    }).select('questionId').lean()
+    const usedQuestionIds = new Set(priorResponses.map((response) => String(response.questionId)))
+    const availableQuestions = questions.filter((question) => !usedQuestionIds.has(String(question._id)))
+    if (!availableQuestions.length) {
+      return res.status(409).json({ message: 'There are no unused attention questions remaining in this playback session.' })
+    }
+    const question = availableQuestions[Math.floor(Math.random() * availableQuestions.length)]
+    const presentedAt = new Date()
+    const response = await VideoAttentionResponse.create({
+      userId: req.auth.id,
+      ...(req.auth.user.studentType === 'college' ? { collegeId: req.auth.user.collegeId } : {}),
+      enrollmentId: enrollment._id,
+      courseId,
+      lessonId,
+      lessonTitle: lesson.title || 'Video lesson',
+      sessionId,
+      triggerIndex,
+      questionId: question._id,
+      questionPrompt: question.prompt,
+      questionType: question.type,
+      options: question.options,
+      correctOptionIndices: question.correctOptionIndices,
+      videoPositionSeconds: positionSeconds,
+      presentedAt,
+      status: 'presented',
+    })
+    return res.status(201).json({
+      responseId: String(response._id),
+      question: {
+        _id: String(question._id),
+        prompt: question.prompt,
+        type: question.type,
+        options: question.options,
+      },
+      presentedAt,
+      serverTime: new Date(),
+    })
+  } catch (error) {
+    return next(error)
+  }
+})
+
+router.post('/courses/:courseId/attention-checks/:lessonId/submit', ...requireStudent, async (req, res, next) => {
+  try {
+    const { courseId, lessonId } = req.params
+    const { responseId, selectedOptionIndices, notAnswered } = req.body ?? {}
+    if (!isValidObjectId(courseId) || !isValidObjectId(lessonId) || !isValidObjectId(responseId)) {
+      return res.status(400).json({ message: 'Select a valid course, lesson, and attention check response.' })
+    }
+    if (notAnswered !== undefined && typeof notAnswered !== 'boolean') {
+      return res.status(400).json({ message: 'The attention check response status is invalid.' })
+    }
+
+    const enrollment = await Enrollment.findOne({
+      userId: req.auth.id,
+      courseId,
+      ...getStudentEnrollmentScope(req),
+      status: { $ne: 'cancelled' },
+    }).sort({ createdAt: -1 }).lean()
+    if (!enrollment) return res.status(404).json({ message: 'An active enrollment is required to submit this attention check.' })
+
+    const response = await VideoAttentionResponse.findOne({
+      _id: responseId,
+      userId: req.auth.id,
+      enrollmentId: enrollment._id,
+      courseId,
+      lessonId,
+    }).select('+correctOptionIndices')
+    if (!response) return res.status(409).json({ message: 'This attention check is no longer available for submission.' })
+    const course = await Course.findById(courseId).select('modules').lean()
+    if (!course) return res.status(404).json({ message: 'The enrolled course could not be found.' })
+    const activityAccess = await getCourseActivityAccess(course, enrollment, 'video-lesson', lessonId)
+    if (respondIfCourseActivityLocked(res, activityAccess)) return
+    const answeredAt = new Date()
+    const responseTimeMs = Math.max(0, answeredAt.getTime() - new Date(response.presentedAt).getTime())
+    const isTimedOut = responseTimeMs >= attentionCheckResponseTimeoutMs
+    const hasNoAnswer = notAnswered === true
+      || selectedOptionIndices === undefined
+      || (Array.isArray(selectedOptionIndices) && selectedOptionIndices.length === 0)
+    const isNotAnswered = hasNoAnswer || isTimedOut
+
+    if (response.status === 'answered') {
+      if (notAnswered === true || !Array.isArray(selectedOptionIndices) || !isCorrectAttentionAnswer(selectedOptionIndices, response.selectedOptionIndices || [])) {
+        return res.status(409).json({ message: 'This attention check has already been answered.' })
+      }
+      return res.json({
+        recorded: true,
+        status: 'answered',
+        isCorrect: response.isCorrect,
+        responseTimeMs: response.responseTimeMs,
+      })
+    }
+
+    if (response.status === 'not_answered') {
+      if (!isNotAnswered) return res.status(409).json({ message: 'This attention check was recorded as not answered.' })
+      return res.json({
+        recorded: true,
+        status: 'not_answered',
+        isCorrect: false,
+        responseTimeMs: response.responseTimeMs,
+      })
+    }
+
+    if (isNotAnswered && !isTimedOut) {
+      return res.status(409).json({ message: 'The 10-second response window is still active.' })
+    }
+
+    if (isNotAnswered) {
+      response.selectedOptionIndices = []
+      response.answeredAt = answeredAt
+      response.responseTimeMs = attentionCheckResponseTimeoutMs
+      response.isCorrect = false
+      response.status = 'not_answered'
+      await response.save()
+      return res.json({
+        recorded: true,
+        status: 'not_answered',
+        isCorrect: false,
+        responseTimeMs: response.responseTimeMs,
+      })
+    }
+
+    if (
+      !Array.isArray(selectedOptionIndices)
+      || selectedOptionIndices.length < 1
+      || selectedOptionIndices.length > response.options.length
+      || selectedOptionIndices.some((index) => !Number.isInteger(index) || index < 0 || index >= response.options.length)
+      || new Set(selectedOptionIndices).size !== selectedOptionIndices.length
+      || (response.questionType !== 'multiple-select' && selectedOptionIndices.length !== 1)
+    ) {
+      return res.status(400).json({ message: 'Select a valid answer for this attention check.' })
+    }
+
+    response.selectedOptionIndices = selectedOptionIndices
+    response.answeredAt = answeredAt
+    response.responseTimeMs = responseTimeMs
+    response.isCorrect = isCorrectAttentionAnswer(selectedOptionIndices, response.correctOptionIndices)
+    response.status = 'answered'
+    await response.save()
+    return res.json({
+      recorded: true,
+      status: 'answered',
+      isCorrect: response.isCorrect,
+      responseTimeMs: response.responseTimeMs,
+    })
+  } catch (error) {
+    return next(error)
+  }
+})
+
+router.get('/courses/:courseId/quizzes/:quizId/attempts/status', ...requireStudent, async (req, res, next) => {
+  try {
+    const { courseId, quizId } = req.params
+    if (![courseId, quizId].every(isValidObjectId)) {
+      return res.status(400).json({ message: 'Select a valid course and quiz.' })
+    }
+    const enrollment = await Enrollment.findOne({
+      userId: req.auth.id,
+      courseId,
+      ...getStudentEnrollmentScope(req),
+      status: { $ne: 'cancelled' },
+    }).sort({ createdAt: -1 }).lean()
+    if (!enrollment) return res.status(404).json({ message: 'An active enrollment is required to view quiz status.' })
+
+    const course = await Course.findById(courseId).select('_id modules quizzes').lean()
+    if (!course) return res.status(404).json({ message: 'The enrolled course could not be found.' })
+    if (!findQuiz(course, quizId)) return res.status(404).json({ message: 'This quiz is not available in the enrolled course.' })
+    const activityAccess = await getCourseActivityAccess(course, enrollment, 'quiz', quizId)
+    if (respondIfCourseActivityLocked(res, activityAccess)) return
+
+    const now = new Date()
+    const state = await getQuizAttemptState({
+      userId: req.auth.id,
+      courseId,
+      quizId,
+    }, now)
+    return res.status(200).json({ quizStatus: getQuizAttemptStatus(state, now) })
   } catch (error) {
     return next(error)
   }
@@ -2059,6 +2079,8 @@ router.post('/courses/:courseId/quizzes/:quizId/attempts/start', ...requireStude
     if (!quiz || !Array.isArray(quiz.questions) || !quiz.questions.length) {
       return res.status(404).json({ message: 'This quiz is not available in the enrolled course.' })
     }
+    const activityAccess = await getCourseActivityAccess(course, enrollment, 'quiz', quizId)
+    if (respondIfCourseActivityLocked(res, activityAccess)) return
     const questionSnapshot = getQuizQuestionSnapshot(quiz)
     const stateKey = {
       userId: req.auth.id,
@@ -2161,6 +2183,8 @@ router.post('/courses/:courseId/quizzes/:quizId/attempts/:attemptId/submit', ...
       .select('+modules.quiz.questions.correctOptionIndices +modules.contentItems.quiz.questions.correctOptionIndices +quizzes.questions.correctOptionIndex')
       .lean()
     if (!course) return res.status(404).json({ message: 'The enrolled course could not be found.' })
+    const activityAccess = await getCourseActivityAccess(course, enrollment, 'quiz', quizId)
+    if (respondIfCourseActivityLocked(res, activityAccess)) return
     const quiz = findQuiz(course, quizId)
     const questions = attempt.questionSnapshot?.length
       ? attempt.questionSnapshot.map((question) => ({
@@ -2300,12 +2324,11 @@ router.post('/courses/:courseId/quizzes/:quizId/attempts/:attemptId/submit', ...
           submittedAt,
         },
       },
-      { new: true, runValidators: true },
+      { returnDocument: 'after', runValidators: true },
     )
     if (!submittedAttempt) {
       return res.status(409).json({ message: 'This quiz attempt has already been submitted.' })
     }
-
     let updatedState = state
     if (passed || attemptNumber === quizAttemptLimit) {
       updatedState = await QuizAttemptState.findOneAndUpdate(
@@ -2315,11 +2338,12 @@ router.post('/courses/:courseId/quizzes/:quizId/attempts/:attemptId/submit', ...
             ? { passed: true, lockedUntil: null }
             : { lockedUntil: new Date(submittedAt.getTime() + quizAttemptCooldownMs) },
         },
-        { new: true },
+        { returnDocument: 'after' },
       ).lean() || await QuizAttemptState.findOne(stateKey).lean()
     }
     if (!updatedState) throw new Error('Quiz attempt state could not be updated after submission.')
     const quizStatus = getQuizAttemptStatus(updatedState, submittedAt)
+    const courseProgress = await recalculateEnrollmentCourseProgress({ enrollment, course })
 
     await createStudentNotification({
       recipientId: req.auth.id,
@@ -2344,77 +2368,6 @@ router.post('/courses/:courseId/quizzes/:quizId/attempts/:attemptId/submit', ...
         enrollment,
         course,
       })
-    }
-
-    // Synchronize with Progress and Enrollment models
-    let courseProgress = null
-    try {
-      let progressDoc = await Progress.findOne({ userId: req.auth.id, courseId })
-      if (!progressDoc) {
-        progressDoc = new Progress({
-          userId: req.auth.id,
-          courseId,
-          collegeId: req.auth.user?.collegeId || null,
-          completedLessons: [],
-          quizSubmissions: [],
-          progressPercentage: 0,
-          status: 'not_started',
-        })
-      }
-
-      const isPassed = scorePercentage >= passingPercentage
-      const existingSubmission = (progressDoc.quizSubmissions || []).find(
-        (sub) => canonicalObjectId(sub.quizId) === canonicalObjectId(quizId),
-      )
-      if (existingSubmission) {
-        existingSubmission.score = earnedPoints
-        existingSubmission.totalQuestions = questions.length
-        existingSubmission.passed = Boolean(existingSubmission.passed || isPassed)
-        existingSubmission.submittedAt = submittedAt
-      } else {
-        progressDoc.quizSubmissions.push({
-          quizId,
-          score: earnedPoints,
-          totalQuestions: questions.length,
-          passed: isPassed,
-          submittedAt,
-        })
-      }
-
-      const [allAttempts, assignmentSubmissions] = await Promise.all([
-        QuizAttempt.find({ userId: req.auth.id, enrollmentId: enrollment._id })
-          .select('_id quizId status passed scorePercentage')
-          .lean(),
-        AssignmentSubmission.find({ userId: req.auth.id, enrollmentId: enrollment._id })
-          .select('_id assignmentId submittedAt')
-          .lean(),
-      ])
-
-      courseProgress = calculateCourseProgress({
-        course,
-        enrollment,
-        progress: progressDoc,
-        quizAttempts: allAttempts,
-        assignmentSubmissions,
-      })
-
-      progressDoc.progressPercentage = courseProgress.progressPercentage
-      progressDoc.status = courseProgress.isCompleted ? 'completed' : 'in_progress'
-      if (courseProgress.isCompleted) {
-        progressDoc.completedAt = progressDoc.completedAt || new Date()
-      }
-      progressDoc.lastActivityAt = new Date()
-      await progressDoc.save()
-
-      const enrollmentUpdate = {
-        status: courseProgress.status,
-      }
-      if (courseProgress.isCompleted) {
-        enrollmentUpdate.completedAt = enrollment.completedAt || new Date()
-      }
-      await Enrollment.updateOne({ _id: enrollment._id }, { $set: enrollmentUpdate })
-    } catch {
-      // Safe fallback
     }
 
     return res.status(200).json({
@@ -2448,7 +2401,8 @@ router.post('/courses/:courseId/quizzes/:quizId/attempts/:attemptId/submit', ...
           }))),
       },
       quizStatus,
-      progress: courseProgress,
+      courseProgress,
+      status: courseProgress.status,
     })
   } catch (error) {
     return next(error)
@@ -2466,7 +2420,7 @@ router.post(
         return res.status(400).json({ message: 'Select a valid course and assignment.' })
       }
       if (!req.file || !isValidAssignmentFile(req.file)) {
-        return res.status(400).json({ message: 'Upload a valid PDF, DOCX, or TXT file up to 10 MB.' })
+        return res.status(400).json({ message: 'Upload a valid PDF, DOCX, TXT, JPEG, PNG, or WEBP file up to 10 MB.' })
       }
       const enrollment = await Enrollment.findOne({
         userId: req.auth.id,
@@ -2475,9 +2429,67 @@ router.post(
         status: { $ne: 'cancelled' },
       }).sort({ createdAt: -1 }).lean()
       if (!enrollment) return res.status(404).json({ message: 'An active enrollment is required to submit this assignment.' })
-      const course = await Course.findById(courseId).select('assignments modules.contentItems').lean()
-      if (!course || !findAssignment(course, assignmentId)) {
+      const course = await Course.findById(courseId).select('title assignments modules quizzes').lean()
+      const assignment = findAssignment(course, assignmentId)
+      if (!course || !assignment) {
         return res.status(404).json({ message: 'This assignment is not available in the enrolled course.' })
+      }
+      const activityAccess = await getCourseActivityAccess(course, enrollment, 'assignment', assignmentId)
+      if (respondIfCourseActivityLocked(res, activityAccess)) return
+      const deadline = getAssignmentDeadline(enrollment.createdAt)
+      if (!deadline) {
+        return res.status(409).json({ message: 'The assignment deadline could not be calculated from your enrollment date.' })
+      }
+      if (Date.now() > deadline.getTime()) {
+        return res.status(403).json({ message: 'The one-week submission deadline for this assignment has passed.' })
+      }
+      if (!Number.isFinite(Number(assignment.points)) || Number(assignment.points) <= 0) {
+        return res.status(409).json({ message: 'This assignment does not have a valid maximum mark for AI grading.' })
+      }
+      const activeSubmissionKey = `${enrollment._id}:${assignmentId}`
+      await AssignmentSubmission.updateMany({
+        enrollmentId: enrollment._id,
+        assignmentId,
+        activeSubmissionKey,
+        $or: [
+          { gradingStatus: { $nin: ['Submitted', 'AI Grading', 'Re-evaluation Requested', 'Human Review'] } },
+          { gradingStatus: 'Submitted', gradingError: { $ne: '' } },
+        ],
+      }, { $unset: { activeSubmissionKey: '' } })
+      const attemptState = await getCurrentAssignmentAttemptState({
+        enrollmentId: enrollment._id,
+        assignmentId,
+        maximumMarks: Number(assignment.points),
+      })
+      if (attemptState.hasPendingGrading) {
+        return res.status(409).json({
+          message: 'A submission is currently being graded. Wait for grading to finish before submitting again.',
+          attemptState,
+        })
+      }
+      if (attemptState.hasPendingHumanReview) {
+        return res.status(409).json({
+          message: 'A human re-evaluation is pending for this assignment. Wait for the review to finish before submitting again.',
+          attemptState,
+        })
+      }
+      if (attemptState.hasPassed) {
+        return res.status(409).json({
+          message: 'This assignment is already passed. Further submissions are not allowed.',
+          attemptState,
+        })
+      }
+      if (attemptState.isLocked) {
+        return res.status(429).json({
+          message: 'You have used all 3 attempts and have not achieved the required passing score of 75%. You can submit again after the 24-hour waiting period.',
+          attemptState,
+        })
+      }
+      if (!attemptState.canSubmit) {
+        return res.status(429).json({
+          message: 'You have used all 3 attempts. You can submit again after the 24-hour waiting period.',
+          attemptState,
+        })
       }
       const submission = await AssignmentSubmission.create({
         userId: req.auth.id,
@@ -2489,85 +2501,113 @@ router.post(
         contentType: req.file.mimetype,
         fileSize: req.file.size,
         fileData: req.file.buffer,
+        activeSubmissionKey,
+        attemptNumber: attemptState.nextAttemptNumber,
+        gradingStatus: 'Submitted',
+        gradingRetryCount: 0,
       })
-      // Synchronize with Progress and Enrollment models
-      let courseProgress = null
+      wakeAssignmentGradingWorker()
       try {
-        let progressDoc = await Progress.findOne({ userId: req.auth.id, courseId })
-        if (!progressDoc) {
-          progressDoc = new Progress({
-            userId: req.auth.id,
-            courseId,
-            collegeId: req.auth.user?.collegeId || null,
-            completedLessons: [],
-            quizSubmissions: [],
-            progressPercentage: 0,
-            status: 'not_started',
-          })
-        }
-
-        const [quizAttempts, allSubmissions] = await Promise.all([
-          QuizAttempt.find({ userId: req.auth.id, enrollmentId: enrollment._id })
-            .select('_id quizId status passed scorePercentage')
-            .lean(),
-          AssignmentSubmission.find({ userId: req.auth.id, enrollmentId: enrollment._id })
-            .select('_id assignmentId submittedAt')
-            .lean(),
-        ])
-
-        courseProgress = calculateCourseProgress({
-          course,
-          enrollment,
-          progress: progressDoc,
-          quizAttempts,
-          assignmentSubmissions: allSubmissions,
+        await createStudentNotification({
+          recipientId: req.auth.id,
+          eventKey: `assignment-submitted:${req.auth.id}:${submission._id}`,
+          type: 'assignment_submitted',
+          title: 'Assignment submitted',
+          message: `${assignment.title || 'Your assignment'} was submitted and is being evaluated.`,
+          link: '/student/assignments',
+          metadata: { courseId, assignmentId, submissionId: String(submission._id) },
         })
-
-        progressDoc.progressPercentage = courseProgress.progressPercentage
-        progressDoc.status = courseProgress.isCompleted ? 'completed' : 'in_progress'
-        if (courseProgress.isCompleted) {
-          progressDoc.completedAt = progressDoc.completedAt || new Date()
-        }
-        progressDoc.lastActivityAt = new Date()
-        await progressDoc.save()
-
-        const enrollmentUpdate = {
-          status: courseProgress.status,
-        }
-        if (courseProgress.isCompleted) {
-          enrollmentUpdate.completedAt = enrollment.completedAt || new Date()
-        }
-        await Enrollment.updateOne({ _id: enrollment._id }, { $set: enrollmentUpdate })
-      } catch {
-        // Safe fallback
+      } catch (error) {
+        console.error(JSON.stringify({
+          event: 'assignment.submission_notification_failed',
+          submissionId: String(submission._id),
+          errorName: error instanceof Error ? error.name : 'UnknownError',
+        }))
       }
-
-      const assignment = findAssignment(course, assignmentId)
-      await createStudentNotification({
-        recipientId: req.auth.id,
-        eventKey: `assignment-submitted:${req.auth.id}:${submission._id}`,
-        type: 'assignment_submitted',
-        title: 'Assignment submitted',
-        message: `${assignment.title || 'Your assignment'} is awaiting review.`,
-        link: '/student/assignments',
-        metadata: { courseId, assignmentId, submissionId: String(submission._id) },
+      const currentAttemptState = await getCurrentAssignmentAttemptState({
+        enrollmentId: enrollment._id,
+        assignmentId,
+        maximumMarks: Number(assignment.points),
       })
-      return res.status(201).json({
-        submission: {
-          _id: submission._id,
-          assignmentId: submission.assignmentId,
-          fileName: submission.fileName,
-          contentType: submission.contentType,
-          fileSize: submission.fileSize,
-          submittedAt: submission.submittedAt,
-        },
-        progress: courseProgress,
+      return res.status(202).json({
+        submission: serializeAssignmentSubmission(submission, currentAttemptState),
+        attemptState: currentAttemptState,
       })
     } catch (error) {
+      if (error?.code === 11000 && error?.keyPattern?.activeSubmissionKey) {
+        return res.status(409).json({
+          message: 'A submission is currently being graded or human-reviewed. Wait for that process to finish before submitting again.',
+        })
+      }
       return next(error)
     }
   },
 )
+
+router.post('/assignment-submissions/:submissionId/human-review-requests', ...requireStudent, async (req, res, next) => {
+  try {
+    const { submissionId } = req.params
+    if (!isValidObjectId(submissionId)) return res.status(400).json({ message: 'Select a valid submission.' })
+    const requestDetails = normalizeHumanReviewRequest(req.body ?? {})
+    if (requestDetails.error) return res.status(400).json({ message: requestDetails.error })
+    const submissionContext = await AssignmentSubmission.findOne({
+      _id: submissionId,
+      userId: req.auth.id,
+    }).select('enrollmentId assignmentId gradingStatus').lean()
+    if (!submissionContext) return res.status(404).json({ message: 'The submission was not found.' })
+    if (submissionContext.gradingStatus !== 'AI Graded') {
+      return res.status(409).json({ message: 'A human re-evaluation can only be requested once after AI grading.' })
+    }
+    const activeSubmissionKey = `${submissionContext.enrollmentId}:${submissionContext.assignmentId}`
+    const submission = await AssignmentSubmission.findOneAndUpdate(
+      { _id: submissionId, userId: req.auth.id, gradingStatus: 'AI Graded' },
+      {
+        $set: {
+          gradingStatus: 'Re-evaluation Requested',
+          activeSubmissionKey,
+          humanReviewRequest: {
+            ...requestDetails,
+            requestedAt: new Date(),
+            requestedBy: new mongoose.Types.ObjectId(req.auth.id),
+          },
+        },
+      },
+      { returnDocument: 'after', runValidators: true },
+    )
+    if (!submission) {
+      return res.status(409).json({ message: 'A human re-evaluation can only be requested once after AI grading.' })
+    }
+    await Notification.create({
+      recipientRole: 'main_admin',
+      type: 'assignment_human_review_requested',
+      eventKey: `assignment-human-review:${submission._id}`,
+      title: 'Human re-evaluation requested',
+      message: `A student requested a human re-evaluation for ${submission.fileName}.`,
+      link: '/admin/dashboard?section=reports',
+      metadata: {
+        submissionId: String(submission._id),
+        courseId: String(submission.courseId),
+        assignmentId: String(submission.assignmentId),
+      },
+    })
+    const attemptState = await getCurrentAssignmentAttemptState({
+      enrollmentId: submissionContext.enrollmentId,
+      assignmentId: submissionContext.assignmentId,
+      maximumMarks: Number(submission.aiEvaluation?.maximumMarks),
+    })
+    return res.status(201).json({
+      submission: serializeAssignmentSubmission(submission, attemptState),
+      attemptState,
+    })
+  } catch (error) {
+    if (error?.code === 11000 && error?.keyPattern?.activeSubmissionKey) {
+      return res.status(409).json({
+        message: 'A grading or human-review process is already active for this assignment.',
+      })
+    }
+    return next(error)
+  }
+})
 
 router.get('/assignment-submissions/:submissionId/download', ...requireStudent, async (req, res, next) => {
   try {
@@ -2617,266 +2657,66 @@ router.get('/enrollments/me', ...requireStudent, async (req, res, next) => {
       )
       .sort({ createdAt: -1 })
       .lean()
-
-    const enrollmentIds = enrollments.map((e) => e._id)
-    const courseIds = enrollments.map((e) => e.courseId?._id).filter(Boolean)
-    const [progressList, allQuizAttempts, allAssignmentSubmissions, allCertificates] = await Promise.all([
-      safeFindProgress({ userId: req.auth.id }),
-      safeFindQuizAttempts({ userId: req.auth.id, enrollmentId: { $in: enrollmentIds }, status: 'submitted' }),
-      safeFindAssignmentSubmissions(
-        { userId: req.auth.id, enrollmentId: { $in: enrollmentIds } },
-        '_id enrollmentId assignmentId submittedAt',
-      ),
-      Certificate.find({
-        courseId: { $in: courseIds },
-        $or: [
-          { userId: req.auth.id },
-          { studentId: req.auth.id },
-        ],
-      })
-        .select('_id certificateId courseId studentName courseName completedAt issuedAt templateId')
-        .lean()
-        .catch(() => []),
-    ])
-
-    const progressMap = new Map((progressList || []).map((p) => [String(p.courseId), p]))
-    const certificateMap = new Map((allCertificates || []).map((c) => [String(c.courseId), c]))
-    const quizAttemptsByEnrollment = new Map()
-    for (const qa of allQuizAttempts || []) {
-      const eid = String(qa.enrollmentId)
-      const list = quizAttemptsByEnrollment.get(eid) || []
-      list.push(qa)
-      quizAttemptsByEnrollment.set(eid, list)
-    }
-    const assignmentSubmissionsByEnrollment = new Map()
-    for (const as of allAssignmentSubmissions || []) {
-      const eid = String(as.enrollmentId)
-      const list = assignmentSubmissionsByEnrollment.get(eid) || []
-      list.push(as)
-      assignmentSubmissionsByEnrollment.set(eid, list)
-    }
-
+    const enrollmentIds = enrollments.map(({ _id }) => _id)
+    const [assignmentSubmissions, quizAttempts] = enrollmentIds.length
+      ? await Promise.all([
+        AssignmentSubmission.find({
+          userId: req.auth.id,
+          enrollmentId: { $in: enrollmentIds },
+        }).select('userId courseId enrollmentId assignmentId submittedAt reviewStatus').lean(),
+        QuizAttempt.find({
+          userId: req.auth.id,
+          enrollmentId: { $in: enrollmentIds },
+          status: 'submitted',
+        }).select('userId courseId enrollmentId quizId status passed scorePercentage earnedPoints totalPoints').lean(),
+      ])
+      : [[], []]
+    const enrollmentsWithProgress = await recalculateEnrollmentsCourseProgress(enrollments, {
+      assignmentSubmissions,
+      quizAttempts,
+    })
     return res.json({
-      enrollments: enrollments.map((enrollment) => {
-        const course = enrollment.courseId
-        const prog = course?._id ? progressMap.get(String(course._id)) : null
-        const completedIdsSet = new Set((enrollment.completedLessonIds || []).map(String))
-        if (prog?.completedLessons) {
-          for (const cl of prog.completedLessons) {
-            if (cl.lessonId) completedIdsSet.add(String(cl.lessonId))
-          }
-        }
-
-        const originalCompletedIds = enrollment.completedLessonIds || []
-        const originalCompletedSet = new Set(originalCompletedIds.map(String))
-        const additionalCompletedIds = [...completedIdsSet].filter((id) => !originalCompletedSet.has(id))
-        const mergedCompletedLessonIds = [...originalCompletedIds, ...additionalCompletedIds]
-
-        const attemptsForEnrollment = quizAttemptsByEnrollment.get(String(enrollment._id)) || []
-        const submissionsForEnrollment = assignmentSubmissionsByEnrollment.get(String(enrollment._id)) || []
-
-        const courseProgress = calculateCourseProgress({
-          course,
-          enrollment: { ...enrollment, completedLessonIds: mergedCompletedLessonIds },
-          progress: prog,
-          quizAttempts: attemptsForEnrollment,
-          assignmentSubmissions: submissionsForEnrollment,
-        })
-
-        const status = courseProgress.status
-        const completedAt = courseProgress.isCompleted
-          ? (enrollment.completedAt || new Date())
-          : null
-        const certDoc = course?._id ? certificateMap.get(String(course._id)) : null
-
+      enrollments: enrollmentsWithProgress.map((enrollment) => {
+        const enrollmentAssignments = assignmentSubmissions.filter(
+          (submission) => String(submission.enrollmentId) === String(enrollment._id),
+        )
+        const enrollmentQuizzes = quizAttempts.filter(
+          (attempt) => String(attempt.enrollmentId) === String(enrollment._id),
+        )
         return {
           ...enrollment,
-          status,
-          completedAt,
-          progress: courseProgress,
-          completedLessonIds: mergedCompletedLessonIds,
-          courseId: hideQuizAnswers(enrollment.courseId),
-          certificate: certDoc ? {
-            id: String(certDoc._id),
-            _id: String(certDoc._id),
-            certificateId: certDoc.certificateId,
-            studentName: certDoc.studentName,
-            courseName: certDoc.courseName,
-            completedAt: certDoc.completedAt || certDoc.issuedAt,
-          } : null,
+          lessonPlaybackPositions: getLessonPlaybackPositions(enrollment),
+          lessonWatchedPositions: getLessonWatchedPositions(enrollment),
+          courseProgress: calculateCourseActivityProgress(
+            enrollment.courseId,
+            enrollment,
+            enrollmentQuizzes,
+            enrollmentAssignments,
+          ),
+          assignmentSubmissions: enrollmentAssignments.map((submission) => ({
+            assignmentId: submission.assignmentId,
+            submittedAt: submission.submittedAt,
+            reviewStatus: submission.reviewStatus,
+          })),
+          quizAttempts: enrollmentQuizzes.map((attempt) => ({
+            quizId: attempt.quizId,
+            status: attempt.status,
+            passed: attempt.passed,
+            scorePercentage: attempt.scorePercentage,
+            earnedPoints: attempt.earnedPoints,
+            totalPoints: attempt.totalPoints,
+          })),
+          courseId: hideLockedCourseActivityContent(
+            hideQuizAnswers(enrollment.courseId),
+            getAccessibleCourseActivityKeys(
+              enrollment.courseId,
+              enrollment,
+              enrollmentQuizzes,
+              enrollmentAssignments,
+            ),
+          ),
         }
       }),
-    })
-  } catch (error) {
-    return next(error)
-  }
-})
-
-router.patch('/enrollments/:enrollmentId/progress', ...requireStudent, async (req, res, next) => {
-  try {
-    const { enrollmentId } = req.params
-    const { lessonId, completed, started, positionSeconds } = req.body ?? {}
-    const hasPositionSeconds = Object.prototype.hasOwnProperty.call(req.body || {}, 'positionSeconds')
-    if (
-      !isValidObjectId(enrollmentId)
-      || !isValidObjectId(lessonId)
-      || (typeof completed !== 'boolean' && started !== true && !hasPositionSeconds)
-      || (hasPositionSeconds && (!Number.isFinite(positionSeconds) || positionSeconds < 0 || positionSeconds > 43200))
-    ) {
-      return res.status(400).json({ message: 'A valid enrollment, lesson, and progress state are required.' })
-    }
-
-    const scope = req.auth.user.studentType === 'college'
-      ? { collegeId: req.auth.user.collegeId }
-      : { collegeId: { $exists: false } }
-    const enrollmentQuery = {
-      _id: enrollmentId,
-      userId: req.auth.id,
-      ...scope,
-      status: { $ne: 'cancelled' },
-    }
-    const enrollment = await Enrollment.findOne(enrollmentQuery)
-      .populate('courseId', 'title modules assignments quizzes generateCertificate')
-      .lean()
-    if (!enrollment) return res.status(404).json({ message: 'The enrollment was not found.' })
-    if (!courseHasLesson(enrollment.courseId, lessonId)) {
-      return res.status(404).json({ message: 'The lesson was not found in this course.' })
-    }
-
-    const isAlreadyCompleted = (enrollment.completedLessonIds || []).some((id) => String(id) === lessonId)
-    const update = { $addToSet: { startedLessonIds: lessonId } }
-    if (typeof completed === 'boolean') {
-      if (completed) {
-        update.$addToSet.completedLessonIds = lessonId
-        if (!isAlreadyCompleted) {
-          update.$set = { [`lessonCompletionDates.${lessonId}`]: new Date() }
-        }
-      } else {
-        update.$pull = { completedLessonIds: lessonId }
-        update.$unset = { [`lessonCompletionDates.${lessonId}`]: 1 }
-      }
-    }
-    if (hasPositionSeconds) {
-      update.$set = {
-        ...update.$set,
-        [`lessonPlaybackPositions.${lessonId}`]: positionSeconds,
-      }
-      const previousPositionValue = getMapValue(enrollment.lessonPlaybackPositions, lessonId)
-      const previousPositionQuery = previousPositionValue === undefined
-        ? { $exists: false }
-        : previousPositionValue
-      enrollmentQuery[`lessonPlaybackPositions.${lessonId}`] = previousPositionQuery
-    }
-    const result = await Enrollment.updateOne(enrollmentQuery, update)
-    if (!result.matchedCount) {
-      if (!hasPositionSeconds) return res.status(404).json({ message: 'The enrollment was not found.' })
-      const latestEnrollment = await Enrollment.findOne({
-        _id: enrollmentId,
-        userId: req.auth.id,
-        ...scope,
-        status: { $ne: 'cancelled' },
-      })
-        .select('completedLessonIds startedLessonIds lessonPlaybackPositions')
-        .lean()
-      if (!latestEnrollment) return res.status(404).json({ message: 'The enrollment was not found.' })
-      return res.json({
-        completedLessonIds: (latestEnrollment.completedLessonIds || []).map(String),
-        startedLessonIds: (latestEnrollment.startedLessonIds || []).map(String),
-        lessonPlaybackPositions: getLessonPlaybackPositions(latestEnrollment),
-      })
-    }
-
-    const completedLessonIds = new Set((enrollment.completedLessonIds || []).map(String))
-    const startedLessonIds = new Set((enrollment.startedLessonIds || []).map(String))
-    startedLessonIds.add(lessonId)
-    if (completed === true) completedLessonIds.add(lessonId)
-    if (completed === false) completedLessonIds.delete(lessonId)
-
-    if (completed === true) {
-      const currentEnrollment = await Enrollment.findOne(enrollmentQuery)
-        .populate('courseId', 'title modules')
-        .lean()
-      if (currentEnrollment) await issueCourseCertificate(req, currentEnrollment)
-    }
-
-    // Synchronize with Progress model
-    if (mongoose.connection?.readyState === 1) {
-      try {
-        const allLessons = getCourseAllLessons(enrollment.courseId)
-        const targetItem = allLessons.find((item) => String(item.lessonId) === String(lessonId))
-        const targetModuleId = targetItem?.moduleId || new mongoose.Types.ObjectId()
-        let progress = await Progress.findOne({
-          userId: req.auth.id,
-          courseId: enrollment.courseId._id,
-        })
-        if (progress) {
-          if (typeof completed === 'boolean') {
-            if (completed) {
-              if (!progress.completedLessons.some((entry) => String(entry.lessonId) === String(lessonId))) {
-                progress.completedLessons.push({
-                  moduleId: targetModuleId,
-                  lessonId,
-                  completedAt: new Date(),
-                })
-              }
-            } else {
-              progress.completedLessons = progress.completedLessons.filter(
-                (entry) => String(entry.lessonId) !== String(lessonId),
-              )
-            }
-          }
-          await progress.save().catch(() => {})
-        }
-      } catch {
-        // Safe fallback
-      }
-    }
-
-    // Synchronize with LearningActivity
-    if (completed === true && mongoose.connection?.readyState === 1) {
-      try {
-        const tz = (req.body?.timezone && typeof req.body.timezone === 'string') ? req.body.timezone : 'UTC'
-        const todayStr = getLocalDateString(new Date(), tz)
-        const existingActivity = await LearningActivity.findOne({
-          studentId: req.auth.id,
-          lessonId,
-          date: todayStr,
-        })
-        if (existingActivity) {
-          existingActivity.completed = true
-          existingActivity.completedAt = new Date()
-          await existingActivity.save()
-        } else {
-          const allLessons = getCourseAllLessons(enrollment.courseId)
-          const targetItem = allLessons.find((item) => String(item.lessonId) === String(lessonId))
-          const targetModuleId = targetItem?.moduleId || new mongoose.Types.ObjectId()
-          await LearningActivity.create({
-            studentId: req.auth.id,
-            collegeId: req.auth.user?.collegeId || null,
-            courseId: enrollment.courseId._id,
-            moduleId: targetModuleId,
-            lessonId,
-            sessionId: `complete-${req.auth.id}-${lessonId}-${Date.now()}`,
-            activityType: 'video_watching',
-            startedAt: new Date(),
-            endedAt: new Date(),
-            durationSeconds: 30,
-            date: todayStr,
-            completed: true,
-            completedAt: new Date(),
-          })
-        }
-      } catch {
-        // Safe fallback
-      }
-    }
-
-    const lessonPlaybackPositions = getLessonPlaybackPositions(enrollment)
-    if (hasPositionSeconds) lessonPlaybackPositions[lessonId] = positionSeconds
-    return res.json({
-      completedLessonIds: [...completedLessonIds],
-      startedLessonIds: [...startedLessonIds],
-      lessonPlaybackPositions,
     })
   } catch (error) {
     return next(error)
@@ -2985,6 +2825,230 @@ router.get('/certificates/:certificateId/pdf', ...requireStudent, async (req, re
     return next(error)
   }
 })
+
+router.post('/enrollments/:enrollmentId/learning-activity', ...requireStudent, async (req, res, next) => {
+  try {
+    const { enrollmentId } = req.params
+    const { lessonId, seconds, activityDate } = req.body ?? {}
+    const today = new Date()
+    const todayUtc = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())
+    const activityTime = isValidLearningActivityDate(activityDate)
+      ? Date.parse(`${activityDate}T00:00:00.000Z`)
+      : Number.NaN
+    if (
+      !isValidObjectId(enrollmentId)
+      || !isValidObjectId(lessonId)
+      || !Number.isInteger(seconds)
+      || seconds < 1
+      || seconds > 60
+      || !Number.isFinite(activityTime)
+      || Math.abs(activityTime - todayUtc) > 86400000
+    ) {
+      return res.status(400).json({ message: 'A valid enrollment, video lesson, date, and watch duration are required.' })
+    }
+
+    const enrollmentQuery = {
+      _id: enrollmentId,
+      userId: req.auth.id,
+      ...getStudentEnrollmentScope(req),
+      status: { $ne: 'cancelled' },
+    }
+    const enrollment = await Enrollment.findOne(enrollmentQuery)
+      .populate('courseId', 'modules')
+      .lean()
+    if (!enrollment) return res.status(404).json({ message: 'The enrollment was not found.' })
+    if (!courseHasLesson(enrollment.courseId, lessonId)) {
+      return res.status(404).json({ message: 'The video lesson was not found in this course.' })
+    }
+    const activityAccess = await getCourseActivityAccess(enrollment.courseId, enrollment, 'video-lesson', lessonId)
+    if (respondIfCourseActivityLocked(res, activityAccess)) return
+
+    const activityPath = `dailyLearningActivity.${activityDate}`
+    const result = await Enrollment.updateOne(enrollmentQuery, {
+      $inc: { [`${activityPath}.seconds`]: seconds },
+      $addToSet: { [`${activityPath}.videoLessonIds`]: lessonId },
+    })
+    if (!result.matchedCount) return res.status(404).json({ message: 'The enrollment was not found.' })
+    return res.json({ message: 'Learning activity recorded.' })
+  } catch (error) {
+    return next(error)
+  }
+})
+
+router.patch('/enrollments/:enrollmentId/progress', ...requireStudent, async (req, res, next) => {
+  try {
+    const { enrollmentId } = req.params
+    const { lessonId, completed, started, positionSeconds, videoDurationSeconds, isPlaying } = req.body ?? {}
+    const hasPositionSeconds = Object.prototype.hasOwnProperty.call(req.body || {}, 'positionSeconds')
+    const hasVideoDurationSeconds = Object.prototype.hasOwnProperty.call(req.body || {}, 'videoDurationSeconds')
+    if (
+      !isValidObjectId(enrollmentId)
+      || !isValidObjectId(lessonId)
+      || (typeof completed !== 'boolean' && started !== true && !hasPositionSeconds)
+      || completed === false
+      || (hasPositionSeconds && (!Number.isFinite(positionSeconds) || positionSeconds < 0 || positionSeconds > 43200))
+      || (hasVideoDurationSeconds && (
+        !Number.isFinite(videoDurationSeconds) || videoDurationSeconds <= 0 || videoDurationSeconds > 43200
+      ))
+      || (isPlaying !== undefined && typeof isPlaying !== 'boolean')
+    ) {
+      return res.status(400).json({ message: 'A valid enrollment, lesson, and progress state are required.' })
+    }
+
+    const scope = req.auth.user.studentType === 'college'
+      ? { collegeId: req.auth.user.collegeId }
+      : { collegeId: { $exists: false } }
+    const enrollmentQuery = {
+      _id: enrollmentId,
+      userId: req.auth.id,
+      ...scope,
+      status: { $ne: 'cancelled' },
+    }
+    const enrollment = await Enrollment.findOne(enrollmentQuery)
+      .populate('courseId', 'title modules assignments quizzes generateCertificate')
+      .lean()
+    if (!enrollment) return res.status(404).json({ message: 'The enrollment was not found.' })
+    const courseLesson = findCourseLesson(enrollment.courseId, lessonId)
+    if (!courseLesson) {
+      return res.status(404).json({ message: 'The lesson was not found in this course.' })
+    }
+    const activityAccess = await getCourseActivityAccess(enrollment.courseId, enrollment, 'video-lesson', lessonId)
+    if (respondIfCourseActivityLocked(res, activityAccess)) return
+
+    const isAlreadyCompleted = (enrollment.completedLessonIds || []).some((id) => String(id) === lessonId)
+    const shouldUpdatePosition = hasPositionSeconds && !(completed === true && isAlreadyCompleted)
+    const previousPosition = Number(getMapValue(enrollment.lessonPlaybackPositions, lessonId)) || 0
+    const previousPlaybackState = getMapValue(enrollment.lessonPlaybackStates, lessonId) || {}
+    const previousWatchedPosition = Math.max(
+      previousPosition,
+      Number(previousPlaybackState.watchedPositionSeconds) || 0,
+    )
+    const acceptedWatchedPosition = shouldUpdatePosition
+      ? Math.max(previousWatchedPosition, positionSeconds)
+      : previousWatchedPosition
+    const now = new Date()
+
+    if (completed === true && !isAlreadyCompleted) {
+      const completionToleranceSeconds = 1
+      const completionDurationSeconds = Number(videoDurationSeconds) > 0
+        ? Number(videoDurationSeconds)
+        : Number(courseLesson.durationSeconds)
+      if (
+        !hasPositionSeconds
+        || !hasVideoDurationSeconds
+        || positionSeconds + completionToleranceSeconds < completionDurationSeconds
+      ) {
+        return res.status(400).json({ message: 'Watch the entire video before completing this lesson.' })
+      }
+    }
+
+    const update = { $addToSet: { startedLessonIds: lessonId } }
+    if (completed === true) {
+      update.$addToSet.completedLessonIds = lessonId
+      if (!isAlreadyCompleted) update.$set = { [`lessonCompletionDates.${lessonId}`]: now }
+    }
+    if (shouldUpdatePosition) {
+      const positionPath = `lessonPlaybackPositions.${lessonId}`
+      const watchedPositionPath = `lessonPlaybackStates.${lessonId}.watchedPositionSeconds`
+      const updatedAtPath = `lessonPlaybackStates.${lessonId}.updatedAt`
+      const isPlayingPath = `lessonPlaybackStates.${lessonId}.isPlaying`
+      const previousPositionValue = getMapValue(enrollment.lessonPlaybackPositions, lessonId)
+      const previousUpdatedAt = previousPlaybackState.updatedAt
+      if (completed !== true) {
+        enrollmentQuery[positionPath] = previousPositionValue === undefined
+          ? { $exists: false }
+          : previousPositionValue
+        enrollmentQuery[updatedAtPath] = previousUpdatedAt === undefined
+          ? { $exists: false }
+          : previousUpdatedAt
+      }
+      update.$set = {
+        ...update.$set,
+        [positionPath]: positionSeconds,
+        [updatedAtPath]: now,
+        [isPlayingPath]: isPlaying === true,
+      }
+      update.$max = { [watchedPositionPath]: acceptedWatchedPosition }
+    }
+    const result = await Enrollment.updateOne(enrollmentQuery, update)
+    if (!result.matchedCount) {
+      if (!shouldUpdatePosition) return res.status(404).json({ message: 'The enrollment was not found.' })
+      const latestEnrollment = await Enrollment.findOne({
+        _id: enrollmentId,
+        userId: req.auth.id,
+        ...scope,
+        status: { $ne: 'cancelled' },
+      })
+        .select('completedLessonIds startedLessonIds lessonPlaybackPositions lessonPlaybackStates')
+        .lean()
+      if (!latestEnrollment) return res.status(404).json({ message: 'The enrollment was not found.' })
+      return res.json({
+        completedLessonIds: (latestEnrollment.completedLessonIds || []).map(String),
+        startedLessonIds: (latestEnrollment.startedLessonIds || []).map(String),
+        lessonPlaybackPositions: getLessonPlaybackPositions(latestEnrollment),
+        lessonWatchedPositions: getLessonWatchedPositions(latestEnrollment),
+      })
+    }
+
+    const completedLessonIds = new Set((enrollment.completedLessonIds || []).map(String))
+    const startedLessonIds = new Set((enrollment.startedLessonIds || []).map(String))
+    startedLessonIds.add(lessonId)
+    if (completed === true) completedLessonIds.add(lessonId)
+    if (completed === true) {
+      await issueCertificateIfEligible({
+        userId: req.auth.id,
+        studentName: req.auth.user.fullName,
+        enrollment: { ...enrollment, completedLessonIds: [...completedLessonIds] },
+        course: enrollment.courseId,
+      })
+    }
+    const enrollmentProgress = completed === true
+      ? await recalculateEnrollmentCourseProgress({
+        enrollment: { ...enrollment, completedLessonIds: [...completedLessonIds] },
+        course: enrollment.courseId,
+      })
+      : null
+    let courseProgress = null
+    if (enrollmentProgress) {
+      const [quizAttempts, assignmentSubmissions] = await Promise.all([
+        QuizAttempt.find({
+          userId: req.auth.id,
+          enrollmentId: enrollment._id,
+          status: 'submitted',
+        }).select('quizId status passed').lean(),
+        AssignmentSubmission.find({
+          userId: req.auth.id,
+          enrollmentId: enrollment._id,
+        }).select('assignmentId submittedAt reviewStatus').lean(),
+      ])
+      courseProgress = {
+        ...calculateCourseActivityProgress(
+          enrollment.courseId,
+          { ...enrollment, completedLessonIds: [...completedLessonIds] },
+          quizAttempts,
+          assignmentSubmissions,
+        ),
+        status: enrollmentProgress.status,
+      }
+    }
+    const lessonPlaybackPositions = getLessonPlaybackPositions(enrollment)
+    if (shouldUpdatePosition) {
+      lessonPlaybackPositions[lessonId] = positionSeconds
+    }
+    const lessonWatchedPositions = getLessonWatchedPositions(enrollment)
+    if (shouldUpdatePosition) lessonWatchedPositions[lessonId] = acceptedWatchedPosition
+    return res.json({
+      completedLessonIds: [...completedLessonIds],
+      startedLessonIds: [...startedLessonIds],
+      lessonPlaybackPositions,
+      lessonWatchedPositions,
+      ...(courseProgress ? { courseProgress, status: courseProgress.status } : {}),
+    })
+  } catch (error) {
+    return next(error)
+  }
+})
+
 router.post('/enrollments', ...requireStudent, async (req, res, next) => {
   try {
     const { courseId } = req.body ?? {}
@@ -3026,227 +3090,6 @@ router.post('/enrollments', ...requireStudent, async (req, res, next) => {
       metadata: { courseId: String(course._id), enrollmentId: String(enrollment._id) },
     })
     return res.status(201).json({ message: 'You are now enrolled in this course.', enrollment })
-  } catch (error) {
-    return next(error)
-  }
-})
-
-router.post('/college/students', ...requireCollegeAdmin, async (req, res, next) => {
-  try {
-    const subAdmin = await getAssignedCollegeAdmin(req)
-    if (!subAdmin) {
-      return res.status(403).json({ message: 'Your Sub-Admin account is not assigned to a valid college.' })
-    }
-
-    const { fullName, email, username, password, studentId, department, batch } = req.body ?? {}
-    if (typeof fullName !== 'string' || !fullName.trim() || fullName.trim().length > 120) {
-      return res.status(400).json({ message: 'Enter a student name between 1 and 120 characters.' })
-    }
-    if (typeof email !== 'string' || email.trim().length > 254 || !emailPattern.test(email.trim())) {
-      return res.status(400).json({ message: 'Enter a valid email address.' })
-    }
-    if (typeof username !== 'string' || !usernamePattern.test(username.trim())) {
-      return res.status(400).json({ message: 'Use a username with 3–30 letters, numbers, dots, underscores, or hyphens.' })
-    }
-    if (typeof password !== 'string' || password.length < 8 || Buffer.byteLength(password, 'utf8') > 72) {
-      return res.status(400).json({ message: 'Use a password of at least 8 characters.' })
-    }
-    if (typeof studentId !== 'string' || !studentId.trim() || studentId.trim().length > 100) {
-      return res.status(400).json({ message: 'Enter a student ID of up to 100 characters.' })
-    }
-    if (department !== undefined && (typeof department !== 'string' || department.trim().length > 120)) {
-      return res.status(400).json({ message: 'Department must be 120 characters or fewer.' })
-    }
-    if (batch !== undefined && (typeof batch !== 'string' || batch.trim().length > 80)) {
-      return res.status(400).json({ message: 'Batch must be 80 characters or fewer.' })
-    }
-
-    const normalizedEmail = email.trim().toLowerCase()
-    const normalizedUsername = username.trim().toLowerCase()
-    const normalizedStudentId = studentId.trim()
-    const [existingEmail, existingUsername, existingStudentId] = await Promise.all([
-      accountIdentifierExists('email', normalizedEmail),
-      accountIdentifierExists('username', normalizedUsername),
-      Promise.all([
-        isDuplicateStudentId(normalizedStudentId, Student),
-        isDuplicateStudentId(normalizedStudentId, CollegeStudent),
-      ]).then((matches) => matches.some(Boolean)),
-    ])
-    if (existingEmail) return res.status(409).json({ message: 'An account with this email already exists.' })
-    if (existingUsername) return res.status(409).json({ message: 'This username is already taken.' })
-    if (existingStudentId) return res.status(409).json({ message: 'This student ID already exists.' })
-
-    const accountId = new mongoose.Types.ObjectId()
-    const passwordHash = await bcrypt.hash(password, 12)
-    const session = await mongoose.startSession()
-    let student
-    try {
-      await session.withTransaction(async () => {
-        await assertCollegeStudentCapacity(subAdmin.collegeId, session)
-        const duplicate = await AccountIdentity.findOne({
-          $or: [{ email: normalizedEmail }, { username: normalizedUsername }],
-        }).session(session)
-        if (duplicate) {
-          const error = new Error('Email or username already belongs to an LMS account.')
-          error.statusCode = 409
-          throw error
-        }
-        if ((await Promise.all([
-          isDuplicateStudentId(normalizedStudentId, Student, session),
-          isDuplicateStudentId(normalizedStudentId, CollegeStudent, session),
-        ])).some(Boolean)) {
-          const error = new Error('This student ID already exists.')
-          error.statusCode = 409
-          throw error
-        }
-        await AccountIdentity.create([{
-          email: normalizedEmail,
-          username: normalizedUsername,
-          accountCollection: CollegeStudent.collection.name,
-          accountId,
-        }], { session })
-        ;[student] = await CollegeStudent.create([{
-          _id: accountId,
-          fullName: fullName.trim(),
-          email: normalizedEmail,
-          username: normalizedUsername,
-          studentId: normalizedStudentId,
-          department: department?.trim() || undefined,
-          batch: batch?.trim() || undefined,
-          passwordHash,
-          role: 'student',
-          studentType: 'college',
-          collegeId: subAdmin.collegeId,
-          status: 'active',
-          isActive: true,
-          permissions: [],
-        }], { session })
-      })
-    } finally {
-      await session.endSession()
-    }
-    return res.status(201).json({
-      message: 'The student account was created successfully.',
-      student: {
-        _id: String(student._id),
-        studentId: student.studentId,
-        fullName: student.fullName,
-        email: student.email,
-        username: student.username,
-        department: student.department,
-        batch: student.batch,
-      },
-    })
-  } catch (error) {
-    if (error?.code === 'college_student_limit' || error?.statusCode === 409) {
-      return res.status(error.statusCode || 409).json({ message: error.message })
-    }
-    return next(error)
-  }
-})
-
-router.post('/college/students/import', ...requireCollegeAdmin, async (req, res, next) => {
-  try {
-    const subAdmin = await getAssignedCollegeAdmin(req)
-    if (!subAdmin) {
-      return res.status(403).json({ message: 'Your Sub-Admin account is not assigned to a valid college.' })
-    }
-    let rows
-    try {
-      rows = parseStudentCsv(req.body?.csvText)
-    } catch (error) {
-      return res.status(400).json({ message: error.message })
-    }
-    if (rows.length > 500) {
-      return res.status(400).json({ message: 'Import is limited to 500 students per CSV.' })
-    }
-
-    const imported = []
-    const failures = []
-    const seenEmails = new Set()
-    const seenStudentIds = new Set()
-    const seenUsernames = new Set()
-    for (const row of rows) {
-      if (row.error) {
-        failures.push({ row: row.rowNumber, reason: row.error })
-        continue
-      }
-
-      const { fullName, studentId, email, department, batch } = row
-      const username = makeImportUsername(studentId)
-      const errors = []
-      if (!fullName || fullName.length > 120) errors.push('Full Name is required and must be 120 characters or fewer.')
-      if (!studentId || studentId.length > 100) errors.push('Student ID is required and must be 100 characters or fewer.')
-      if (!emailPattern.test(email) || email.length > 254) errors.push('Enter a valid email address.')
-      if (!department || department.length > 120) errors.push('Department is required and must be 120 characters or fewer.')
-      if (!batch || batch.length > 80) errors.push('Batch is required and must be 80 characters or fewer.')
-      if (seenEmails.has(email)) errors.push('Email is duplicated in this CSV.')
-      if (seenStudentIds.has(studentId.toLowerCase())) errors.push('Student ID is duplicated in this CSV.')
-      if (seenUsernames.has(username)) errors.push('Generated username is duplicated in this CSV.')
-      seenEmails.add(email)
-      seenStudentIds.add(studentId.toLowerCase())
-      seenUsernames.add(username)
-      if (!errors.length) {
-        const [existingEmail, existingStudentId, existingUsername] = await Promise.all([
-          accountIdentifierExists('email', email),
-          isDuplicateStudentId(studentId, CollegeStudent),
-          accountIdentifierExists('username', username),
-        ])
-        if (existingEmail) errors.push('Email already belongs to an LMS account.')
-        if (existingStudentId) errors.push('Student ID already exists.')
-        if (existingUsername) errors.push('Generated username conflicts with an LMS account.')
-      }
-      if (errors.length) {
-        failures.push({ row: row.rowNumber, email, studentId, reason: errors.join(' ') })
-        continue
-      }
-
-      const accountId = new mongoose.Types.ObjectId()
-      const passwordHash = await bcrypt.hash(crypto.randomBytes(48).toString('base64url'), 12)
-      const session = await mongoose.startSession()
-      try {
-        await session.withTransaction(async () => {
-          await assertCollegeStudentCapacity(subAdmin.collegeId, session)
-          await AccountIdentity.create([{
-            email,
-            username,
-            accountCollection: CollegeStudent.collection.name,
-            accountId,
-          }], { session })
-          await CollegeStudent.create([{
-            _id: accountId,
-            fullName,
-            email,
-            username,
-            studentId,
-            department,
-            batch,
-            passwordHash,
-            role: 'student',
-            studentType: 'college',
-            collegeId: subAdmin.collegeId,
-            status: 'active',
-            isActive: true,
-            permissions: [],
-          }], { session })
-        })
-        imported.push({ row: row.rowNumber, email, studentId })
-      } catch (error) {
-        if (error?.statusCode === 409 || error?.code === 11000 || error?.code === 'college_student_limit') {
-          failures.push({ row: row.rowNumber, email, studentId, reason: error.message || 'Email, username, or Student ID already exists.' })
-        } else {
-          throw error
-        }
-      } finally {
-        await session.endSession()
-      }
-    }
-    return res.json({
-      message: 'College student import completed. No invitation emails were sent.',
-      summary: { total: rows.length, imported: imported.length, failed: failures.length },
-      imported,
-      failures,
-    })
   } catch (error) {
     return next(error)
   }
@@ -3350,1600 +3193,5 @@ router.post('/college/enrollments', ...requireCollegeAdmin, async (req, res, nex
     return next(error)
   }
 })
-
-
-function getLocalDateString(date = new Date(), timezone = 'UTC') {
-  try {
-    return new Intl.DateTimeFormat('en-CA', { timeZone: timezone }).format(date)
-  } catch {
-    return new Intl.DateTimeFormat('en-CA', { timeZone: 'UTC' }).format(date)
-  }
-}
-
-function getWeekRange(weekOffset = 0, timezone = 'UTC') {
-  const now = new Date()
-  let weekday = 'Mon'
-  let year = now.getUTCFullYear()
-  let month = now.getUTCMonth() + 1
-  let day = now.getUTCDate()
-
-  try {
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: timezone,
-      year: 'numeric',
-      month: 'numeric',
-      day: 'numeric',
-      weekday: 'short',
-    }).formatToParts(now)
-    const partMap = {}
-    parts.forEach((p) => {
-      partMap[p.type] = p.value
-    })
-    weekday = partMap.weekday || 'Mon'
-    year = parseInt(partMap.year, 10)
-    month = parseInt(partMap.month, 10)
-    day = parseInt(partMap.day, 10)
-  } catch {
-    // Fallback to UTC
-  }
-
-  const dayMap = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 }
-  const currentDayNum = dayMap[weekday] || 1
-
-  const localToday = new Date(Date.UTC(year, month - 1, day))
-  const daysToMonday = currentDayNum - 1 - weekOffset * 7
-  const monday = new Date(localToday.getTime() - daysToMonday * 24 * 60 * 60 * 1000)
-
-  const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-  const days = []
-  for (let i = 0; i < 7; i++) {
-    const d = new Date(monday.getTime() + i * 24 * 60 * 60 * 1000)
-    const dateStr = d.toISOString().split('T')[0]
-    days.push({
-      date: dateStr,
-      dayName: dayNames[i],
-      label: `${dayNames[i]} ${d.getUTCDate()}`,
-    })
-  }
-
-  return {
-    startDate: days[0].date,
-    endDate: days[6].date,
-    days,
-  }
-}
-
-function calculateStreaks(sortedDateStrings, timezone = 'UTC') {
-  if (!sortedDateStrings || sortedDateStrings.length === 0) {
-    return { currentStreak: 0, longestStreak: 0 }
-  }
-
-  const todayStr = getLocalDateString(new Date(), timezone)
-  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
-  const yesterdayStr = getLocalDateString(yesterday, timezone)
-  const dateSet = new Set(sortedDateStrings)
-
-  // Longest streak
-  let longestStreak = 0
-  let currentRun = 0
-  let prevDate = null
-
-  for (const dateStr of sortedDateStrings) {
-    const [y, m, d] = dateStr.split('-').map(Number)
-    const thisDate = new Date(Date.UTC(y, m - 1, d))
-    if (prevDate) {
-      const diffDays = Math.round((thisDate.getTime() - prevDate.getTime()) / (24 * 60 * 60 * 1000))
-      if (diffDays === 1) {
-        currentRun++
-      } else if (diffDays > 1) {
-        currentRun = 1
-      }
-    } else {
-      currentRun = 1
-    }
-    prevDate = thisDate
-    if (currentRun > longestStreak) {
-      longestStreak = currentRun
-    }
-  }
-
-  // Current streak
-  let currentStreak = 0
-  if (dateSet.has(todayStr) || dateSet.has(yesterdayStr)) {
-    let checkDateStr = dateSet.has(todayStr) ? todayStr : yesterdayStr
-    while (dateSet.has(checkDateStr)) {
-      currentStreak++
-      const [y, m, d] = checkDateStr.split('-').map(Number)
-      const prev = new Date(Date.UTC(y, m - 1, d) - 24 * 60 * 60 * 1000)
-      checkDateStr = prev.toISOString().split('T')[0]
-    }
-  }
-
-  return {
-    currentStreak,
-    longestStreak: Math.max(longestStreak, currentStreak),
-  }
-}
-
-// 1. Session start
-router.post('/learning/session/start', ...requireStudent, async (req, res, next) => {
-  try {
-    const { courseId, moduleId, lessonId, activityType, timezone } = req.body ?? {}
-    if (!isValidObjectId(courseId)) {
-      return res.status(400).json({ message: 'Valid courseId is required.' })
-    }
-
-    const enrollment = await Enrollment.findOne({
-      userId: req.auth.id,
-      courseId,
-      status: { $ne: 'cancelled' },
-    }).select('_id').lean()
-
-    if (!enrollment) {
-      return res.status(403).json({ message: 'You are not enrolled in this course.' })
-    }
-
-    // End any open unended sessions for this student to prevent overlapping / cheating
-    await LearningActivity.updateMany(
-      { studentId: req.auth.id, endedAt: null },
-      { $set: { endedAt: new Date() } },
-    )
-
-    const sessionId = crypto.randomUUID()
-    const tz = timezone || 'UTC'
-    const todayStr = getLocalDateString(new Date(), tz)
-
-    const session = await LearningActivity.create({
-      studentId: req.auth.id,
-      collegeId: req.auth.user?.collegeId || null,
-      courseId,
-      moduleId: isValidObjectId(moduleId) ? moduleId : null,
-      lessonId: isValidObjectId(lessonId) ? lessonId : null,
-      sessionId,
-      activityType: ['video_watching', 'general_study'].includes(activityType)
-        ? activityType
-        : 'lesson_reading',
-      startedAt: new Date(),
-      lastHeartbeatAt: new Date(),
-      endedAt: null,
-      durationSeconds: 0,
-      date: todayStr,
-      completed: false,
-    })
-
-    return res.status(201).json({
-      message: 'Learning session started.',
-      sessionId: session.sessionId,
-    })
-  } catch (error) {
-    return next(error)
-  }
-})
-
-// 2. Session heartbeat
-router.post('/learning/session/heartbeat', ...requireStudent, async (req, res, next) => {
-  try {
-    const { sessionId, durationDelta } = req.body ?? {}
-    if (!sessionId || typeof sessionId !== 'string') {
-      return res.status(400).json({ message: 'Valid sessionId is required.' })
-    }
-
-    const session = await LearningActivity.findOne({
-      sessionId,
-      studentId: req.auth.id,
-    })
-
-    if (!session) {
-      return res.status(404).json({ message: 'Learning session not found.' })
-    }
-
-    if (session.endedAt) {
-      return res.json({
-        success: true,
-        durationSeconds: session.durationSeconds,
-        ended: true,
-      })
-    }
-
-    const rawDelta = Number(durationDelta) || 15
-    // Safety cap: max 30s per pulse to avoid runaway timers or background cheating
-    const safeDelta = Math.min(Math.max(rawDelta, 1), 30)
-
-    const now = new Date()
-    session.durationSeconds = (session.durationSeconds || 0) + safeDelta
-    session.lastHeartbeatAt = now
-    await session.save()
-
-    // Update Progress lastActivityAt
-    await Progress.updateOne(
-      { userId: req.auth.id, courseId: session.courseId },
-      { $set: { lastActivityAt: now } },
-    )
-
-    return res.json({
-      success: true,
-      durationSeconds: session.durationSeconds,
-    })
-  } catch (error) {
-    return next(error)
-  }
-})
-
-// 3. Session end
-router.post('/learning/session/end', ...requireStudent, async (req, res, next) => {
-  try {
-    const { sessionId, durationDelta } = req.body ?? {}
-    if (!sessionId || typeof sessionId !== 'string') {
-      return res.status(400).json({ message: 'Valid sessionId is required.' })
-    }
-
-    const session = await LearningActivity.findOne({
-      sessionId,
-      studentId: req.auth.id,
-    })
-
-    if (!session) {
-      return res.status(404).json({ message: 'Learning session not found.' })
-    }
-
-    if (!session.endedAt) {
-      if (durationDelta && Number(durationDelta) > 0) {
-        const safeDelta = Math.min(Number(durationDelta), 30)
-        session.durationSeconds = (session.durationSeconds || 0) + safeDelta
-      }
-      session.endedAt = new Date()
-      await session.save()
-    }
-
-    return res.json({
-      success: true,
-      totalDurationSeconds: session.durationSeconds,
-    })
-  } catch (error) {
-    return next(error)
-  }
-})
-
-// 4. Mark lesson completion
-router.post('/learning/lessons/complete', ...requireStudent, async (req, res, next) => {
-  try {
-    const { courseId, moduleId, lessonId, completed = true, timezone } = req.body ?? {}
-    if (!isValidObjectId(courseId) || !isValidObjectId(lessonId)) {
-      return res.status(400).json({ message: 'Valid courseId and lessonId are required.' })
-    }
-
-    const course = await Course.findById(courseId).select('modules').lean()
-    if (!course) {
-      return res.status(404).json({ message: 'Course not found.' })
-    }
-
-    const allLessons = getCourseAllLessons(course)
-    const totalLessons = allLessons.length
-    const foundLesson = allLessons.find((item) => String(item.lessonId) === String(lessonId))
-
-    if (!foundLesson) {
-      return res.status(404).json({ message: 'Lesson was not found in this course.' })
-    }
-
-    let resolvedModuleId = isValidObjectId(moduleId) ? moduleId : foundLesson.moduleId
-
-    let progress = await Progress.findOne({
-      userId: req.auth.id,
-      courseId,
-    })
-
-    if (!progress) {
-      progress = new Progress({
-        userId: req.auth.id,
-        courseId,
-        collegeId: req.auth.user?.collegeId || null,
-        completedLessons: [],
-        progressPercentage: 0,
-        status: 'not_started',
-      })
-    }
-
-    const isMarkingComplete = completed !== false
-
-    if (isMarkingComplete) {
-      const alreadyCompleted = progress.completedLessons.some(
-        (entry) => String(entry.lessonId) === String(lessonId),
-      )
-      if (!alreadyCompleted) {
-        progress.completedLessons.push({
-          moduleId: resolvedModuleId || new mongoose.Types.ObjectId(),
-          lessonId,
-          completedAt: new Date(),
-        })
-      }
-    } else {
-      progress.completedLessons = progress.completedLessons.filter(
-        (entry) => String(entry.lessonId) !== String(lessonId),
-      )
-    }
-
-    const completedCount = progress.completedLessons.length
-    const [quizAttempts, assignmentSubmissions] = await Promise.all([
-      safeFindQuizAttempts({ userId: req.auth.id, courseId, status: 'submitted' }),
-      safeFindAssignmentSubmissions({ userId: req.auth.id, courseId }),
-    ])
-
-    const completedLessonIds = progress.completedLessons.map((entry) => String(entry.lessonId))
-    const courseProgress = calculateCourseProgress({
-      course,
-      enrollment: { completedLessonIds },
-      progress,
-      quizAttempts,
-      assignmentSubmissions,
-    })
-
-    const isAllCompleted = courseProgress.isCompleted
-    const targetStatus = isAllCompleted ? 'completed' : (completedCount > 0 ? 'in_progress' : 'not_started')
-
-    const lessonProgressPercentage =
-      totalLessons > 0 ? Math.min(100, Math.round((completedCount / totalLessons) * 100)) : 0
-    const progressPercentage = courseProgress.totalRequiredActivities > totalLessons
-      ? courseProgress.progressPercentage
-      : lessonProgressPercentage
-
-    progress.progressPercentage = progressPercentage
-    progress.status = targetStatus
-    if (isAllCompleted) {
-      progress.completedAt = progress.completedAt || new Date()
-    } else if (!isMarkingComplete) {
-      progress.completedAt = null
-    }
-    progress.lastActivityAt = new Date()
-    await progress.save()
-
-    // Sync with Enrollment model
-    try {
-      const scope = req.auth.user?.studentType === 'college'
-        ? { collegeId: req.auth.user.collegeId }
-        : { collegeId: { $exists: false } }
-      const enrollmentQuery = {
-        userId: req.auth.id,
-        courseId,
-        ...scope,
-        status: { $ne: 'cancelled' },
-      }
-      const enrollmentUpdate = {
-        $addToSet: { startedLessonIds: lessonId },
-      }
-      if (isMarkingComplete) {
-        enrollmentUpdate.$addToSet.completedLessonIds = lessonId
-        enrollmentUpdate.$set = {
-          [`lessonCompletionDates.${lessonId}`]: new Date(),
-          status: isAllCompleted ? 'completed' : 'active',
-        }
-        if (isAllCompleted) {
-          enrollmentUpdate.$set.completedAt = new Date()
-        }
-      } else {
-        enrollmentUpdate.$pull = { completedLessonIds: lessonId }
-        enrollmentUpdate.$unset = { [`lessonCompletionDates.${lessonId}`]: 1 }
-        enrollmentUpdate.$set = {
-          status: 'active',
-        }
-        enrollmentUpdate.$unset.completedAt = 1
-      }
-      if (typeof Enrollment.updateMany === 'function' && (mongoose.connection.readyState !== 0 || Enrollment.updateMany !== mongoose.Model.updateMany)) {
-        await Enrollment.updateMany(enrollmentQuery, enrollmentUpdate)
-      }
-    } catch {
-      // Safe fallback
-    }
-
-    // Sync with LearningActivity
-    const tz = timezone || 'UTC'
-    const todayStr = getLocalDateString(new Date(), tz)
-
-    if (isMarkingComplete) {
-      const existingActivity = await LearningActivity.findOne({
-        studentId: req.auth.id,
-        lessonId,
-        date: todayStr,
-      })
-      if (existingActivity) {
-        existingActivity.completed = true
-        existingActivity.completedAt = new Date()
-        await existingActivity.save()
-      } else {
-        await LearningActivity.create({
-          studentId: req.auth.id,
-          collegeId: req.auth.user?.collegeId || null,
-          courseId,
-          moduleId: resolvedModuleId,
-          lessonId,
-          sessionId: `complete-${req.auth.id}-${lessonId}-${Date.now()}`,
-          activityType: 'lesson_reading',
-          startedAt: new Date(),
-          endedAt: new Date(),
-          durationSeconds: 0,
-          date: todayStr,
-          completed: true,
-          completedAt: new Date(),
-        })
-      }
-    }
-
-    return res.json({
-      success: true,
-      progressPercentage: progress.progressPercentage,
-      status: progress.status,
-      completedLessons: progress.completedLessons,
-      courseProgress,
-    })
-  } catch (error) {
-    return next(error)
-  }
-})
-
-// 5. Daily summary for today
-router.get('/learning/summary/today', ...requireStudent, async (req, res, next) => {
-  try {
-    const tz = (req.query.timezone && typeof req.query.timezone === 'string') ? req.query.timezone : 'UTC'
-    const todayStr = getLocalDateString(new Date(), tz)
-
-    const StudentModel = req.auth.user?.studentType === 'college' ? CollegeStudent : Student
-    const account = await StudentModel.findById(req.auth.id).select('dailyLearningGoalMinutes').lean()
-    const dailyGoalMinutes = account?.dailyLearningGoalMinutes || 60
-
-    const activities = await LearningActivity.find({
-      studentId: req.auth.id,
-      date: todayStr,
-    }).lean()
-
-    let totalDurationSeconds = 0
-    const completedLessonIds = new Set()
-    let videosWatched = 0
-
-    for (const act of activities) {
-      totalDurationSeconds += act.durationSeconds || 0
-      if (act.completed && act.lessonId) {
-        completedLessonIds.add(String(act.lessonId))
-      }
-      if (act.activityType === 'video_watching' && (act.durationSeconds >= 30 || act.completed)) {
-        videosWatched++
-      }
-    }
-
-    // Also include lessons marked complete in Progress on today's calendar date
-    const startOfToday = new Date(`${todayStr}T00:00:00Z`)
-    const endOfToday = new Date(`${todayStr}T23:59:59.999Z`)
-    const studentProgresses = await Progress.find({ userId: req.auth.id }).lean()
-    for (const prog of studentProgresses) {
-      for (const cl of prog.completedLessons || []) {
-        if (
-          cl.completedAt &&
-          new Date(cl.completedAt) >= startOfToday &&
-          new Date(cl.completedAt) <= endOfToday
-        ) {
-          completedLessonIds.add(String(cl.lessonId))
-        }
-      }
-    }
-
-    const totalMinutes = Math.round(totalDurationSeconds / 60)
-    const goalProgressPercentage = Math.min(
-      100,
-      Math.round((totalMinutes / dailyGoalMinutes) * 100),
-    )
-
-    return res.json({
-      today: todayStr,
-      totalDurationSeconds,
-      totalMinutes,
-      lessonsCompleted: completedLessonIds.size,
-      videosWatched,
-      dailyLearningGoalMinutes: dailyGoalMinutes,
-      goalProgressPercentage,
-    })
-  } catch (error) {
-    return next(error)
-  }
-})
-
-// 6. Weekly learning activity chart
-router.get('/learning/activity/weekly', ...requireStudent, async (req, res, next) => {
-  try {
-    const tz = (req.query.timezone && typeof req.query.timezone === 'string') ? req.query.timezone : 'UTC'
-    const weekOffset = parseInt(req.query.weekOffset, 10) || 0
-
-    const { startDate, endDate, days } = getWeekRange(weekOffset, tz)
-
-    const activities = await LearningActivity.find({
-      studentId: req.auth.id,
-      date: { $gte: startDate, $lte: endDate },
-    }).lean()
-
-    const activityByDate = new Map()
-    for (const act of activities) {
-      const d = act.date
-      if (!activityByDate.has(d)) {
-        activityByDate.set(d, {
-          totalSeconds: 0,
-          completedLessonIds: new Set(),
-        })
-      }
-      const entry = activityByDate.get(d)
-      entry.totalSeconds += act.durationSeconds || 0
-      if (act.completed && act.lessonId) {
-        entry.completedLessonIds.add(String(act.lessonId))
-      }
-    }
-
-    let totalWeeklyDurationSeconds = 0
-    let mostActiveDay = null
-    let mostActiveDayMinutes = 0
-
-    const mappedDays = days.map((day) => {
-      const entry = activityByDate.get(day.date)
-      const durationSeconds = entry ? entry.totalSeconds : 0
-      const durationMinutes = Math.round(durationSeconds / 60)
-      const lessonsCompleted = entry ? entry.completedLessonIds.size : 0
-
-      totalWeeklyDurationSeconds += durationSeconds
-      if (durationMinutes > mostActiveDayMinutes) {
-        mostActiveDayMinutes = durationMinutes
-        mostActiveDay = day.dayName
-      }
-
-      return {
-        date: day.date,
-        dayName: day.dayName,
-        label: day.label,
-        durationSeconds,
-        durationMinutes,
-        lessonsCompleted,
-      }
-    })
-
-    const totalWeeklyMinutes = Math.round(totalWeeklyDurationSeconds / 60)
-    const averageDailyMinutes = Math.round(totalWeeklyMinutes / 7)
-
-    return res.json({
-      weekOffset,
-      startDate,
-      endDate,
-      days: mappedDays,
-      totalWeeklyMinutes,
-      averageDailyMinutes,
-      mostActiveDay,
-      mostActiveDayMinutes,
-    })
-  } catch (error) {
-    return next(error)
-  }
-})
-
-// 7. Overall learning overview
-router.get('/learning/overview', ...requireStudent, async (req, res, next) => {
-  try {
-    const tz = (req.query.timezone && typeof req.query.timezone === 'string') ? req.query.timezone : 'UTC'
-
-    const scope =
-      req.auth.user?.studentType === 'college'
-        ? { collegeId: req.auth.user.collegeId }
-        : { collegeId: { $exists: false } }
-
-    const [enrollments, progressList, activityTotals, account] = await Promise.all([
-      Enrollment.find({
-        userId: req.auth.id,
-        ...scope,
-        status: { $ne: 'cancelled' },
-      })
-        .populate('courseId', 'title description modules status')
-        .sort({ createdAt: -1 })
-        .lean(),
-      Progress.find({ userId: req.auth.id }).lean(),
-      LearningActivity.aggregate([
-        { $match: { studentId: new mongoose.Types.ObjectId(req.auth.id) } },
-        {
-          $group: {
-            _id: null,
-            totalSeconds: { $sum: '$durationSeconds' },
-            distinctDates: { $addToSet: '$date' },
-          },
-        },
-      ]),
-      (req.auth.user?.studentType === 'college' ? CollegeStudent : Student)
-        .findById(req.auth.id)
-        .select('dailyLearningGoalMinutes')
-        .lean(),
-    ])
-
-    const progressMap = new Map(progressList.map((p) => [String(p.courseId), p]))
-
-    let totalLessonsAcrossCourses = 0
-    let totalCompletedLessonsCount = 0
-    let completedCoursesCount = 0
-
-    const coursesData = enrollments
-      .filter((e) => e.courseId && typeof e.courseId === 'object')
-      .map((enrollment) => {
-        const course = enrollment.courseId
-        const prog = progressMap.get(String(course._id))
-
-        const allLessons = getCourseAllLessons(course)
-
-        const completedLessonIds = new Set([
-          ...(prog?.completedLessons?.map((l) => String(l.lessonId)) || []),
-          ...(enrollment.completedLessonIds || []).map(String),
-        ])
-        const completedCount = allLessons.filter((l) => completedLessonIds.has(String(l.lessonId))).length
-        const totalCount = allLessons.length
-        totalLessonsAcrossCourses += totalCount
-        totalCompletedLessonsCount += completedCount
-
-        const isAllComplete = totalCount > 0 && completedCount >= totalCount
-        const percentage = totalCount > 0
-          ? Math.min(100, Math.round((completedCount / totalCount) * 100))
-          : 0
-
-        const status = isAllComplete || enrollment.status === 'completed'
-          ? 'completed'
-          : percentage > 0
-            ? 'in_progress'
-            : 'not_started'
-
-        if (status === 'completed') {
-          completedCoursesCount++
-        }
-
-        const nextLesson =
-          allLessons.find((l) => !completedLessonIds.has(String(l.lessonId))) ||
-          allLessons[0] ||
-          null
-
-        return {
-          courseId: course._id,
-          title: course.title,
-          description: course.description,
-          totalLessons: totalCount,
-          completedLessons: completedCount,
-          progressPercentage: percentage,
-          status,
-          nextLessonId: nextLesson?.lessonId || null,
-          nextLessonTitle: nextLesson?.title || null,
-          lastActivityAt: prog?.lastActivityAt || enrollment.updatedAt || enrollment.createdAt || null,
-        }
-      })
-
-    const totalSeconds = activityTotals[0]?.totalSeconds || 0
-    const totalHours = Number((totalSeconds / 3600).toFixed(1))
-    const totalMinutes = Math.round(totalSeconds / 60)
-
-    const distinctDates = (activityTotals[0]?.distinctDates || [])
-      .filter((d) => typeof d === 'string' && d.length === 10)
-      .sort()
-
-    const { currentStreak, longestStreak } = calculateStreaks(distinctDates, tz)
-
-    const overallProgressPercentage =
-      totalLessonsAcrossCourses > 0
-        ? Math.min(100, Math.round((totalCompletedLessonsCount / totalLessonsAcrossCourses) * 100))
-        : 0
-
-    const pendingLessonsCount = Math.max(0, totalLessonsAcrossCourses - totalCompletedLessonsCount)
-
-    return res.json({
-      totalHours,
-      totalMinutes,
-      totalCompletedLessons: totalCompletedLessonsCount,
-      totalEnrolledCourses: coursesData.length,
-      totalCompletedCourses: completedCoursesCount,
-      pendingLessonsCount,
-      overallProgressPercentage,
-      currentStreak,
-      longestStreak,
-      dailyLearningGoalMinutes: account?.dailyLearningGoalMinutes || 60,
-      courses: coursesData,
-    })
-  } catch (error) {
-    return next(error)
-  }
-})
-
-// 8. Update daily learning goal
-router.put('/learning/goal', ...requireStudent, async (req, res, next) => {
-  try {
-    const goal = parseInt(req.body?.dailyLearningGoalMinutes, 10)
-    if (isNaN(goal) || goal < 15 || goal > 480) {
-      return res.status(400).json({
-        message: 'Daily learning goal must be an integer between 15 and 480 minutes.',
-      })
-    }
-
-    const StudentModel = req.auth.user?.studentType === 'college' ? CollegeStudent : Student
-    await StudentModel.findByIdAndUpdate(req.auth.id, { dailyLearningGoalMinutes: goal })
-
-    return res.json({
-      message: 'Daily learning goal updated successfully.',
-      dailyLearningGoalMinutes: goal,
-    })
-  } catch (error) {
-    return next(error)
-  }
-})
-
-
-
-// ---------------------------------------------------------------------------
-// Video Attention Checks & PDF Certificates (Preserved from GitHub updates)
-// ---------------------------------------------------------------------------
-router.post('/courses/:courseId/attention-checks/:lessonId/start', ...requireStudent, async (req, res, next) => {
-  try {
-    const { courseId, lessonId } = req.params
-    const { sessionId, triggerIndex, positionSeconds } = req.body ?? {}
-    if (
-      !isValidObjectId(courseId)
-      || !isValidObjectId(lessonId)
-      || typeof sessionId !== 'string'
-      || !/^[a-f\d-]{36}$/i.test(sessionId)
-      || !Number.isInteger(triggerIndex)
-      || triggerIndex < 0
-      || triggerIndex > 99
-      || !Number.isFinite(positionSeconds)
-      || positionSeconds < 0
-      || positionSeconds > 43200
-    ) {
-      return res.status(400).json({ message: 'A valid course, lesson, playback session, question number, and video position are required.' })
-    }
-
-    const enrollment = await Enrollment.findOne({
-      userId: req.auth.id,
-      courseId,
-      ...getStudentEnrollmentScope(req),
-      status: { $ne: 'cancelled' },
-    }).sort({ createdAt: -1 }).lean()
-    if (!enrollment) return res.status(404).json({ message: 'An active enrollment is required to answer this attention check.' })
-
-    const course = await Course.findById(courseId)
-      .select('+modules.lessons.attentionCheck.questions.correctOptionIndices +modules.contentItems.attentionCheck.questions.correctOptionIndices')
-      .lean()
-    if (!course) return res.status(404).json({ message: 'The enrolled course could not be found.' })
-    const lesson = findVideoLesson(course, lessonId)
-    const attentionCheck = lesson?.attentionCheck
-    if (!attentionCheck?.enabled) return res.status(404).json({ message: 'Attention checks are not enabled for this lesson.' })
-
-    const questions = getSelectedAttentionQuestions(attentionCheck)
-    const questionCount = attentionCheck.questionsDuringVideo ?? questions.length
-    if (!questions.length || questions.length !== questionCount || triggerIndex >= questionCount) {
-      return res.status(409).json({ message: 'The attention check configuration for this lesson is incomplete.' })
-    }
-
-    const scope = {
-      userId: req.auth.id,
-      enrollmentId: enrollment._id,
-      courseId,
-      lessonId,
-      sessionId,
-      triggerIndex,
-    }
-    const previousResponse = await VideoAttentionResponse.findOne(scope).select('+correctOptionIndices').lean()
-    if (previousResponse && previousResponse.status !== 'presented') {
-      return res.json({
-        recorded: true,
-        status: previousResponse.status,
-        responseTimeMs: previousResponse.responseTimeMs,
-        presentedAt: previousResponse.presentedAt,
-        serverTime: new Date(),
-      })
-    }
-    if (previousResponse) {
-      return res.json({
-        responseId: String(previousResponse._id),
-        question: {
-          _id: String(previousResponse.questionId),
-          prompt: previousResponse.questionPrompt,
-          type: previousResponse.questionType,
-          options: previousResponse.options,
-        },
-        presentedAt: previousResponse.presentedAt,
-        serverTime: new Date(),
-      })
-    }
-
-    const priorResponses = await VideoAttentionResponse.find({
-      userId: req.auth.id,
-      enrollmentId: enrollment._id,
-      lessonId,
-      sessionId,
-    }).select('questionId').lean()
-    const usedQuestionIds = new Set(priorResponses.map((response) => String(response.questionId)))
-    const availableQuestions = questions.filter((question) => !usedQuestionIds.has(String(question._id)))
-    if (!availableQuestions.length) {
-      return res.status(409).json({ message: 'There are no unused attention questions remaining in this playback session.' })
-    }
-    const question = availableQuestions[Math.floor(Math.random() * availableQuestions.length)]
-    const presentedAt = new Date()
-    const response = await VideoAttentionResponse.create({
-      userId: req.auth.id,
-      ...(req.auth.user.studentType === 'college' ? { collegeId: req.auth.user.collegeId } : {}),
-      enrollmentId: enrollment._id,
-      courseId,
-      lessonId,
-      lessonTitle: lesson.title || 'Video lesson',
-      sessionId,
-      triggerIndex,
-      questionId: question._id,
-      questionPrompt: question.prompt,
-      questionType: question.type,
-      options: question.options,
-      correctOptionIndices: question.correctOptionIndices,
-      videoPositionSeconds: positionSeconds,
-      presentedAt,
-      status: 'presented',
-    })
-    return res.status(201).json({
-      responseId: String(response._id),
-      question: {
-        _id: String(question._id),
-        prompt: question.prompt,
-        type: question.type,
-        options: question.options,
-      },
-      presentedAt,
-      serverTime: new Date(),
-    })
-  } catch (error) {
-    return next(error)
-  }
-})
-
-router.post('/courses/:courseId/attention-checks/:lessonId/submit', ...requireStudent, async (req, res, next) => {
-  try {
-    const { courseId, lessonId } = req.params
-    const { responseId, selectedOptionIndices, notAnswered } = req.body ?? {}
-    if (!isValidObjectId(courseId) || !isValidObjectId(lessonId) || !isValidObjectId(responseId)) {
-      return res.status(400).json({ message: 'Select a valid course, lesson, and attention check response.' })
-    }
-    if (notAnswered !== undefined && typeof notAnswered !== 'boolean') {
-      return res.status(400).json({ message: 'The attention check response status is invalid.' })
-    }
-
-    const enrollment = await Enrollment.findOne({
-      userId: req.auth.id,
-      courseId,
-      ...getStudentEnrollmentScope(req),
-      status: { $ne: 'cancelled' },
-    }).sort({ createdAt: -1 }).lean()
-    if (!enrollment) return res.status(404).json({ message: 'An active enrollment is required to submit this attention check.' })
-
-    const response = await VideoAttentionResponse.findOne({
-      _id: responseId,
-      userId: req.auth.id,
-      enrollmentId: enrollment._id,
-      courseId,
-      lessonId,
-    }).select('+correctOptionIndices')
-    if (!response) return res.status(409).json({ message: 'This attention check is no longer available for submission.' })
-    const answeredAt = new Date()
-    const responseTimeMs = Math.max(0, answeredAt.getTime() - new Date(response.presentedAt).getTime())
-    const isTimedOut = responseTimeMs >= attentionCheckResponseTimeoutMs
-    const hasNoAnswer = notAnswered === true
-      || selectedOptionIndices === undefined
-      || (Array.isArray(selectedOptionIndices) && selectedOptionIndices.length === 0)
-    const isNotAnswered = hasNoAnswer || isTimedOut
-
-    if (response.status === 'answered') {
-      if (notAnswered === true || !Array.isArray(selectedOptionIndices) || !isCorrectAttentionAnswer(selectedOptionIndices, response.selectedOptionIndices || [])) {
-        return res.status(409).json({ message: 'This attention check has already been answered.' })
-      }
-      return res.json({
-        recorded: true,
-        status: 'answered',
-        isCorrect: response.isCorrect,
-        responseTimeMs: response.responseTimeMs,
-      })
-    }
-
-    if (response.status === 'not_answered') {
-      if (!isNotAnswered) return res.status(409).json({ message: 'This attention check was recorded as not answered.' })
-      return res.json({
-        recorded: true,
-        status: 'not_answered',
-        isCorrect: false,
-        responseTimeMs: response.responseTimeMs,
-      })
-    }
-
-    if (isNotAnswered && !isTimedOut) {
-      return res.status(409).json({ message: 'The 10-second response window is still active.' })
-    }
-
-    if (isNotAnswered) {
-      response.selectedOptionIndices = []
-      response.answeredAt = answeredAt
-      response.responseTimeMs = attentionCheckResponseTimeoutMs
-      response.isCorrect = false
-      response.status = 'not_answered'
-      await response.save()
-      return res.json({
-        recorded: true,
-        status: 'not_answered',
-        isCorrect: false,
-        responseTimeMs: response.responseTimeMs,
-      })
-    }
-
-    if (
-      !Array.isArray(selectedOptionIndices)
-      || selectedOptionIndices.length < 1
-      || selectedOptionIndices.length > response.options.length
-      || selectedOptionIndices.some((index) => !Number.isInteger(index) || index < 0 || index >= response.options.length)
-      || new Set(selectedOptionIndices).size !== selectedOptionIndices.length
-      || (response.questionType !== 'multiple-select' && selectedOptionIndices.length !== 1)
-    ) {
-      return res.status(400).json({ message: 'Select a valid answer for this attention check.' })
-    }
-
-    response.selectedOptionIndices = selectedOptionIndices
-    response.answeredAt = answeredAt
-    response.responseTimeMs = responseTimeMs
-    response.isCorrect = isCorrectAttentionAnswer(selectedOptionIndices, response.correctOptionIndices)
-    response.status = 'answered'
-    await response.save()
-    return res.json({
-      recorded: true,
-      status: 'answered',
-      isCorrect: response.isCorrect,
-      responseTimeMs: response.responseTimeMs,
-    })
-  } catch (error) {
-    return next(error)
-  }
-})
-
-router.get('/courses/:courseId/quizzes/:quizId/attempts/status', ...requireStudent, async (req, res, next) => {
-  try {
-    const { courseId, quizId } = req.params
-    if (![courseId, quizId].every(isValidObjectId)) {
-      return res.status(400).json({ message: 'Select a valid course and quiz.' })
-    }
-    const enrollment = await Enrollment.findOne({
-      userId: req.auth.id,
-      courseId,
-      ...getStudentEnrollmentScope(req),
-      status: { $ne: 'cancelled' },
-    }).sort({ createdAt: -1 }).lean()
-    if (!enrollment) return res.status(404).json({ message: 'An active enrollment is required to view quiz status.' })
-
-    const course = await Course.findById(courseId).select('_id modules quizzes').lean()
-    if (!course) return res.status(404).json({ message: 'The enrolled course could not be found.' })
-    if (!findQuiz(course, quizId)) return res.status(404).json({ message: 'This quiz is not available in the enrolled course.' })
-
-    const now = new Date()
-    const state = await getQuizAttemptState({
-      userId: req.auth.id,
-      courseId,
-      quizId,
-    }, now)
-    return res.status(200).json({ quizStatus: getQuizAttemptStatus(state, now) })
-  } catch (error) {
-    return next(error)
-  }
-})
-
-router.get(
-  ['/certificates/:certificateId/pdf', '/certificates/:certificateId/preview', '/certificates/:certificateId/download'],
-  ...requireStudent,
-  async (req, res, next) => {
-    try {
-      const { certificateId } = req.params
-      const isObjectId = isValidObjectId(certificateId)
-
-      const ownership = {
-        $or: [
-          { userId: req.auth.id },
-          { studentId: req.auth.id },
-        ],
-      }
-
-      let certificate = null
-      if (isObjectId) {
-        certificate = await Certificate.findOne({
-          _id: certificateId,
-          ...ownership,
-        }).lean()
-
-        if (!certificate) {
-          certificate = await Certificate.findOne({
-            courseId: certificateId,
-            ...ownership,
-          }).lean()
-        }
-      } else {
-        certificate = await Certificate.findOne({
-          certificateId,
-          ...ownership,
-        }).lean()
-      }
-
-      if (!certificate && isObjectId) {
-        const enrollment = await Enrollment.findOne({
-          courseId: certificateId,
-          userId: req.auth.id,
-          status: 'completed',
-        }).populate('courseId').lean()
-        if (enrollment && enrollment.courseId?.generateCertificate !== false && req.auth.user.fullName?.trim()) {
-          try {
-            certificate = await issueCertificateIfEligible({
-              userId: req.auth.id,
-              studentName: req.auth.user.fullName,
-              enrollment,
-              course: enrollment.courseId,
-            })
-          } catch {
-            // non-fatal fallback
-          }
-        }
-      }
-
-      if (!certificate) return res.status(404).json({ message: 'The certificate was not found.' })
-
-      const activeTemplateId = await getActiveCertificateTemplateId()
-      const templateId = certificate.templateId || activeTemplateId
-      let templateImage = undefined
-      if (templateId && templateId !== 'builtin') {
-        try {
-          const template = await CertificateTemplate.findById(templateId).select('+imageData secureUrl').lean()
-          if (template) {
-            templateImage = await loadCertificateTemplateImage(template)
-          }
-        } catch {
-          templateImage = undefined
-        }
-      }
-
-      const pdf = await generateCertificatePdf(certificate, templateImage)
-      const download = req.query.download === 'true' || req.path.endsWith('/download')
-      const courseSlug = (certificate.courseName || certificate.name || 'Course')
-        .replace(/[^a-zA-Z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '')
-      const filename = courseSlug
-        ? `aiHustle-${courseSlug}-Certificate.pdf`
-        : `aiHustle-certificate-${certificate.certificateId}.pdf`
-
-      res.setHeader('Content-Type', 'application/pdf')
-      res.setHeader('Content-Disposition', `${download ? 'attachment' : 'inline'}; filename="${filename}"`)
-      res.setHeader('Cache-Control', 'private, no-store')
-      res.setHeader('X-Content-Type-Options', 'nosniff')
-      return res.send(pdf)
-    } catch (error) {
-      return next(error)
-    }
-  },
-)
-
-/* ==========================================================================
-   Student Notes System APIs
-   ========================================================================== */
-
-async function handleGetCourseNotes(req, res, next) {
-  try {
-    const { courseId } = req.params
-    if (!isValidObjectId(courseId)) {
-      return res.status(400).json({ message: 'Select a valid course.' })
-    }
-
-    const { search, lessonId, pinned, sort = 'newest' } = req.query
-
-    const course = await Course.findById(courseId).select('title').lean()
-    if (!course) {
-      return res.status(404).json({ message: 'Course not found.' })
-    }
-
-    const enrollment = await Enrollment.findOne({
-      userId: req.auth.id,
-      courseId,
-      ...getStudentEnrollmentScope(req),
-      status: { $ne: 'cancelled' },
-    }).select('_id').lean()
-    if (!enrollment) {
-      return res.status(403).json({ message: 'Enroll in this course before accessing its notes.' })
-    }
-
-    const allNotes = await StudentNote.find({
-      studentId: req.auth.id,
-      courseId,
-    }).sort({ isPinned: -1, updatedAt: -1 }).lean()
-
-    const totalCount = allNotes.length
-    const distinctLessons = new Set(allNotes.map((n) => n.lessonId).filter(Boolean))
-    const lessonsCoveredCount = distinctLessons.size
-    const pinnedCount = allNotes.filter((n) => n.isPinned).length
-
-    let filtered = [...allNotes]
-
-    if (search && typeof search === 'string' && search.trim()) {
-      const term = search.trim().toLowerCase()
-      filtered = filtered.filter((n) =>
-        (n.title && n.title.toLowerCase().includes(term)) ||
-        (n.content && n.content.toLowerCase().includes(term)) ||
-        (n.lessonTitle && n.lessonTitle.toLowerCase().includes(term))
-      )
-    }
-
-    if (lessonId && typeof lessonId === 'string' && lessonId.trim()) {
-      filtered = filtered.filter((n) => String(n.lessonId) === lessonId.trim())
-    }
-
-    if (pinned === 'true' || pinned === true) {
-      filtered = filtered.filter((n) => n.isPinned)
-    }
-
-    if (sort === 'oldest') {
-      filtered.sort((a, b) => {
-        if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1
-        return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-      })
-    } else if (sort === 'recently_edited') {
-      filtered.sort((a, b) => {
-        if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1
-        return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
-      })
-    } else if (sort === 'lesson') {
-      filtered.sort((a, b) => {
-        if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1
-        const comp = (a.lessonTitle || '').localeCompare(b.lessonTitle || '')
-        if (comp !== 0) return comp
-        return (a.videoTimestamp || 0) - (b.videoTimestamp || 0)
-      })
-    } else {
-      filtered.sort((a, b) => {
-        if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1
-        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-      })
-    }
-
-    return res.json({
-      notes: filtered,
-      totalCount,
-      lessonsCoveredCount,
-      pinnedCount,
-    })
-  } catch (error) {
-    return next(error)
-  }
-}
-
-async function handleCreateCourseNote(req, res, next) {
-  try {
-    const { courseId } = req.params
-    if (!isValidObjectId(courseId)) {
-      return res.status(400).json({ message: 'Select a valid course.' })
-    }
-
-    const { title, content, lessonId, lessonTitle, videoTimestamp, videoTimestampDisplay, isPinned } = req.body || {}
-
-    if (!title || typeof title !== 'string' || !title.trim()) {
-      return res.status(400).json({ message: 'Note title is required.' })
-    }
-
-    const course = await Course.findById(courseId).select('title').lean()
-    if (!course) {
-      return res.status(404).json({ message: 'Course not found.' })
-    }
-
-    const enrollment = await Enrollment.findOne({
-      userId: req.auth.id,
-      courseId,
-      ...getStudentEnrollmentScope(req),
-      status: { $ne: 'cancelled' },
-    }).select('_id').lean()
-    if (!enrollment) {
-      return res.status(403).json({ message: 'Enroll in this course before saving notes.' })
-    }
-
-    const note = await StudentNote.create({
-      studentId: req.auth.id,
-      studentType: req.auth.user?.studentType === 'college' ? 'college' : 'independent',
-      collegeId: req.auth.user?.collegeId || null,
-      courseId,
-      lessonId: typeof lessonId === 'string' ? lessonId.trim() : '',
-      lessonTitle: typeof lessonTitle === 'string' ? lessonTitle.trim() : '',
-      title: title.trim().slice(0, 200),
-      content: typeof content === 'string' ? content.slice(0, 50000) : '',
-      videoTimestamp: typeof videoTimestamp === 'number' && videoTimestamp >= 0 ? videoTimestamp : null,
-      videoTimestampDisplay: typeof videoTimestampDisplay === 'string' ? videoTimestampDisplay.trim().slice(0, 20) : '',
-      isPinned: Boolean(isPinned),
-    })
-
-    return res.status(201).json({
-      message: 'Note created successfully.',
-      note,
-    })
-  } catch (error) {
-    return next(error)
-  }
-}
-
-async function handleUpdateStudentNote(req, res, next) {
-  try {
-    const { noteId } = req.params
-    if (!isValidObjectId(noteId)) {
-      return res.status(400).json({ message: 'Valid note ID is required.' })
-    }
-
-    const note = await StudentNote.findOne({
-      _id: noteId,
-      studentId: req.auth.id,
-    })
-    if (!note) {
-      return res.status(404).json({ message: 'Note not found.' })
-    }
-
-    const { title, content, lessonId, lessonTitle, videoTimestamp, videoTimestampDisplay, isPinned } = req.body || {}
-
-    if (title !== undefined) {
-      if (!title || typeof title !== 'string' || !title.trim()) {
-        return res.status(400).json({ message: 'Note title cannot be empty.' })
-      }
-      note.title = title.trim().slice(0, 200)
-    }
-
-    if (content !== undefined) {
-      note.content = typeof content === 'string' ? content.slice(0, 50000) : ''
-    }
-
-    if (lessonId !== undefined) {
-      note.lessonId = typeof lessonId === 'string' ? lessonId.trim() : ''
-    }
-
-    if (lessonTitle !== undefined) {
-      note.lessonTitle = typeof lessonTitle === 'string' ? lessonTitle.trim().slice(0, 300) : ''
-    }
-
-    if (videoTimestamp !== undefined) {
-      note.videoTimestamp = typeof videoTimestamp === 'number' && videoTimestamp >= 0 ? videoTimestamp : null
-    }
-
-    if (videoTimestampDisplay !== undefined) {
-      note.videoTimestampDisplay = typeof videoTimestampDisplay === 'string' ? videoTimestampDisplay.trim().slice(0, 20) : ''
-    }
-
-    if (isPinned !== undefined) {
-      note.isPinned = Boolean(isPinned)
-    }
-
-    note.updatedAt = new Date()
-    await note.save()
-
-    return res.json({
-      message: 'Note updated successfully.',
-      note,
-    })
-  } catch (error) {
-    return next(error)
-  }
-}
-
-async function handleDeleteStudentNote(req, res, next) {
-  try {
-    const { noteId } = req.params
-    if (!isValidObjectId(noteId)) {
-      return res.status(400).json({ message: 'Valid note ID is required.' })
-    }
-
-    const note = await StudentNote.findOne({
-      _id: noteId,
-      studentId: req.auth.id,
-    })
-    if (!note) {
-      return res.status(404).json({ message: 'Note not found.' })
-    }
-
-    await StudentNote.deleteOne({ _id: noteId, studentId: req.auth.id })
-
-    return res.json({ message: 'Note deleted successfully.' })
-  } catch (error) {
-    return next(error)
-  }
-}
-
-async function handleTogglePinStudentNote(req, res, next) {
-  try {
-    const { noteId } = req.params
-    if (!isValidObjectId(noteId)) {
-      return res.status(400).json({ message: 'Valid note ID is required.' })
-    }
-
-    const note = await StudentNote.findOne({
-      _id: noteId,
-      studentId: req.auth.id,
-    })
-    if (!note) {
-      return res.status(404).json({ message: 'Note not found.' })
-    }
-
-    if (req.body?.isPinned !== undefined) {
-      note.isPinned = Boolean(req.body.isPinned)
-    } else {
-      note.isPinned = !note.isPinned
-    }
-
-    note.updatedAt = new Date()
-    await note.save()
-
-    return res.json({
-      message: note.isPinned ? 'Note pinned.' : 'Note unpinned.',
-      note,
-    })
-  } catch (error) {
-    return next(error)
-  }
-}
-
-async function handleExportCourseNotes(req, res, next) {
-  try {
-    const { courseId } = req.params
-    if (!isValidObjectId(courseId)) {
-      return res.status(400).json({ message: 'Select a valid course.' })
-    }
-
-    const course = await Course.findById(courseId).select('title').lean()
-    if (!course) {
-      return res.status(404).json({ message: 'Course not found.' })
-    }
-
-    const enrollment = await Enrollment.findOne({
-      userId: req.auth.id,
-      courseId,
-      ...getStudentEnrollmentScope(req),
-      status: { $ne: 'cancelled' },
-    }).select('_id').lean()
-    if (!enrollment) {
-      return res.status(403).json({ message: 'Enroll in this course before exporting notes.' })
-    }
-
-    const notes = await StudentNote.find({
-      studentId: req.auth.id,
-      courseId,
-    }).sort({ isPinned: -1, createdAt: 1 }).lean()
-
-    const courseSlug = (course.title || 'Course').replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '')
-    const filename = `aiHustle-${courseSlug}-Notes.pdf`
-
-    res.setHeader('Content-Type', 'application/pdf')
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
-    res.setHeader('Cache-Control', 'private, no-store')
-    res.setHeader('X-Content-Type-Options', 'nosniff')
-
-    const studentName = req.auth.user?.fullName || req.auth.user?.username || 'Student'
-    generateStudentNotesPdf(res, { courseTitle: course.title, studentName, notes })
-  } catch (error) {
-    return next(error)
-  }
-}
-
-router.get('/courses/:courseId/notes', ...requireStudent, handleGetCourseNotes)
-router.get('/learning/courses/:courseId/notes', ...requireStudent, handleGetCourseNotes)
-
-router.post('/courses/:courseId/notes', ...requireStudent, handleCreateCourseNote)
-router.post('/learning/courses/:courseId/notes', ...requireStudent, handleCreateCourseNote)
-
-router.put('/notes/:noteId', ...requireStudent, handleUpdateStudentNote)
-router.put('/learning/notes/:noteId', ...requireStudent, handleUpdateStudentNote)
-router.put('/courses/:courseId/notes/:noteId', ...requireStudent, handleUpdateStudentNote)
-router.put('/learning/courses/:courseId/notes/:noteId', ...requireStudent, handleUpdateStudentNote)
-
-router.delete('/notes/:noteId', ...requireStudent, handleDeleteStudentNote)
-router.delete('/learning/notes/:noteId', ...requireStudent, handleDeleteStudentNote)
-router.delete('/courses/:courseId/notes/:noteId', ...requireStudent, handleDeleteStudentNote)
-router.delete('/learning/courses/:courseId/notes/:noteId', ...requireStudent, handleDeleteStudentNote)
-
-router.patch('/notes/:noteId/pin', ...requireStudent, handleTogglePinStudentNote)
-router.patch('/learning/notes/:noteId/pin', ...requireStudent, handleTogglePinStudentNote)
-
-router.get('/courses/:courseId/notes/export', ...requireStudent, handleExportCourseNotes)
-router.get('/learning/courses/:courseId/notes/export', ...requireStudent, handleExportCourseNotes)
-
-/* ==========================================================================
-   Student Resources APIs (Course Cheat Sheets & Supplementary Materials)
-   ========================================================================== */
-
-async function handleGetStudentResources(req, res, next) {
-  try {
-    const enrollments = await Enrollment.find({
-      userId: req.auth.id,
-      status: { $ne: 'cancelled' },
-      ...getStudentEnrollmentScope(req),
-    }).populate('courseId', 'title category thumbnailUrl').lean()
-
-    const enrolledCourses = (enrollments || [])
-      .map((e) => e.courseId)
-      .filter((c) => c && typeof c === 'object')
-
-    const courseIds = enrolledCourses.map((c) => c._id)
-
-    const { courseId, search } = req.query
-    const query = { courseId: { $in: courseIds } }
-
-    if (courseId && isValidObjectId(courseId)) {
-      if (!courseIds.some((id) => String(id) === String(courseId))) {
-        return res.status(403).json({ message: 'You are not enrolled in this course.' })
-      }
-      query.courseId = courseId
-    }
-
-    if (search && typeof search === 'string' && search.trim()) {
-      const term = search.trim().toLowerCase()
-      query.$or = [
-        { title: { $regex: term, $options: 'i' } },
-        { description: { $regex: term, $options: 'i' } },
-        { originalFileName: { $regex: term, $options: 'i' } },
-      ]
-    }
-
-    const resources = await Resource.find(query)
-      .populate('courseId', 'title category thumbnailUrl')
-      .sort({ createdAt: -1 })
-      .lean()
-
-    const enrichedResources = (resources || []).map((resource) => {
-      const { deliveryUrl, downloadUrl } = getSignedResourceDeliveryUrls(resource)
-      return {
-        ...resource,
-        url: deliveryUrl || resource.url,
-        signedUrl: deliveryUrl || resource.url,
-        downloadUrl: downloadUrl || deliveryUrl || resource.url,
-      }
-    })
-
-    return res.json({
-      resources: enrichedResources,
-      courses: enrolledCourses,
-    })
-  } catch (error) {
-    return next(error)
-  }
-}
-
-async function handleGetCourseResources(req, res, next) {
-  try {
-    const { courseId } = req.params
-    if (!isValidObjectId(courseId)) {
-      return res.status(400).json({ message: 'Select a valid course.' })
-    }
-
-    const enrollment = await Enrollment.findOne({
-      userId: req.auth.id,
-      courseId,
-      status: { $ne: 'cancelled' },
-      ...getStudentEnrollmentScope(req),
-    }).select('_id').lean()
-
-    if (!enrollment) {
-      return res.status(403).json({ message: 'Enroll in this course before accessing its resources.' })
-    }
-
-    const resources = await Resource.find({ courseId })
-      .populate('courseId', 'title category thumbnailUrl')
-      .sort({ createdAt: -1 })
-      .lean()
-
-    const enrichedResources = (resources || []).map((resource) => {
-      const { deliveryUrl, downloadUrl } = getSignedResourceDeliveryUrls(resource)
-      return {
-        ...resource,
-        url: deliveryUrl || resource.url,
-        signedUrl: deliveryUrl || resource.url,
-        downloadUrl: downloadUrl || deliveryUrl || resource.url,
-      }
-    })
-
-    return res.json({ resources: enrichedResources })
-  } catch (error) {
-    return next(error)
-  }
-}
-
-async function handleGetResourceFile(req, res, next) {
-  try {
-    const { resourceId } = req.params
-    if (!isValidObjectId(resourceId)) {
-      return res.status(400).json({ message: 'Valid resource ID is required.' })
-    }
-
-    const resource = await Resource.findById(resourceId).lean()
-    if (!resource) {
-      return res.status(404).json({ message: 'Resource not found.' })
-    }
-
-    if (req.auth.role === 'student') {
-      const enrollment = await Enrollment.findOne({
-        userId: req.auth.id,
-        courseId: resource.courseId,
-        status: { $ne: 'cancelled' },
-        ...getStudentEnrollmentScope(req),
-      }).select('_id').lean()
-
-      if (!enrollment) {
-        return res.status(403).json({ message: 'Enroll in this course before accessing its resources.' })
-      }
-    } else if (!['main_admin', 'college_admin'].includes(req.auth.role)) {
-      return res.status(403).json({ message: 'You do not have permission to access this resource.' })
-    }
-
-    const buffer = await fetchResourcePdfBuffer(resource)
-    const isDownload = req.query.download === 'true' || req.query.download === '1'
-    const originalName = resource.originalFileName || `${resource.title || 'resource'}.pdf`
-    const safeFilename = path.basename(originalName).replace(/["\r\n]/g, '_')
-
-    res.setHeader('Content-Type', 'application/pdf')
-    res.setHeader(
-      'Content-Disposition',
-      `${isDownload ? 'attachment' : 'inline'}; filename="${safeFilename}"`
-    )
-    res.setHeader('Content-Length', buffer.length)
-    res.setHeader('Cache-Control', 'private, no-store, max-age=0')
-    res.setHeader('X-Content-Type-Options', 'nosniff')
-    return res.end(buffer)
-  } catch (error) {
-    return next(error)
-  }
-}
-
-async function handleGetResourceAccess(req, res, next) {
-  try {
-    const { resourceId } = req.params
-    if (!isValidObjectId(resourceId)) {
-      return res.status(400).json({ message: 'Valid resource ID is required.' })
-    }
-
-    const resource = await Resource.findById(resourceId)
-      .populate('courseId', 'title category thumbnailUrl')
-      .lean()
-
-    if (!resource) {
-      return res.status(404).json({ message: 'Resource not found.' })
-    }
-
-    if (req.auth.role === 'student') {
-      const enrollment = await Enrollment.findOne({
-        userId: req.auth.id,
-        courseId: resource.courseId,
-        status: { $ne: 'cancelled' },
-        ...getStudentEnrollmentScope(req),
-      }).select('_id').lean()
-
-      if (!enrollment) {
-        return res.status(403).json({ message: 'Enroll in this course before accessing its resources.' })
-      }
-    } else if (!['main_admin', 'college_admin'].includes(req.auth.role)) {
-      return res.status(403).json({ message: 'You do not have permission to access this resource.' })
-    }
-
-    const { deliveryUrl, downloadUrl } = getSignedResourceDeliveryUrls(resource)
-    const proxyUrl = `/api/resources/${resource._id}/file`
-
-    return res.json({
-      success: true,
-      resourceId: resource._id,
-      title: resource.title,
-      fileName: resource.originalFileName || `${resource.title || 'resource'}.pdf`,
-      fileSize: resource.fileSize,
-      url: deliveryUrl || resource.url,
-      signedUrl: deliveryUrl,
-      downloadUrl: downloadUrl || deliveryUrl || resource.url,
-      proxyUrl,
-    })
-  } catch (error) {
-    return next(error)
-  }
-}
-
-const requireResourceAccess = [authenticate, requireRoles('student', 'main_admin', 'college_admin')]
-
-router.get('/student/resources', ...requireStudent, handleGetStudentResources)
-router.get('/learning/resources', ...requireStudent, handleGetStudentResources)
-router.get('/courses/:courseId/resources', ...requireStudent, handleGetCourseResources)
-router.get('/learning/courses/:courseId/resources', ...requireStudent, handleGetCourseResources)
-router.get('/resources/:resourceId/file', ...requireResourceAccess, handleGetResourceFile)
-router.get('/student/resources/:resourceId/file', ...requireResourceAccess, handleGetResourceFile)
-router.get('/resources/:resourceId/access', ...requireResourceAccess, handleGetResourceAccess)
-router.get('/student/resources/:resourceId/access', ...requireResourceAccess, handleGetResourceAccess)
 
 export default router

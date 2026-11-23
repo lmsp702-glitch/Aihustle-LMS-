@@ -13,18 +13,16 @@ import {
 const allowedRoles = new Set(['main_admin', 'college_admin', 'student'])
 
 export async function authenticate(req, res, next) {
-  let token = null
   const authorization = req.get('authorization')
-  if (authorization) {
-    const [scheme, headerToken, ...extra] = authorization.trim().split(/\s+/)
-    if (scheme === 'Bearer' && headerToken && !extra.length) {
-      token = headerToken
-    }
-  } else if (typeof req.query?.token === 'string' && req.query.token.trim()) {
+  let [scheme, token, ...extra] = authorization?.trim().split(/\s+/) ?? []
+
+  if ((!token || scheme !== 'Bearer') && typeof req.query?.token === 'string' && req.query.token.trim()) {
+    scheme = 'Bearer'
     token = req.query.token.trim()
+    extra = []
   }
 
-  if (!token) {
+  if (scheme !== 'Bearer' || !token || extra.length) {
     return res.status(401).json({ message: 'A valid access token is required.' })
   }
   if (!config.jwtSecret || !config.jwtSecret.trim()) {
@@ -89,17 +87,7 @@ export async function authenticate(req, res, next) {
 }
 
 export function requireRoles(...roles) {
-  const allowed = new Set(
-    roles.flatMap((r) => {
-      const aliasMap = {
-        college: ['college', 'college_admin'],
-        college_admin: ['college', 'college_admin'],
-        admin: ['admin', 'main_admin'],
-        main_admin: ['admin', 'main_admin'],
-      }
-      return aliasMap[r] || [r]
-    }),
-  )
+  const allowed = new Set(roles)
   return function authorizeRole(req, res, next) {
     if (!req.auth) {
       return res.status(401).json({ message: 'Authentication is required.' })

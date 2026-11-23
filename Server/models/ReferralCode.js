@@ -22,17 +22,9 @@ const referralCodeSchema = new mongoose.Schema(
     usedAt: { type: Date, default: null },
     registrationStatus: {
       type: String,
-      enum: ['awaiting_approval', 'approved', 'rejected', 'account_deleted', null],
+      enum: ['awaiting_approval', 'approved', 'rejected', null],
       default: null,
     },
-    rewardStatus: {
-      type: String,
-      enum: ['pending', 'earned', 'cancelled', null],
-      default: null,
-    },
-    isDeactivated: { type: Boolean, default: false },
-    referredEmailHash: { type: String, default: null },
-    referredUserAnonymized: { type: Boolean, default: false },
   },
   { autoCreate: false, autoIndex: false, versionKey: false, collection: 'referralCodes' },
 )
@@ -43,10 +35,6 @@ referralCodeSchema.index({ expiresAt: 1 }, { name: 'referral_expiry_lookup' })
 referralCodeSchema.index(
   { generatedBy: 1, requestId: 1 },
   { unique: true, name: 'unique_referral_request_per_owner' },
-)
-referralCodeSchema.index(
-  { referredEmailHash: 1 },
-  { sparse: true, name: 'referral_email_hash_lookup' },
 )
 
 const ReferralCode = mongoose.models.ReferralCode

@@ -308,15 +308,6 @@
   color: #33724d;
 }
 
-.settings-theme-options {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-
 .settings-two-factor {
   display: grid;
   gap: 13px;
@@ -419,179 +410,6 @@
   width: fit-content;
 }
 
-.settings-theme-option {
-  display: flex;
-  min-height: 66px;
-  align-items: flex-start;
-  gap: 9px;
-  padding: 11px;
-  border: 1px solid #d4d0c4;
-  border-radius: 8px;
-  background: #fffefa;
-  cursor: pointer;
-}
-
-.settings-theme-option.is-selected {
-  border-color: #7d9d80;
-  background: #f3f7ef;
-}
-
-.settings-theme-option input {
-  width: 14px;
-  height: 14px;
-  flex: 0 0 auto;
-  margin: 2px 0 0;
-  accent-color: #527d66;
-}
-
-.settings-theme-option > span {
-  display: grid;
-  gap: 4px;
-}
-
-.settings-theme-option strong {
-  color: #303b35;
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.settings-theme-option small {
-  color: #626d67;
-  font-size: 10px;
-  line-height: 1.4;
-}
-
-.settings-notification-section {
-  min-width: 0;
-}
-
-.settings-notification-content {
-  display: grid;
-  gap: 16px;
-}
-
-.settings-notification-groups {
-  display: grid;
-  gap: 18px;
-}
-
-.settings-notification-group {
-  display: grid;
-  gap: 10px;
-}
-
-.settings-notification-group__title {
-  margin: 0;
-  color: #3c4741;
-  font-size: 12.5px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-  text-transform: uppercase;
-}
-
-.settings-notification-card {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 13px 15px;
-  border: 1px solid #dedace;
-  border-radius: 9px;
-  background: #fffefa;
-  transition: border-color 0.15s ease, background-color 0.15s ease;
-}
-
-.settings-notification-card:hover {
-  border-color: #c7c1b0;
-}
-
-.settings-notification-card__info {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-}
-
-.settings-notification-card__info strong {
-  color: #26332f;
-  font-size: 13px;
-  font-weight: 650;
-}
-
-.settings-notification-card__info p {
-  margin: 0;
-  color: #626d67;
-  font-size: 11.5px;
-  line-height: 1.45;
-}
-
-.settings-toggle {
-  position: relative;
-  display: inline-block;
-  width: 42px;
-  height: 24px;
-  flex: 0 0 42px;
-  cursor: pointer;
-}
-
-.settings-toggle input {
-  opacity: 0;
-  width: 0;
-  height: 0;
-}
-
-.settings-toggle__slider {
-  position: absolute;
-  cursor: pointer;
-  inset: 0;
-  background-color: #d1ccbe;
-  transition: background-color 0.2s ease;
-  border-radius: 24px;
-}
-
-.settings-toggle__slider:before {
-  position: absolute;
-  content: "";
-  height: 18px;
-  width: 18px;
-  left: 3px;
-  bottom: 3px;
-  background-color: #ffffff;
-  transition: transform 0.2s ease;
-  border-radius: 50%;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-}
-
-.settings-toggle input:checked + .settings-toggle__slider {
-  background-color: #477b70;
-}
-
-.settings-toggle input:focus-visible + .settings-toggle__slider {
-  outline: 2px solid #eebd17;
-  outline-offset: 2px;
-}
-
-.settings-toggle input:checked + .settings-toggle__slider:before {
-  transform: translateX(18px);
-}
-
-.settings-toggle input:disabled + .settings-toggle__slider {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-
-.settings-notification-footer {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-height: 24px;
-}
-
-.settings-notification-status.is-saving {
-  font-size: 11.5px;
-  color: #477b70;
-  font-weight: 600;
-}
-
 .settings-password-form {
   max-width: 500px;
 }
@@ -683,166 +501,134 @@
 }
 
 .settings-delete-warning {
-  padding: 14px;
+  padding: 12px;
   border: 1px solid #d9b8ad;
-  border-radius: 10px;
+  border-radius: 8px;
   background: #fbf3ef;
-}
-
-.settings-delete-warning__header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 6px;
-}
-
-.settings-delete-icon {
-  flex-shrink: 0;
-  color: #477b70;
-}
-
-.settings-delete-icon.is-danger {
-  color: #c53030;
 }
 
 .settings-delete-warning strong {
   color: #793f32;
-  font-size: 13px;
-  font-weight: 700;
+  font-size: 12px;
 }
 
 .settings-delete-warning p {
   margin: 5px 0 0;
   color: #654f49;
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1.55;
 }
 
-.settings-delete-subtext {
-  font-size: 11.5px;
-  margin-top: 8px;
-  color: #7a635c;
-}
-
-.settings-delete-list {
-  margin: 10px 0 14px 20px;
-  padding: 0;
-  color: #654f49;
-  font-size: 11.5px;
-  line-height: 1.6;
-}
-
-.settings-delete-actions {
-  margin-top: 14px;
-  display: flex;
-  justify-content: flex-start;
-}
-
-.settings-delete-warning--institutional {
-  border-color: #d0c8b6;
-  background: #f8f6ee;
-}
-
-.settings-delete-warning--institutional strong {
-  color: #4e4b3c;
-}
-
-.settings-delete-warning--institutional p {
-  color: #5e5b4c;
-}
-
-.settings-modal-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(18, 22, 20, 0.65);
-  backdrop-filter: blur(2px);
-  display: grid;
-  place-items: center;
-  z-index: 1000;
-  padding: 16px;
-}
-
-.settings-modal-dialog {
-  background: #fffdf8;
-  border: 1.5px solid #c79d91;
-  border-radius: 14px;
-  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.28);
-  width: min(100%, 460px);
-  padding: 24px;
-  display: grid;
-  gap: 16px;
-  box-sizing: border-box;
-}
-
-.settings-modal-dialog__header {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-}
-
-.settings-modal-dialog__icon.is-danger {
-  display: grid;
-  place-items: center;
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  background: #fcedea;
-  color: #c53030;
-  flex-shrink: 0;
-}
-
-.settings-modal-dialog__header h3 {
-  margin: 0;
-  font-size: 17px;
-  font-weight: 750;
-  color: #26332f;
-}
-
-.settings-modal-dialog__sub {
-  margin: 3px 0 0;
-  font-size: 12px;
-  color: #626d67;
-}
-
-.settings-delete-form {
-  display: grid;
-  gap: 14px;
-}
-
-.settings-delete-modal__consequences {
-  padding: 10px 12px;
-  background: #fff5f3;
-  border: 1px solid #f4c7be;
-  border-radius: 8px;
-  font-size: 12px;
-  color: #822727;
-  line-height: 1.5;
-}
-
-.settings-modal-dialog__actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-  margin-top: 8px;
-}
-
-.student-button--danger {
-  background: #c53030;
+.settings-delete-button {
+  margin-top: 12px;
+  padding: 8px 16px;
+  border: 1px solid #c93b2b;
+  border-radius: 6px;
+  background: #c93b2b;
   color: #ffffff;
-  border: none;
-  border-radius: 8px;
-  padding: 9px 18px;
-  font-weight: 650;
-  font-size: 12.5px;
+  font-size: 12px;
+  font-weight: 600;
   cursor: pointer;
   transition: background 0.15s ease, opacity 0.15s ease;
 }
 
-.student-button--danger:hover:not(:disabled) {
-  background: #a82323;
+.settings-delete-button:hover:not(:disabled) {
+  background: #a82e20;
 }
 
-.student-button--danger:disabled {
+.settings-delete-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.settings-delete-confirm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(23, 30, 27, 0.52);
+  backdrop-filter: blur(2px);
+}
+
+.settings-delete-confirm-modal {
+  width: min(460px, 100%);
+  padding: 24px 22px 20px;
+  border: 1px solid #d9b8ad;
+  border-radius: 14px;
+  background: #fffefa;
+  box-shadow: 0 18px 48px rgba(29, 34, 30, 0.22);
+}
+
+.settings-delete-confirm-modal h3 {
+  margin: 0 0 10px;
+  color: #793f32;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.settings-delete-confirm-modal p {
+  margin: 0 0 14px;
+  color: #654f49;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.settings-delete-confirm-modal .settings-form-group {
+  margin-bottom: 12px;
+}
+
+.settings-delete-confirm-modal label {
+  display: block;
+  margin-bottom: 5px;
+  color: #303b35;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.settings-delete-confirm-modal input[type="password"],
+.settings-delete-confirm-modal input[type="text"] {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #c79d91;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #1f2723;
+  font-size: 13px;
+  box-sizing: border-box;
+}
+
+.settings-delete-confirm-modal input:focus {
+  outline: none;
+  border-color: #c93b2b;
+  box-shadow: 0 0 0 2px rgba(201, 59, 43, 0.2);
+}
+
+.settings-delete-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.settings-button-danger {
+  padding: 8px 16px;
+  border: 1px solid #c93b2b;
+  border-radius: 6px;
+  background: #c93b2b;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, opacity 0.15s ease;
+}
+
+.settings-button-danger:hover:not(:disabled) {
+  background: #a82e20;
+}
+
+.settings-button-danger:disabled {
   opacity: 0.55;
   cursor: not-allowed;
 }
@@ -905,7 +691,6 @@
 :root[data-theme='dark'] .settings-page__standalone-heading h1,
 :root[data-theme='dark'] .settings-account-summary strong,
 :root[data-theme='dark'] .settings-connected-account strong,
-:root[data-theme='dark'] .settings-theme-option strong,
 :root[data-theme='dark'] .settings-form label:not(.settings-checkbox),
 :root[data-theme='dark'] .settings-field-group,
 :root[data-theme='dark'] .settings-field-group > label,
@@ -962,8 +747,7 @@
 :root[data-theme='dark'] .settings-two-factor__summary,
 :root[data-theme='dark'] .settings-two-factor__toggle,
 :root[data-theme='dark'] .settings-connected-account,
-:root[data-theme='dark'] .settings-google-mark,
-:root[data-theme='dark'] .settings-theme-option {
+:root[data-theme='dark'] .settings-google-mark {
   border-color: #465149;
   background: #28312c;
   color: #e1e7df;
@@ -972,11 +756,6 @@
 :root[data-theme='dark'] .settings-form input[readonly] {
   background: #202723;
   color: #b0bbb1;
-}
-
-:root[data-theme='dark'] .settings-theme-option.is-selected {
-  border-color: #71917b;
-  background: #2b3a31;
 }
 
 :root[data-theme='dark'] .settings-account-summary .settings-account-type {
@@ -1016,72 +795,34 @@
   color: #efb9a9;
 }
 
-:root[data-theme='dark'] .settings-delete-warning p,
-:root[data-theme='dark'] .settings-delete-list,
-:root[data-theme='dark'] .settings-delete-subtext {
+:root[data-theme='dark'] .settings-delete-warning p {
   color: #d2b7ae;
 }
 
-:root[data-theme='dark'] .settings-delete-warning--institutional {
-  border-color: #555348;
-  background: #2f2e29;
+:root[data-theme='dark'] .settings-delete-confirm-modal {
+  border-color: #76574f;
+  background: #27211f;
+  color: #f0eae7;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
 }
 
-:root[data-theme='dark'] .settings-delete-warning--institutional strong {
-  color: #e0ded4;
+:root[data-theme='dark'] .settings-delete-confirm-modal h3 {
+  color: #efb9a9;
 }
 
-:root[data-theme='dark'] .settings-delete-warning--institutional p,
-:root[data-theme='dark'] .settings-delete-warning--institutional .settings-delete-subtext {
-  color: #b7b4a8;
+:root[data-theme='dark'] .settings-delete-confirm-modal p {
+  color: #d2b7ae;
 }
 
-:root[data-theme='dark'] .settings-modal-dialog {
-  background: #2e2f2b;
-  border-color: #805c53;
+:root[data-theme='dark'] .settings-delete-confirm-modal label {
+  color: #e1d6d2;
 }
 
-:root[data-theme='dark'] .settings-modal-dialog__header h3 {
-  color: #f0ede4;
-}
-
-:root[data-theme='dark'] .settings-modal-dialog__sub {
-  color: #b7b4aa;
-}
-
-:root[data-theme='dark'] .settings-delete-modal__consequences {
-  background: #382724;
-  border-color: #74433d;
-  color: #f2b8ad;
-}
-
-:root[data-theme='dark'] .settings-notification-group__title {
-  color: #c9d2cb;
-}
-
-:root[data-theme='dark'] .settings-notification-card {
-  border-color: #465149;
-  background: #28312c;
-}
-
-:root[data-theme='dark'] .settings-notification-card:hover {
-  border-color: #5b695f;
-}
-
-:root[data-theme='dark'] .settings-notification-card__info strong {
-  color: #e7ece5;
-}
-
-:root[data-theme='dark'] .settings-notification-card__info p {
-  color: #a4aea7;
-}
-
-:root[data-theme='dark'] .settings-toggle__slider {
-  background-color: #49544d;
-}
-
-:root[data-theme='dark'] .settings-toggle input:checked + .settings-toggle__slider {
-  background-color: #477b70;
+:root[data-theme='dark'] .settings-delete-confirm-modal input[type="password"],
+:root[data-theme='dark'] .settings-delete-confirm-modal input[type="text"] {
+  border-color: #76574f;
+  background: #1c1817;
+  color: #f0eae7;
 }
 
 :root[data-theme='dark'] .settings-message.is-error {
@@ -1101,8 +842,7 @@
     padding: 15px;
   }
 
-  .settings-form__grid,
-  .settings-theme-options {
+  .settings-form__grid {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -1119,10 +859,6 @@
   .settings-account-field--email,
   .settings-account-field--type {
     grid-area: auto;
-  }
-
-  .settings-theme-option {
-    min-height: 54px;
   }
 
   .settings-account-summary {
@@ -1235,7 +971,6 @@
 .main-admin-settings .settings-account-summary,
 .main-admin-settings .settings-two-factor__summary,
 .main-admin-settings .settings-two-factor__toggle,
-.main-admin-settings .settings-theme-option,
 .main-admin-settings .settings-connected-account {
   border-radius: var(--admin-card-radius);
   box-shadow: var(--admin-card-shadow);

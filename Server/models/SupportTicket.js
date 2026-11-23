@@ -1,28 +1,13 @@
 import mongoose from 'mongoose'
 
-const ticketStatuses = [
-  'Open',
-  'In Progress',
-  'Waiting for Student',
-  'Waiting for User',
-  'Resolved',
-  'Closed',
-]
+const ticketStatuses = ['Open', 'In Progress', 'Waiting for User', 'Resolved', 'Closed']
 const ticketCategories = [
-  'Account and Registration',
-  'Login and Security',
-  'Courses and Learning',
-  'Enrollments',
-  'Assignments and Results',
-  'Certificates',
-  'Payments',
-  'Technical Issues',
-  'Other',
-  // Backward compatibility with legacy ticket submissions:
   'Account and Login',
   'Course and Enrollment',
+  'Assignments and Results',
   'Payments and Purchases',
   'Technical Issue',
+  'Other',
 ]
 const ticketPriorities = ['Low', 'Medium', 'High']
 
@@ -70,7 +55,6 @@ const supportTicketSchema = new mongoose.Schema(
   {
     ticketId: { type: String, required: true, unique: true, trim: true },
     userId: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
-    studentId: { type: mongoose.Schema.Types.ObjectId, refPath: 'userCollection' },
     userCollection: { type: String, enum: ['students', 'clg_students'], required: true },
     accountType: { type: String, enum: ['independent', 'college'], required: true },
     collegeId: { type: mongoose.Schema.Types.ObjectId, ref: 'College' },
@@ -84,22 +68,9 @@ const supportTicketSchema = new mongoose.Schema(
     replies: { type: [replySchema], default: [] },
     statusHistory: { type: [statusHistorySchema], default: [] },
     priorityHistory: { type: [priorityHistorySchema], default: [] },
-    resolvedAt: { type: Date },
   },
   { autoCreate: false, autoIndex: false, timestamps: true, collection: 'supporttickets' },
 )
-
-supportTicketSchema.pre('save', function setSupportTicketFields(next) {
-  if (!this.studentId && this.userId) {
-    this.studentId = this.userId
-  }
-  if (this.status === 'Resolved' && !this.resolvedAt) {
-    this.resolvedAt = new Date()
-  } else if (this.status !== 'Resolved' && this.resolvedAt) {
-    this.resolvedAt = undefined
-  }
-  next()
-})
 
 supportTicketSchema.index({ userId: 1, updatedAt: -1 })
 supportTicketSchema.index({ collegeId: 1, updatedAt: -1 })
@@ -109,5 +80,5 @@ const SupportTicket =
   mongoose.models.SupportTicket ||
   mongoose.model('SupportTicket', supportTicketSchema, 'supporttickets')
 
-export { ticketCategories, ticketPriorities, ticketPriorities as priorities, ticketStatuses }
+export { ticketCategories, ticketPriorities, ticketStatuses }
 export default SupportTicket

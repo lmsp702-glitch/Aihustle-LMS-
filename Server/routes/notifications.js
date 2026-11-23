@@ -3,85 +3,13 @@ import { Router } from 'express'
 import AssignmentSubmission from '../models/AssignmentSubmission.js'
 import Enrollment from '../models/Enrollment.js'
 import Notification from '../models/Notification.js'
-import NotificationPreference from '../models/NotificationPreference.js'
 import QuizAttempt from '../models/QuizAttempt.js'
-import { sanitizePreferences } from '../utils/notification-service.js'
 import { authenticate, requireRoles } from '../middleware/auth.js'
 import { getCourseActivities } from '../utils/certificates.js'
 import { createStudentNotification } from '../utils/student-notifications.js'
+import { getAssignmentAcademicResult, isAssignmentPassed } from '../utils/assignment-result.js'
 
 const router = Router()
-
-const allowedPreferenceKeys = [
-  'courseAnnouncements',
-  'newCourseUpdates',
-  'assignmentDeadlines',
-  'quizReminders',
-  'referralNotifications',
-  'emailNotifications',
-]
-
-router.get('/preferences', authenticate, requireRoles('student'), async (req, res, next) => {
-  try {
-    const doc = await NotificationPreference.findOne({
-      userId: req.auth.id,
-      accountCollection: req.auth.accountCollection,
-    }).lean()
-
-    return res.json({
-      preferences: sanitizePreferences(doc),
-    })
-  } catch (error) {
-    return next(error)
-  }
-})
-
-async function handleUpdatePreferences(req, res, next) {
-  try {
-    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
-      return res.status(400).json({ message: 'Invalid notification preferences payload.' })
-    }
-
-    const updates = {}
-    for (const key of allowedPreferenceKeys) {
-      if (key in req.body) {
-        if (typeof req.body[key] !== 'boolean') {
-          return res.status(400).json({ message: `Preference ${key} must be a boolean.` })
-        }
-        updates[key] = req.body[key]
-      }
-    }
-
-    if (Object.keys(updates).length === 0) {
-      return res.status(400).json({ message: 'No valid notification preferences were provided.' })
-    }
-
-    const studentType = req.auth.user?.studentType || (req.auth.accountCollection === 'clg_students' ? 'college' : 'independent')
-
-    const updated = await NotificationPreference.findOneAndUpdate(
-      { userId: req.auth.id, accountCollection: req.auth.accountCollection },
-      {
-        $set: {
-          userId: req.auth.id,
-          accountCollection: req.auth.accountCollection,
-          studentType,
-          ...updates,
-        },
-      },
-      { new: true, upsert: true, setDefaultsOnInsert: true },
-    ).lean()
-
-    return res.json({
-      message: 'Notification preferences updated.',
-      preferences: sanitizePreferences(updated),
-    })
-  } catch (error) {
-    return next(error)
-  }
-}
-
-router.patch('/preferences', authenticate, requireRoles('student'), handleUpdatePreferences)
-router.put('/preferences', authenticate, requireRoles('student'), handleUpdatePreferences)
 
 function getStudentEnrollmentScope(req) {
   return req.auth.user.studentType === 'college'
@@ -149,7 +77,7 @@ async function createDailyCourseReminders(req) {
       userId: req.auth.id,
       enrollmentId: { $in: enrollmentIds },
     })
-      .select('enrollmentId assignmentId reviewStatus submittedAt')
+      .select('enrollmentId assignmentId reviewStatus submittedAt gradingStatus academicStatus scorePercentage marksObtained finalMarks aiEvaluation humanEvaluation')
       .sort({ submittedAt: -1, _id: -1 })
       .lean(),
   ])
@@ -177,14 +105,19 @@ async function createDailyCourseReminders(req) {
         activity,
         submission: submissionByAssignment.get(`${enrollment._id}:${activity.id}`),
       }))
-      .filter(({ submission }) => submission?.reviewStatus !== 'approved')
+      .filter(({ activity, submission }) => !isAssignmentPassed(submission, activity.maximumMarks))
 
     if (!pendingLessons.length && !pendingQuizzes.length && !pendingAssignments.length) continue
 
     const assignmentsToSubmit = pendingAssignments.filter(({ submission }) => !submission)
     const assignmentsToResubmit = pendingAssignments.filter(({ submission }) => submission?.reviewStatus === 'rejected')
-    const assignmentsAwaitingReview = pendingAssignments.filter(({ submission }) => (
-      submission && submission.reviewStatus !== 'rejected'
+    const assignmentsAwaitingReview = pendingAssignments.filter(({ activity, submission }) => (
+      submission
+      && submission.reviewStatus !== 'rejected'
+      && getAssignmentAcademicResult(submission, activity.maximumMarks)?.academicStatus !== 'Failed'
+    ))
+    const assignmentsBelowPassing = pendingAssignments.filter(({ activity, submission }) => (
+      getAssignmentAcademicResult(submission, activity.maximumMarks)?.academicStatus === 'Failed'
     ))
     const pendingParts = []
     if (pendingLessons.length) pendingParts.push(formatActivityCount(pendingLessons.length, 'lesson'))
@@ -197,6 +130,9 @@ async function createDailyCourseReminders(req) {
     }
     if (assignmentsAwaitingReview.length) {
       pendingParts.push(`${formatActivityCount(assignmentsAwaitingReview.length, 'assignment')} awaiting review`)
+    }
+    if (assignmentsBelowPassing.length) {
+      pendingParts.push(`${formatActivityCount(assignmentsBelowPassing.length, 'assignment')} below the passing score`)
     }
 
     const pendingAssignmentIds = new Set(pendingAssignments.map(({ activity }) => activity.id))
@@ -301,7 +237,7 @@ router.patch('/:notificationId/read', authenticate, requireRoles('main_admin', '
     const update = req.auth.role === 'main_admin'
       ? { $addToSet: { readBy: req.auth.id } }
       : { $set: { readAt: new Date() } }
-    const notification = await Notification.findOneAndUpdate(filter, update, { new: true })
+    const notification = await Notification.findOneAndUpdate(filter, update, { returnDocument: 'after' })
     if (!notification) return res.status(404).json({ message: 'The notification was not found.' })
     if (req.auth.role === 'main_admin') return res.json({ isRead: true })
     return res.json({
@@ -323,7 +259,7 @@ router.delete('/:notificationId', authenticate, requireRoles('student'), async (
     const notification = await Notification.findOneAndUpdate(
       { _id: notificationId, ...getNotificationScope(req) },
       { $set: { deletedAt: new Date() } },
-      { new: true },
+      { returnDocument: 'after' },
     ).lean()
     if (!notification) return res.status(404).json({ message: 'The notification was not found.' })
     return res.json({ deleted: true })

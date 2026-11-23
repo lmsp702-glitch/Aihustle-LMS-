@@ -3,7 +3,8 @@ import AdminSupport from './AdminSupport.jsx'
 import AdminDashboard from './AdminDashboard.jsx'
 import CollegeAdminDashboard from './CollegeAdminDashboard.jsx'
 import SettingsPage from './SettingsPage.jsx'
-import StudentDashboard from './StudentDashboard.jsx'
+import AdminProfilePage from './AdminProfilePage.jsx'
+import StudentDashboard, { clearStudentDashboardCaches } from './StudentDashboard.jsx'
 import ThemeToggle from './ThemeToggle.jsx'
 import WorkspaceTopbar from './WorkspaceTopbar.jsx'
 import { Link, Navigate, useLocation } from 'react-router-dom'
@@ -25,27 +26,12 @@ const DASHBOARD_PATHS = {
   student: '/student/dashboard',
   main_admin: '/admin/dashboard',
   college_admin: '/college-admin/dashboard',
-  college: '/college-admin/dashboard',
 }
 const DASHBOARD_API_ROLES = {
   student: 'student',
   main_admin: 'main_admin',
   college_admin: 'college_admin',
-  college: 'college_admin',
 }
-
-const HEAR_ABOUT_US_OPTIONS = [
-  'College / University Referral',
-  'Friend / Student Referral',
-  'Social Media',
-  'Online Advertisement',
-  'Google / Search Engine',
-  'YouTube',
-  'College Event / Workshop',
-  'Other Website / Blog',
-  'Other',
-]
-
 const AUTH_ROLE_KEYS = {
   Student: 'student',
   'Main Admin': 'main_admin',
@@ -228,8 +214,6 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
   const [registrationEmailResendCountdown, setRegistrationEmailResendCountdown] = useState(0)
   const [isSendingRegistrationEmailCode, setIsSendingRegistrationEmailCode] = useState(false)
   const [isVerifyingRegistrationEmailCode, setIsVerifyingRegistrationEmailCode] = useState(false)
-  const [hearAboutUs, setHearAboutUs] = useState('')
-  const [hearAboutUsOther, setHearAboutUsOther] = useState('')
   const [referralCode, setReferralCode] = useState(
     () => new URLSearchParams(window.location.search).get('referralCode') || '',
   )
@@ -560,10 +544,6 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
                 emailVerificationToken: registrationEmailVerificationToken,
                 role: 'student',
                 accountType: 'independent',
-            hearAboutUs: hearAboutUs.trim(),
-            ...(hearAboutUs.trim() === 'Other' && hearAboutUsOther.trim()
-              ? { hearAboutUsOther: hearAboutUsOther.trim() }
-              : {}),
                 registrationDetails,
                 ...(form.elements.referralCode.value.trim()
                   ? { referralCode: form.elements.referralCode.value.trim() }
@@ -1064,47 +1044,6 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
         )}
 
         {isRegistering && (
-          
-            <div className="field">
-              <label htmlFor="hear-about-us">
-                How did you hear about us? <span aria-hidden="true">*</span>
-              </label>
-              <select
-                id="hear-about-us"
-                name="hearAboutUs"
-                value={hearAboutUs}
-                required
-                onChange={(event) => {
-                  const value = event.currentTarget.value
-                  setHearAboutUs(value)
-                  if (value !== 'Other') setHearAboutUsOther('')
-                }}
-              >
-                <option value="">Select an option</option>
-                {HEAR_ABOUT_US_OPTIONS.map((option) => (
-                  <option key={option} value={option}>
-                    {option}
-                  </option>
-                ))}
-              </select>
-              {hearAboutUs === 'Other' && (
-                <>
-                  <label htmlFor="hear-about-us-other" style={{ marginTop: '8px', display: 'block' }}>Please specify</label>
-                  <input
-                    id="hear-about-us-other"
-                    name="hearAboutUsOther"
-                    type="text"
-                    placeholder="Specify how you heard about us"
-                    value={hearAboutUsOther}
-                    onChange={(event) => setHearAboutUsOther(event.currentTarget.value)}
-                    maxLength={200}
-                  />
-                </>
-              )}
-            </div>
-        )}
-
-        {isRegistering && (
           <div className="field">
             <label htmlFor="registration-referral-code">Referral Code (optional)</label>
             <div className="referral-code-input">
@@ -1278,7 +1217,7 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
             </div>
 
             <div className="field">
-              <label htmlFor="living-with-whom">Living With Whom</label>
+              <label htmlFor="living-with-whom">Living Arrangement</label>
               <select
                 id="living-with-whom"
                 name="livingWithWhom"
@@ -1309,13 +1248,12 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
             </svg>
             Your account is secure
           </span>
-          <button
+          <Link
             className="text-button"
-            type="button"
-            onClick={() => onMessage('Password recovery will be available when account services are connected.')}
+            to="/forgot-password"
           >
             Forgot password?
-          </button>
+          </Link>
         </div>
       )}
       {fieldErrors.email && <p id="email-field-error" className="field-error" role="alert">{fieldErrors.email}</p>}
@@ -1426,6 +1364,318 @@ function ActivationPage() {
   )
 }
 
+function ForgotPasswordPage({ isDark, onToggleTheme }) {
+  const [email, setEmail] = useState('')
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [error, setError] = useState('')
+  const [success, setSuccess] = useState(false)
+  const [message, setMessage] = useState('')
+
+  async function handleForgotPasswordSubmit(event) {
+    event.preventDefault()
+    setError('')
+    const trimmedEmail = email.trim().toLowerCase()
+    if (!trimmedEmail) {
+      setError('Enter your registered email address.')
+      return
+    }
+
+    setIsSubmitting(true)
+    try {
+      const response = await fetch(`${API_BASE_URL}/auth/forgot-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: trimmedEmail }),
+      })
+      const result = await readApiResponse(response)
+      if (!response.ok) {
+        throw new Error(result.message || 'Unable to process password reset request.')
+      }
+      setSuccess(true)
+      setMessage(result.message || "If an account with that email address exists, we've sent password reset instructions.")
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to send password reset link. Please try again.')
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  return (
+    <main className="activation-page" data-theme={isDark ? 'dark' : 'light'}>
+      <ThemeToggle isDark={isDark} onToggle={onToggleTheme} />
+      <section className="dashboard-card auth-card">
+        <BrandMark />
+        <p className="dashboard-eyebrow">ACCOUNT RECOVERY</p>
+        <h1>Forgot your password?</h1>
+        <p className="auth-card__description">
+          Enter your registered email address and we&apos;ll send you instructions to reset your password.
+        </p>
+
+        {success ? (
+          <div className="auth-card__state">
+            <div className="auth-card__icon is-success" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M20 6L9 17l-5-5" />
+              </svg>
+            </div>
+            <h2>Check your email</h2>
+            <p className="auth-card__state-message">{message}</p>
+            <p className="auth-card__state-note">
+              Please check your inbox and spam folder. The password reset link is valid for 15 minutes and can only be used once.
+            </p>
+            <div className="auth-card__actions">
+              <Link className="primary-button" to="/">
+                Return to Login
+              </Link>
+              <button
+                type="button"
+                className="text-button"
+                onClick={() => {
+                  setSuccess(false)
+                  setError('')
+                  setMessage('')
+                }}
+              >
+                Send another link
+              </button>
+            </div>
+          </div>
+        ) : (
+          <form className="activation-form" onSubmit={handleForgotPasswordSubmit}>
+            <div className="field">
+              <label htmlFor="recovery-email">Registered Email Address</label>
+              <input
+                id="recovery-email"
+                type="email"
+                name="email"
+                value={email}
+                onChange={(e) => {
+                  setEmail(e.target.value)
+                  setError('')
+                }}
+                placeholder="e.g. name@example.com"
+                required
+                autoComplete="email"
+                autoFocus
+              />
+            </div>
+            {error && <p className="field-error" role="alert">{error}</p>}
+            <button
+              className="primary-button"
+              type="submit"
+              disabled={isSubmitting}
+              aria-busy={isSubmitting}
+            >
+              {isSubmitting ? 'Sending reset link…' : 'Send Reset Link'}
+              {!isSubmitting && <span aria-hidden="true">→</span>}
+            </button>
+            <div className="auth-card__footer">
+              <Link className="text-button" to="/">
+                ← Return to Login
+              </Link>
+            </div>
+          </form>
+        )}
+      </section>
+    </main>
+  )
+}
+
+function ResetPasswordPage({ isDark, onToggleTheme }) {
+  const location = useLocation()
+  const token = new URLSearchParams(location.search).get('token') || ''
+  const [isValidating, setIsValidating] = useState(true)
+  const [tokenValid, setTokenValid] = useState(false)
+  const [validationError, setValidationError] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [error, setError] = useState('')
+  const [success, setSuccess] = useState(false)
+  const [successMessage, setSuccessMessage] = useState('')
+
+  useEffect(() => {
+    if (!token) {
+      setIsValidating(false)
+      setTokenValid(false)
+      setValidationError('This password reset link is missing a security token. Please request a new link.')
+      return
+    }
+
+    let active = true
+    async function validateToken() {
+      try {
+        const response = await fetch(`${API_BASE_URL}/auth/reset-password/validate?token=${encodeURIComponent(token)}`)
+        const data = await readApiResponse(response)
+        if (!active) return
+        if (!response.ok) {
+          setTokenValid(false)
+          setValidationError(data.message || 'This password reset link is invalid or has expired.')
+        } else {
+          setTokenValid(true)
+          setValidationError('')
+        }
+      } catch {
+        if (!active) return
+        setTokenValid(false)
+        setValidationError('Unable to validate reset link. Please check your network connection.')
+      } finally {
+        if (active) setIsValidating(false)
+      }
+    }
+
+    validateToken()
+    return () => { active = false }
+  }, [token])
+
+  async function handleResetPasswordSubmit(event) {
+    event.preventDefault()
+    setError('')
+    if (password.length < 8) {
+      setError('Password must be at least 8 characters long.')
+      return
+    }
+    if (password.length > 72) {
+      setError('Password cannot exceed 72 characters.')
+      return
+    }
+    if (password !== confirmPassword) {
+      setError('Your passwords do not match.')
+      return
+    }
+
+    setIsSubmitting(true)
+    try {
+      const response = await fetch(`${API_BASE_URL}/auth/reset-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, password, confirmPassword }),
+      })
+      const data = await readApiResponse(response)
+      if (!response.ok) {
+        throw new Error(data.message || 'Password reset failed. Please request a new link.')
+      }
+      setSuccess(true)
+      setSuccessMessage(data.message || 'Your password has been successfully reset.')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Password reset failed.')
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  return (
+    <main className="activation-page" data-theme={isDark ? 'dark' : 'light'}>
+      <ThemeToggle isDark={isDark} onToggle={onToggleTheme} />
+      <section className="dashboard-card auth-card">
+        <BrandMark />
+        <p className="dashboard-eyebrow">PASSWORD RESET</p>
+
+        {isValidating ? (
+          <div className="auth-card__state">
+            <span className="username-availability__spinner" aria-hidden="true" style={{ width: 28, height: 28, borderWidth: 3 }} />
+            <h2>Verifying reset link…</h2>
+            <p className="auth-card__state-note">Checking token validity and expiration.</p>
+          </div>
+        ) : !tokenValid ? (
+          <div className="auth-card__state">
+            <div className="auth-card__icon is-error" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="15" y1="9" x2="9" y2="15" />
+                <line x1="9" y1="9" x2="15" y2="15" />
+              </svg>
+            </div>
+            <h2>Reset Link Invalid or Expired</h2>
+            <p className="auth-card__state-message">{validationError}</p>
+            <p className="auth-card__state-note">
+              Password reset links expire after 15 minutes and can only be used once.
+            </p>
+            <div className="auth-card__actions">
+              <Link className="primary-button" to="/forgot-password">
+                Request a new link
+              </Link>
+              <Link className="text-button" to="/">
+                Return to Login
+              </Link>
+            </div>
+          </div>
+        ) : success ? (
+          <div className="auth-card__state">
+            <div className="auth-card__icon is-success" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M20 6L9 17l-5-5" />
+              </svg>
+            </div>
+            <h2>Password reset successfully!</h2>
+            <p className="auth-card__state-message">{successMessage}</p>
+            <p className="auth-card__state-note">
+              You can now log in using your new password.
+            </p>
+            <div className="auth-card__actions">
+              <Link className="primary-button" to="/">
+                Log In Now →
+              </Link>
+            </div>
+          </div>
+        ) : (
+          <>
+            <h1>Create new password</h1>
+            <p className="auth-card__description">
+              Choose a strong password with at least 8 characters.
+            </p>
+
+            <form className="activation-form" onSubmit={handleResetPasswordSubmit}>
+              <PasswordField
+                id="reset-new-password"
+                name="password"
+                label="New Password"
+                value={password}
+                onChange={(e) => {
+                  setPassword(e.target.value)
+                  setError('')
+                }}
+                autoComplete="new-password"
+                strength={getPasswordStrength(password)}
+              />
+
+              <PasswordField
+                id="reset-confirm-password"
+                name="confirmPassword"
+                label="Confirm Password"
+                value={confirmPassword}
+                onChange={(e) => {
+                  setConfirmPassword(e.target.value)
+                  setError('')
+                }}
+                autoComplete="new-password"
+              />
+
+              {error && <p className="field-error" role="alert">{error}</p>}
+
+              <button
+                className="primary-button"
+                type="submit"
+                disabled={isSubmitting}
+                aria-busy={isSubmitting}
+              >
+                {isSubmitting ? 'Resetting password…' : 'Reset Password'}
+                {!isSubmitting && <span aria-hidden="true">→</span>}
+              </button>
+
+              <div className="auth-card__footer">
+                <Link className="text-button" to="/">
+                  ← Cancel and return to Login
+                </Link>
+              </div>
+            </form>
+          </>
+        )}
+      </section>
+    </main>
+  )
+}
+
 function getCachedDashboardUser(role) {
   try {
     const storedAuth = sessionStorage.getItem('lms.auth')
@@ -1446,49 +1696,12 @@ function getCachedDashboardUser(role) {
   }
 }
 
-
-class DashboardErrorBoundary extends React.Component {
-  constructor(props) {
-    super(props)
-    this.state = { hasError: false, error: null }
-  }
-  static getDerivedStateFromError(error) {
-    return { hasError: true, error }
-  }
-  componentDidCatch(error, errorInfo) {
-    console.error('Dashboard uncaught error:', error, errorInfo)
-  }
-  render() {
-    if (this.state.hasError) {
-      return (
-        <main className="dashboard-landing" style={{ padding: '40px 20px', textAlign: 'center' }}>
-          <section className="dashboard-card" style={{ maxWidth: '600px', margin: '0 auto', padding: '30px' }}>
-            <h2 style={{ color: '#b91c1c', marginBottom: '10px' }}>Something went wrong</h2>
-            <p style={{ color: '#4b5563', marginBottom: '20px' }}>
-              {this.state.error?.message || 'An error occurred while loading this dashboard.'}
-            </p>
-            <button
-              type="button"
-              onClick={() => { this.setState({ hasError: false, error: null }); window.location.reload() }}
-              style={{ padding: '8px 16px', background: '#3b82f6', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer' }}
-            >
-              Reload page
-            </button>
-          </section>
-        </main>
-      )
-    }
-    return this.props.children
-  }
-}
-
 function DashboardPage({ role, isDark, onToggleTheme, themePreference, onSetTheme }) {
   const location = useLocation()
   const [user, setUser] = useState(() => getCachedDashboardUser(role))
   const [error, setError] = useState('')
   const [mainAdminSidebarOpen, setMainAdminSidebarOpen] = useState(false)
   const [mainAdminSidebarCollapsed, setMainAdminSidebarCollapsed] = useState(true)
-  const [isVerifying, setIsVerifying] = useState(true)
   const roleLabels = {
     student: 'Student',
     main_admin: 'Main Admin',
@@ -1506,6 +1719,7 @@ function DashboardPage({ role, isDark, onToggleTheme, themePreference, onSetThem
           auth = await refreshAuthSession(API_BASE_URL)
         }
         if (typeof auth?.token !== 'string') {
+          if (role === 'student') clearStudentDashboardCaches()
           window.location.replace('/')
           return
         }
@@ -1518,6 +1732,7 @@ function DashboardPage({ role, isDark, onToggleTheme, themePreference, onSetThem
         if (isInvalidSessionResponse(response, result)) {
           const refreshed = role === 'student' ? await refreshAuthSession(API_BASE_URL) : null
           if (!refreshed) {
+            if (role === 'student') clearStudentDashboardCaches()
             sessionStorage.removeItem('lms.auth')
             window.location.replace('/')
             return
@@ -1528,6 +1743,7 @@ function DashboardPage({ role, isDark, onToggleTheme, themePreference, onSetThem
           })
           result = await readApiResponse(response)
           if (isInvalidSessionResponse(response, result)) {
+            if (role === 'student') clearStudentDashboardCaches()
             sessionStorage.removeItem('lms.auth')
             window.location.replace('/')
             return
@@ -1544,7 +1760,7 @@ function DashboardPage({ role, isDark, onToggleTheme, themePreference, onSetThem
           setError('This account does not match the selected dashboard role.')
           return
         }
-        if ((role === 'college_admin' || role === 'college') && !userIsActive) {
+        if (role === 'college_admin' && !userIsActive) {
           setError('Your college administrator account is not active.')
           return
         }
@@ -1554,8 +1770,6 @@ function DashboardPage({ role, isDark, onToggleTheme, themePreference, onSetThem
         if (requestError.name !== 'AbortError') {
           setError('We couldn’t verify your session. Check the connection and try again.')
         }
-      } finally {
-        if (!controller.signal.aborted) setIsVerifying(false)
       }
     }
 
@@ -1564,6 +1778,7 @@ function DashboardPage({ role, isDark, onToggleTheme, themePreference, onSetThem
   }, [role])
 
   const signOut = useCallback(() => {
+    if (role === 'student') clearStudentDashboardCaches()
     sessionStorage.removeItem('lms.auth')
     void fetch(`${API_BASE_URL}/auth/logout`, {
       method: 'POST',
@@ -1573,7 +1788,7 @@ function DashboardPage({ role, isDark, onToggleTheme, themePreference, onSetThem
     }).catch(() => {
       console.error('The server session could not be revoked because the backend is unreachable.')
     }).finally(() => window.location.replace('/'))
-  }, [])
+  }, [role])
 
   function updateAccount(updatedAccount) {
     setUser((current) => current ? { ...current, ...updatedAccount } : current)
@@ -1581,22 +1796,24 @@ function DashboardPage({ role, isDark, onToggleTheme, themePreference, onSetThem
     if (!storedAuth) return
     try {
       const auth = JSON.parse(storedAuth)
+      if (role === 'student' && updatedAccount.id && updatedAccount.id !== auth.user?.id) {
+        clearStudentDashboardCaches()
+      }
       sessionStorage.setItem('lms.auth', JSON.stringify({
         ...auth,
         user: { ...auth.user, ...updatedAccount },
       }))
     } catch {
+      if (role === 'student') clearStudentDashboardCaches()
       sessionStorage.removeItem('lms.auth')
       window.location.replace('/')
     }
   }
 
   if (role === 'student') {
-    if (isVerifying) {
-      return <main className="dashboard-landing"><section className="dashboard-card" role="status">Verifying your session…</section></main>
-    }
     return (
       <StudentDashboard
+        key={user?.id || 'student-session'}
         user={user}
         loading={!user && !error}
         error={error}
@@ -1611,25 +1828,11 @@ function DashboardPage({ role, isDark, onToggleTheme, themePreference, onSetThem
     )
   }
 
-  if (role === 'main_admin' && user && location.pathname.startsWith('/admin/support')) {
-    return (
-      <AdminSupport
-        user={user}
-        onLogout={signOut}
-        isDark={isDark}
-        onToggleTheme={onToggleTheme}
-        dashboardPath="/admin/dashboard"
-        supportPath="/admin/support"
-        settingsPath="/admin/settings"
-        roleLabel={roleLabels[role]}
-      />
-    )
-  }
-  if (role === 'main_admin' && user && location.pathname.startsWith('/admin/settings')) {
+  if (role === 'main_admin' && user && location.pathname.startsWith('/admin/profile')) {
     return (
       <>
         <WorkspaceTopbar
-          title="Settings"
+          title="Admin Profile"
           name={user.fullName}
           email={user.email}
           roleLabel={roleLabels[role]}
@@ -1640,12 +1843,11 @@ function DashboardPage({ role, isDark, onToggleTheme, themePreference, onSetThem
           onToggleTheme={onToggleTheme}
           onLogout={signOut}
         />
-        <SettingsPage
+        <AdminProfilePage
           user={user}
           onAccountUpdated={updateAccount}
           onLogout={signOut}
-          themePreference={themePreference}
-          onSetTheme={onSetTheme}
+          isDark={isDark}
           standalone
         />
       </>
@@ -1686,7 +1888,7 @@ function DashboardPage({ role, isDark, onToggleTheme, themePreference, onSetThem
       />
     )
   }
-  if ((role === 'college_admin' || role === 'college') && user && location.pathname.startsWith('/college-admin/settings')) {
+  if (role === 'college_admin' && user && location.pathname.startsWith('/college-admin/settings')) {
     return (
       <>
         <WorkspaceTopbar
@@ -1696,7 +1898,6 @@ function DashboardPage({ role, isDark, onToggleTheme, themePreference, onSetThem
           roleLabel={roleLabels[role]}
           dashboardPath="/college-admin/dashboard"
           helpPath="/college-admin/support"
-          settingsPath="/college-admin/settings"
           isDark={isDark}
           onToggleTheme={onToggleTheme}
           onLogout={signOut}
@@ -1706,12 +1907,13 @@ function DashboardPage({ role, isDark, onToggleTheme, themePreference, onSetThem
           onAccountUpdated={updateAccount}
           themePreference={themePreference}
           onSetTheme={onSetTheme}
+          onLogout={signOut}
           standalone
         />
       </>
     )
   }
-  if ((role === 'college_admin' || role === 'college') && user) {
+  if (role === 'college_admin' && user) {
     return (
       <CollegeAdminDashboard
         user={user}
@@ -1758,22 +1960,31 @@ function App() {
   const [mode, setMode] = useState(
     () => new URLSearchParams(window.location.search).get('mode') === 'register' ? 'register' : 'login',
   )
-  const [message, setMessage] = useState(null)
+  const [message, setMessage] = useState(() => {
+    try {
+      const deletedNotice = sessionStorage.getItem('lms.account_deleted_notice')
+      if (deletedNotice) {
+        sessionStorage.removeItem('lms.account_deleted_notice')
+        return { text: deletedNotice, type: 'success' }
+      }
+    } catch {}
+    return null
+  })
+
+  useEffect(() => {
+    try {
+      const deletedNotice = sessionStorage.getItem('lms.account_deleted_notice')
+      if (deletedNotice && location.pathname === '/') {
+        sessionStorage.removeItem('lms.account_deleted_notice')
+        setMessage({ text: deletedNotice, type: 'success' })
+      }
+    } catch {}
+  }, [location.pathname])
   const [themePreference, setThemePreference] = useState(() => {
     const storedTheme = localStorage.getItem('lms.theme')
     return storedTheme === 'dark' ? 'dark' : 'light'
   })
   const isDark = themePreference === 'dark'
-
-  useEffect(() => {
-    function handleStorage(event) {
-      if (event.key === 'lms.theme' && (event.newValue === 'light' || event.newValue === 'dark')) {
-        setThemePreference(event.newValue)
-      }
-    }
-    window.addEventListener('storage', handleStorage)
-    return () => window.removeEventListener('storage', handleStorage)
-  }, [])
   useEffect(() => {
     document.documentElement.dataset.theme = isDark ? 'dark' : 'light'
     localStorage.setItem('lms.theme', themePreference)
@@ -1781,7 +1992,7 @@ function App() {
   const isRegistering = mode === 'register'
   const dashboardRole = location.pathname.startsWith('/student/')
     ? 'student'
-    : location.pathname.startsWith('/admin/support') || location.pathname.startsWith('/admin/settings')
+    : location.pathname.startsWith('/admin/') || location.pathname === '/admin'
       ? 'main_admin'
       : location.pathname.startsWith('/college-admin/')
         ? 'college_admin'
@@ -1811,11 +2022,10 @@ function App() {
     )
   }
 
-  
-  if (location.pathname === '/college-admin' || location.pathname === '/college') {
+  if (location.pathname === '/admin') {
     return (
       <Navigate
-        to={{ pathname: DASHBOARD_PATHS.college_admin, search: location.search, hash: location.hash }}
+        to={{ pathname: DASHBOARD_PATHS.main_admin, search: location.search, hash: location.hash }}
         replace
       />
     )
@@ -1848,6 +2058,12 @@ function App() {
   }
   if (location.pathname === '/activate') {
     return <ActivationPage />
+  }
+  if (location.pathname === '/forgot-password') {
+    return <ForgotPasswordPage isDark={isDark} onToggleTheme={toggleTheme} />
+  }
+  if (location.pathname === '/reset-password') {
+    return <ResetPasswordPage isDark={isDark} onToggleTheme={toggleTheme} />
   }
 
   return (

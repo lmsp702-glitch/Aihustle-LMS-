@@ -12,6 +12,10 @@
   gap: 16px;
 }
 
+.admin-progress-reports__toolbar--actions-only {
+  justify-content: flex-end;
+}
+
 .admin-progress-reports__toolbar h2,
 .admin-progress-students__heading h3,
 .admin-progress-chart h3,
@@ -249,6 +253,215 @@
   gap: 12px;
 }
 
+.admin-attention-responses {
+  display: grid;
+  gap: 12px;
+}
+
+.admin-attention-responses__toolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.admin-attention-responses__toolbar button {
+  padding: 6px 10px;
+  border: 1px solid var(--admin-line, #dedace);
+  border-radius: 7px;
+  background: var(--admin-paper, #fffdf8);
+  color: var(--admin-olive-deep, #59613a);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.admin-attention-response {
+  display: grid;
+  min-width: 0;
+  padding: 0 16px;
+  border: 1px solid var(--admin-line, #dedace);
+  border-radius: 10px;
+  background: var(--admin-paper, #fffdf8);
+}
+
+.admin-attention-response__toggle {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 15px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.admin-attention-response__toggle:focus-visible,
+.admin-attention-responses__toolbar button:focus-visible {
+  outline: 2px solid var(--admin-olive);
+  outline-offset: 2px;
+}
+
+.admin-attention-response__chevron {
+  flex: 0 0 8px;
+  width: 8px;
+  height: 8px;
+  margin-left: 2px;
+  border-right: 2px solid var(--admin-muted, #626d67);
+  border-bottom: 2px solid var(--admin-muted, #626d67);
+  transform: rotate(45deg);
+  transition: transform 140ms ease;
+}
+
+.admin-attention-response__toggle[aria-expanded="true"] .admin-attention-response__chevron {
+  transform: rotate(225deg);
+}
+
+.admin-attention-response__content {
+  display: grid;
+  gap: 14px;
+  padding: 0 0 16px;
+}
+
+.admin-attention-response__content[hidden] {
+  display: none;
+}
+
+.admin-attention-response__course {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  margin: 0;
+}
+
+.admin-attention-response__course strong {
+  overflow-wrap: anywhere;
+  color: var(--admin-ink, #293630);
+  font-size: 13px;
+}
+
+.admin-attention-response__course span {
+  color: var(--admin-muted, #626d67);
+  font-size: 11px;
+}
+
+.admin-attention-response__outcome {
+  display: grid;
+  flex: 0 0 auto;
+  justify-items: end;
+  gap: 4px;
+}
+
+.admin-attention-response__result {
+  padding: 5px 9px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.admin-attention-response__result.is-responded {
+  background: #e8f2e9;
+  color: #3d7055;
+}
+
+.admin-attention-response__result.is-not-responded {
+  background: #f7e9e4;
+  color: #984f3c;
+}
+
+.admin-attention-response__correctness {
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.admin-attention-response__correctness.is-correct {
+  color: #3d7055;
+}
+
+.admin-attention-response__correctness.is-incorrect {
+  color: #984f3c;
+}
+
+.admin-attention-response__answers {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.admin-attention-response__answers section {
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid var(--admin-line, #dedace);
+  border-radius: 8px;
+  background: var(--admin-canvas, #f8f6ef);
+}
+
+.admin-attention-response__answers h4 {
+  margin: 0 0 6px;
+  color: var(--admin-muted, #626d67);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.admin-attention-response__answers p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--admin-ink, #293630);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.admin-attention-response__details {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.admin-attention-response__details div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.admin-attention-response__details dt {
+  color: var(--admin-muted, #626d67);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.admin-attention-response__details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--admin-ink, #293630);
+  font-size: 11px;
+}
+
+.admin-app[data-theme="dark"] .admin-attention-response__result.is-responded {
+  background: #2b4939;
+  color: #b7dfc3;
+}
+
+.admin-app[data-theme="dark"] .admin-attention-response__result.is-not-responded {
+  background: #50352f;
+  color: #f0b9a8;
+}
+
+.admin-app[data-theme="dark"] .admin-attention-response__correctness.is-correct {
+  color: #b7dfc3;
+}
+
+.admin-app[data-theme="dark"] .admin-attention-response__correctness.is-incorrect {
+  color: #f0b9a8;
+}
+
 .admin-progress-course-list {
   display: grid;
   gap: 12px;
@@ -481,11 +694,16 @@
   font-weight: 700;
 }
 
-.admin-progress-status--completed,
-.admin-progress-status--evaluated {
+.admin-progress-status--completed {
   border-color: rgba(52, 121, 110, 0.28);
   background: rgba(52, 121, 110, 0.1);
   color: var(--admin-olive-deep);
+}
+
+.admin-progress-status--evaluated {
+  border-color: rgba(103, 78, 131, 0.24);
+  background: rgba(103, 78, 131, 0.08);
+  color: #654b82;
 }
 
 .admin-progress-status--re_evaluation_required {
@@ -578,12 +796,114 @@
 }
 
 .admin-progress-submission__answer,
-.admin-progress-submission__result {
+.admin-progress-submission__result,
+.admin-progress-attempt-state,
+.admin-progress-human-review-request {
   display: grid;
   gap: 6px;
   color: var(--admin-ink);
   font-size: 12px;
 }
+
+.admin-progress-attempt-state,
+.admin-progress-human-review-request {
+  padding: 10px 12px;
+  border: 1px solid var(--admin-line);
+  border-radius: 9px;
+  background: rgba(93, 100, 92, 0.035);
+}
+
+.admin-progress-attempt-state > span,
+.admin-progress-human-review-request > p,
+.admin-progress-human-review-request li {
+  color: var(--admin-muted);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.admin-progress-human-review-request p {
+  margin: 0;
+}
+
+.admin-progress-human-review-request ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 20px;
+}
+
+.admin-progress-attempt-history,
+.admin-progress-evaluation-history {
+  padding-top: 9px;
+  border-top: 1px solid var(--admin-line);
+}
+
+.admin-progress-attempt-history summary {
+  color: var(--admin-olive-deep);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.admin-progress-attempt-history > ol {
+  display: grid;
+  gap: 10px;
+  margin: 10px 0 0;
+  padding-left: 22px;
+}
+
+.admin-progress-attempt-history > ol > li {
+  display: grid;
+  gap: 6px;
+  color: var(--admin-muted);
+  font-size: 12px;
+}
+
+.admin-progress-attempt-history li > ul {
+  display: grid;
+  gap: 6px;
+  margin: 2px 0;
+  padding-left: 20px;
+}
+
+.admin-progress-attempt-history li > ul li {
+  display: grid;
+  gap: 3px;
+}
+
+.admin-progress-attempt-history p {
+  margin: 0;
+  color: var(--admin-muted);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.admin-progress-attempt-history li > strong {
+  color: var(--admin-ink);
+}
+
+.admin-progress-academic-result {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+}
+
+.admin-progress-academic-result > span {
+  display: inline-grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.admin-progress-academic-result.is-passed { color: #147247; }
+.admin-progress-academic-result.is-passed > span { background: #188452; }
+.admin-progress-academic-result.is-failed { color: #b4232a; }
+.admin-progress-academic-result.is-failed > span { background: #c62828; }
 
 .admin-progress-submission__file {
   align-items: center;
@@ -739,6 +1059,10 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .admin-attention-response__answers {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .admin-progress-course__metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -759,6 +1083,14 @@
 }
 
 @media (max-width: 520px) {
+  .admin-attention-response {
+    padding: 13px;
+  }
+
+  .admin-attention-response__details {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .admin-progress-reports__toolbar {
     align-items: stretch;
     flex-direction: column;
@@ -842,9 +1174,14 @@
   color: #c3d8c6;
 }
 
-.admin-app[data-theme="dark"] .admin-progress-status--completed,
-.admin-app[data-theme="dark"] .admin-progress-status--evaluated {
+.admin-app[data-theme="dark"] .admin-progress-status--completed {
   color: #c3d8c6;
+}
+
+.admin-app[data-theme="dark"] .admin-progress-status--evaluated {
+  border-color: #655579;
+  background: #332b40;
+  color: #d3b9ec;
 }
 
 .admin-app[data-theme="dark"] .admin-progress-status--re_evaluation_required {

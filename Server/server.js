@@ -1,12 +1,14 @@
 import { config, requireJwtSecret } from './config/env.js'
+import { pathToFileURL } from 'node:url'
 import cors from 'cors'
 import express from 'express'
 import { connectToDatabase } from './config/db.js'
+import AssignmentSubmission from './models/AssignmentSubmission.js'
 import cloudinary from './config/cloudinary.js'
 import authRouter from './routes/auth.js'
 import adminRouter from './routes/admin.js'
-import collegeRouter from './routes/college.js'
-import learningRouter from './routes/learning.js'
+import learningRouter, { processAssignmentGradingJob } from './routes/learning.js'
+import { startAssignmentGradingWorker } from './utils/assignment-grading-worker.js'
 import supportRouter from './routes/support.js'
 import feedbackRouter from './routes/feedback.js'
 import complaintsRouter from './routes/complaints.js'
@@ -14,8 +16,10 @@ import settingsRouter from './routes/settings.js'
 import referralsRouter from './routes/referrals.js'
 import notificationsRouter from './routes/notifications.js'
 import certificatesRouter from './routes/certificates.js'
+import studentProfileRouter from './routes/student-profile.js'
 
 const app = express()
+export { app }
 app.use(
   cors({
     credentials: true,
@@ -32,9 +36,12 @@ app.use(
   }),
 )
 app.use(express.json({ limit: '8mb' }))
+const healthCheck = (req, res) => res.json({ status: 'ok', service: 'LMS API' })
+app.get('/', healthCheck)
+app.get('/api', healthCheck)
+app.get('/api/health', healthCheck)
 app.use('/api/auth', authRouter)
 app.use('/api/admin', adminRouter)
-app.use('/api/college', collegeRouter)
 app.use('/api', learningRouter)
 app.use('/api/support', supportRouter)
 app.use('/api/feedback', feedbackRouter)
@@ -43,6 +50,7 @@ app.use('/api/settings', settingsRouter)
 app.use('/api/referrals', referralsRouter)
 app.use('/api/notifications', notificationsRouter)
 app.use('/api/certificates', certificatesRouter)
+app.use('/api/student/profile', studentProfileRouter)
 app.use('/api', (req, res) => {
   res.status(404).json({ message: 'API route not found.' })
 })
@@ -146,6 +154,10 @@ async function startServer() {
   try {
     requireJwtSecret()
     await connectToDatabase()
+    startAssignmentGradingWorker({
+      submissionModel: AssignmentSubmission,
+      processSubmission: processAssignmentGradingJob,
+    })
     app.listen(config.port, async () => {
       await verifyCloudinaryConnection()
       console.log(`LMS backend listening on port ${config.port}.`)
@@ -160,4 +172,10 @@ async function startServer() {
   }
 }
 
-startServer()
+if (
+  !process.env.VERCEL &&
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+  startServer()
+}

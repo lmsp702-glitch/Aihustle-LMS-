@@ -191,7 +191,7 @@ test('certificate eligibility requires completed videos, a passed quiz, and an a
       contentItems: [
         { _id: videoId, type: 'video-lesson', title: 'Required video' },
         { _id: '68a000000000000000000017', type: 'quiz', title: 'Required quiz', quiz: { _id: quizId, questions: [{ prompt: 'Q' }] } },
-        { _id: assignmentId, type: 'assignment', title: 'Required assignment' },
+        { _id: assignmentId, type: 'assignment', title: 'Required assignment', points: 100 },
       ],
     }],
   }
@@ -219,7 +219,34 @@ test('certificate eligibility requires completed videos, a passed quiz, and an a
     )
 
     latestAttempt = [{ quizId }]
-    latestSubmission = [{ assignmentId, reviewStatus: 'approved', submittedAt: new Date() }]
+    latestSubmission = [{
+      assignmentId,
+      reviewStatus: 'approved',
+      gradingStatus: 'AI Graded',
+      marksObtained: 74,
+      aiEvaluation: { totalMarks: 74, maximumMarks: 100 },
+      submittedAt: new Date(),
+    }]
+    const failedResult = await evaluateCertificateEligibility({
+      course,
+      enrollment: { ...enrollment, completedLessonIds: [videoId] },
+    })
+    assert.equal(failedResult.eligible, false)
+    assert.equal(
+      failedResult.pendingRequirements.find((requirement) => requirement.type === 'assignment')?.status,
+      'failed',
+    )
+
+    latestSubmission = [{
+      assignmentId,
+      reviewStatus: 'approved',
+      gradingStatus: 'Final Result',
+      marksObtained: 74,
+      finalMarks: 75,
+      aiEvaluation: { totalMarks: 74, maximumMarks: 100 },
+      humanEvaluation: { totalMarks: 75, maximumMarks: 100 },
+      submittedAt: new Date(),
+    }]
     const unlocked = await evaluateCertificateEligibility({
       course,
       enrollment: { ...enrollment, completedLessonIds: [videoId] },

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { API_BASE_URL } from './api-base-url.js'
 import {
@@ -17,15 +17,13 @@ import NotificationFeed from './NotificationFeed.jsx'
 import StudentNotificationBell from './StudentNotificationBell.jsx'
 import StudentNotificationsPage from './StudentNotificationsPage.jsx'
 import StudentQuizExperience from './StudentQuizPanel.jsx'
+import { clearStudentNotificationCache } from './student-notifications-cache.js'
+import { STUDENT_LEARNING_PROGRESS_UPDATED_EVENT } from './student-notifications-events.js'
 import { filterCoursesByCategory, getCourseCategoryNames, normalizeCourseCategory } from './course-categories.js'
 import { findActiveTranscriptCueIndex, formatTranscriptTime } from './srt-transcript.js'
 import { createAttentionCheckSchedule } from './video-attention-checks.js'
+import StudentProfile from './StudentProfile.jsx'
 import './StudentDashboard.css'
-import './StudentNotesSystem.css'
-import StudentNotesSection from './StudentNotesSystem.jsx'
-import StudentLearningResourcesPage from './StudentLearningResourcesPage.jsx'
-
-
 
 const studentCertificateCache = new Map()
 const studentCertificateRequests = new Map()
@@ -33,13 +31,122 @@ const studentCertificateCacheTtlMs = 30_000
 const studentLearningPageCacheTtlMs = 30_000
 const studentEnrollmentCache = new Map()
 const studentEnrollmentRequests = new Map()
+const studentPublishedCourseCache = new Map()
+const studentPublishedCourseRequests = new Map()
 const studentCourseContentCache = new Map()
 const studentCourseContentRequests = new Map()
+const studentCourseLearningSeeds = new Map()
 const studentPageCertificateRequests = new Map()
 const studentResultsCache = new Map()
+const studentReferralCache = new Map()
+const studentReferralRequests = new Map()
+let studentDashboardCacheGeneration = 0
+let studentLearningCacheGeneration = 0
+const ASSIGNMENT_PASSING_PERCENTAGE = 75
+const HUMAN_REVIEW_REASON_OPTIONS = [
+  'The AI misunderstood my answer.',
+  'My answer is correct, but marks were deducted.',
+  'The AI did not consider all the points in my answer.',
+  'My practical examples or implementation were not evaluated correctly.',
+  'The marks do not match the assignment requirements.',
+  'The AI feedback is incorrect or irrelevant.',
+  'I believe I deserve more marks.',
+  'Other (Please specify).',
+]
+const HUMAN_REVIEW_OTHER_REASON = HUMAN_REVIEW_REASON_OPTIONS[7]
 const COURSE_NOTES_KEY = 'course-notes'
-const COURSE_RESOURCES_KEY = 'course-resources'
 const COURSE_CERTIFICATE_KEY = 'course-certificate'
+const COURSE_RESOURCES_KEY = 'course-resources'
+
+function normalizeLessons(lessons) {
+  if (Array.isArray(lessons)) return lessons
+  if (!lessons) return []
+
+  if (typeof lessons === 'string') {
+    const trimmed = lessons.trim()
+    if ((trimmed.startsWith('[') && trimmed.endsWith(']')) || (trimmed.startsWith('{') && trimmed.endsWith('}'))) {
+      try {
+        const parsed = JSON.parse(trimmed)
+        return normalizeLessons(parsed)
+      } catch {
+        return []
+      }
+    }
+    return []
+  }
+
+  if (typeof lessons === 'object') {
+    if (Array.isArray(lessons.lessons)) return normalizeLessons(lessons.lessons)
+    if (Array.isArray(lessons.items)) return normalizeLessons(lessons.items)
+
+    const entries = Object.entries(lessons)
+    if (entries.length === 0) return []
+
+    const objectEntries = entries.filter(([, val]) => val && typeof val === 'object' && !Array.isArray(val))
+    if (objectEntries.length > 0) {
+      const allNumericKeys = objectEntries.every(([key]) => /^\d+$/.test(key))
+      if (allNumericKeys) {
+        objectEntries.sort(([keyA], [keyB]) => Number(keyA) - Number(keyB))
+      } else {
+        objectEntries.sort(([, a], [, b]) => {
+          if (Number.isFinite(a.order) && Number.isFinite(b.order)) return a.order - b.order
+          return 0
+        })
+      }
+      return objectEntries.map(([, val]) => val)
+    }
+
+    if (
+      typeof lessons.title === 'string'
+      || lessons._id
+      || lessons.videoUrl
+      || lessons.content
+      || lessons.resources
+    ) {
+      return [lessons]
+    }
+
+    return []
+  }
+
+  return []
+}
+
+function normalizeArray(value) {
+  if (Array.isArray(value)) return value
+  if (!value) return []
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if ((trimmed.startsWith('[') && trimmed.endsWith(']')) || (trimmed.startsWith('{') && trimmed.endsWith('}'))) {
+      try {
+        const parsed = JSON.parse(trimmed)
+        return normalizeArray(parsed)
+      } catch {
+        return []
+      }
+    }
+    return []
+  }
+  if (typeof value === 'object') {
+    const entries = Object.entries(value)
+    if (entries.length === 0) return []
+    const objectEntries = entries.filter(([, val]) => val && typeof val === 'object' && !Array.isArray(val))
+    if (objectEntries.length > 0) {
+      const allNumericKeys = objectEntries.every(([key]) => /^\d+$/.test(key))
+      if (allNumericKeys) {
+        objectEntries.sort(([keyA], [keyB]) => Number(keyA) - Number(keyB))
+      } else {
+        objectEntries.sort(([, a], [, b]) => {
+          if (Number.isFinite(a.order) && Number.isFinite(b.order)) return a.order - b.order
+          return 0
+        })
+      }
+      return objectEntries.map(([, val]) => val)
+    }
+    return [value]
+  }
+  return []
+}
 
 function getStudentCertificateCacheKey() {
   try {
@@ -50,17 +157,32 @@ function getStudentCertificateCacheKey() {
   }
 }
 
+export function clearStudentDashboardCaches() {
+  studentDashboardCacheGeneration += 1
+  studentLearningCacheGeneration += 1
+  studentCertificateCache.clear()
+  studentCertificateRequests.clear()
+  studentEnrollmentCache.clear()
+  studentEnrollmentRequests.clear()
+  studentPublishedCourseCache.clear()
+  studentPublishedCourseRequests.clear()
+  studentCourseContentCache.clear()
+  studentCourseContentRequests.clear()
+  studentCourseLearningSeeds.clear()
+  studentPageCertificateRequests.clear()
+  studentResultsCache.clear()
+  studentReferralCache.clear()
+  studentReferralRequests.clear()
+  clearStudentNotificationCache()
+}
 
 const navigation = [
   { label: 'Dashboard', icon: 'grid', path: '/student/dashboard' },
   { label: 'My Courses', icon: 'book', path: '/student/courses' },
-  { label: 'Quizzes & Assignments', icon: 'clipboardCheck', path: '/student/assignments' },
+  { label: 'Assignments', icon: 'check', path: '/student/assignments' },
   { label: 'Grades & Results', icon: 'chart', path: '/student/results' },
-  { label: 'Learning Resources', icon: 'folder', path: '/student/resources' },
-  { label: 'Messages', icon: 'message', path: '/student/messages' },
   { label: 'Certificates', icon: 'award', path: '/student/certificates' },
   { label: 'My Referrals', icon: 'users', path: '/student/referrals' },
-  { label: 'My Profile', icon: 'user', path: '/student/profile' },
   { label: 'Settings', icon: 'settings', path: '/student/settings' },
   { label: 'Help Center', icon: 'help', path: '/student/help' },
 ]
@@ -72,6 +194,8 @@ const secondaryPages = {
   '/student/achievements': { label: 'My Achievements', icon: 'award' },
   '/student/learning-activity': { label: 'Learning Streak', icon: 'chartNoAxesCombined' },
   '/student/study-companion': { label: 'AI Study Companion', icon: 'spark' },
+  '/student/profile': { label: 'My Profile', icon: 'userRound' },
+  '/student/resources': { label: 'Learning Resources', icon: 'folderOpen' },
 }
 
 const stats = [
@@ -105,13 +229,10 @@ const categories = [
 const tools = [
   { title: 'Grades & Results', description: 'View your quiz and assignment scores.', icon: 'chart', id: 'student-grades', path: '/student/results' },
   { title: 'Learning Resources', description: 'Access course notes and learning materials.', icon: 'folder', id: 'student-resources', path: '/student/resources' },
-  { title: 'Messages', description: 'Open course conversations and updates.', icon: 'message', id: 'student-messages', path: '/student/messages' },
   { title: 'Certificates', description: 'View and download your earned certificates.', icon: 'award', id: 'student-certificates', path: '/student/certificates' },
   { title: 'My Profile', description: 'Review your personal and academic details.', icon: 'user', id: 'student-profile', path: '/student/profile' },
   { title: 'Settings', description: 'Manage your account and preferences.', icon: 'settings', id: 'student-settings', path: '/student/settings' },
 ]
-
-
 
 function Icon({ name, size = 19 }) {
   const paths = {
@@ -121,7 +242,6 @@ function Icon({ name, size = 19 }) {
     play: <><circle cx="12" cy="12" r="9" /><path d="m10 8 6 4-6 4z" /></>,
     clipboardCheck: <><rect x="8" y="4" width="8" height="4" rx="1" /><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" /><path d="m9 14 2 2 4-4" /></>,
     chartNoAxesCombined: <><path d="M3 3v18h18" /><path d="m19 9-5 5-4-4-5 5" /></>,
-    messageCircle: <><path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5 8 8 0 0 1-3.5-.8L4 20l1.5-4A7.5 7.5 0 1 1 20 11.5Z" /><path d="M8 11h.01M12 11h.01M16 11h.01" /></>,
     userRound: <><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" /></>,
     circleHelp: <><circle cx="12" cy="12" r="9" /><path d="M9.6 9a2.5 2.5 0 1 1 4.5 1.5c-.9 1.1-2.1 1.3-2.1 3m0 3h.01" /></>,
     grid: <><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></>,
@@ -131,13 +251,14 @@ function Icon({ name, size = 19 }) {
     chart: <><path d="M4 19V5m0 14h17" /><path d="m7 15 4-4 3 2 5-6m-4 0h4v4" /></>,
     folder: <><path d="M3 6.5A2.5 2.5 0 0 1 5.5 4H10l2 2h6.5A2.5 2.5 0 0 1 21 8.5v9a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z" /><path d="M3 9h18" /></>,
     folderOpen: <><path d="M3 7V5.5A1.5 1.5 0 0 1 4.5 4H10l2 2h6.5A1.5 1.5 0 0 1 20 7.5V9" /><path d="M3 10h18l-2.1 8.4a2 2 0 0 1-1.9 1.6H5a2 2 0 0 1-2-2z" /></>,
+    eye: <><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z" /><circle cx="12" cy="12" r="3" /></>,
+    download: <><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="m7 10 5 5 5-5M12 15V3" /></>,
     message: <><path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5 8 8 0 0 1-3.5-.8L4 20l1.5-4A7.5 7.5 0 1 1 20 11.5Z" /><path d="M8 11h.01M12 11h.01M16 11h.01" /></>,
     award: <><circle cx="12" cy="8" r="5" /><path d="m8.5 12-1 9 4.5-2.5 4.5 2.5-1-9" /></>,
     user: <><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" /></>,
     settings: <><circle cx="12" cy="12" r="3" /><path d="m19.4 15 .1.1 1.4 1.1-1.4 2.4-1.8-.6a8 8 0 0 1-1.7 1l-.3 1.9h-2.8l-.3-1.9a8 8 0 0 1-1.7-1l-1.8.6-1.4-2.4 1.4-1.1a7 7 0 0 1 0-2l-1.4-1.1 1.4-2.4 1.8.6a8 8 0 0 1 1.7-1l.3-1.9h2.8l.3 1.9a8 8 0 0 1 1.7 1l1.8-.6 1.4 2.4-1.4 1.1a7 7 0 0 1 0 2Z" transform="translate(-1 -1)" /></>,
     spark: <><path d="m12 2 1.7 6.3L20 10l-6.3 1.7L12 18l-1.7-6.3L4 10l6.3-1.7z" /><path d="m19 15 .8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z" /></>,
     search: <><circle cx="10.8" cy="10.8" r="6.8" /><path d="m16 16 4.5 4.5" /></>,
-    eye: <><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" /></>,
     bell: <><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9m-8 12a2 2 0 0 0 4 0" /></>,
     help: <><circle cx="12" cy="12" r="9" /><path d="M9.6 9a2.5 2.5 0 1 1 4.5 1.5c-.9 1.1-2.1 1.3-2.1 3m0 3h.01" /></>,
     menu: <><path d="M4 6h16M4 12h16M4 18h16" /></>,
@@ -146,6 +267,9 @@ function Icon({ name, size = 19 }) {
     clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
     circleX: <><circle cx="12" cy="12" r="9" /><path d="m9 9 6 6m0-6-6 6" /></>,
     lock: <><rect x="4" y="10" width="16" height="11" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></>,
+    copy: <><rect x="8" y="8" width="12" height="12" rx="2" /><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" /></>,
+    share: <><circle cx="18" cy="5" r="3" /><circle cx="6" cy="12" r="3" /><circle cx="18" cy="19" r="3" /><path d="m8.7 10.6 6.6-4.2m-6.6 7 6.6 4.2" /></>,
+    gift: <><rect x="3" y="9" width="18" height="12" rx="1" /><path d="M2 6h20v4H2zm10 0v15m0-15H7.5a2.5 2.5 0 1 1 2.4-3.2L12 6Zm0 0h4.5a2.5 2.5 0 1 0-2.4-3.2L12 6Z" /></>,
     briefcase: <><rect x="3" y="7" width="18" height="14" rx="2" /><path d="M8 7V4h8v3m-13 5h18m-11 0v2h4v-2" /></>,
     code: <><path d="m8 7-5 5 5 5m8-10 5 5-5 5m-3-12-2 14" /></>,
     laptop: <><rect x="4" y="4" width="16" height="12" rx="1.5" /><path d="M2 20h20l-2-4H4z" /></>,
@@ -157,15 +281,6 @@ function Icon({ name, size = 19 }) {
     flask: <><path d="M9 3h6m-5 0v7l-6 10a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1l-6-10V3m-8 12h12" /></>,
     calculator: <><rect x="4" y="3" width="16" height="18" rx="2" /><path d="M8 7h8v3H8zm0 7h.01M12 14h.01M16 14h.01M8 17h.01M12 17h.01M16 17h.01" /></>,
     database: <><ellipse cx="12" cy="5" rx="8" ry="3" /><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3" /></>,
-    xCircle: <><circle cx="12" cy="12" r="9" /><path d="m15 9-6 6m0-6 6 6" /></>,
-    alertCircle: <><circle cx="12" cy="12" r="9" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></>,
-    download: <><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></>,
-    printer: <><polyline points="6 9 6 2 18 2 18 9" /><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" /><rect x="6" y="14" width="12" height="8" /></>,
-    chevronDown: <polyline points="6 9 12 15 18 9" />,
-    chevronUp: <polyline points="18 15 12 9 6 15" />,
-    pin: <><line x1="12" y1="17" x2="12" y2="22" /><path d="M5 17h14v-2l-3-4V4h1V2H7v2h1v7l-3 4v2z" /></>,
-    trash: <><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></>,
-    plus: <><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></>,
   }
 
   return (
@@ -184,7 +299,6 @@ function Icon({ name, size = 19 }) {
     </svg>
   )
 }
-
 
 function LearningIllustration() {
   return (
@@ -213,10 +327,6 @@ function EmptyState({ icon, title, description }) {
     </div>
   )
 }
-
-
-
-
 
 function EarnedCertificateSkeleton() {
   return (
@@ -256,10 +366,6 @@ function InProgressCertificateSkeleton() {
   )
 }
 
-
-
-
-
 function StudentRoutePage({ title, children, to, showHeading = false, className = '' }) {
   const Element = to ? Link : 'section'
   return (
@@ -276,11 +382,7 @@ function StudentRoutePage({ title, children, to, showHeading = false, className 
   )
 }
 
-
-
-
-
-function StudentCertificatesPage({ user, onLogout }) {
+function StudentCertificatesPage({ onLogout }) {
   const navigate = useNavigate()
   const initialCache = studentCertificateCache.get(getStudentCertificateCacheKey())
   const [courses, setCourses] = useState(initialCache?.certificates || null)
@@ -647,7 +749,6 @@ function StudentCertificatesPage({ user, onLogout }) {
   )
 }
 
-
 async function fetchMyEnrollments(onLogout, signal) {
   const savedAuth = sessionStorage.getItem('lms.auth')
   const auth = savedAuth ? JSON.parse(savedAuth) : null
@@ -667,6 +768,39 @@ async function fetchMyEnrollments(onLogout, signal) {
   if (!response.ok) throw new Error(result.message || 'Your learning data could not be loaded.')
   if (!Array.isArray(result.enrollments)) throw new Error('The server returned invalid enrollment data.')
   return result.enrollments
+}
+
+async function fetchStudentRecommendations(onLogout, signal) {
+  const savedAuth = sessionStorage.getItem('lms.auth')
+  const auth = savedAuth ? JSON.parse(savedAuth) : null
+  if (typeof auth?.token !== 'string') {
+    onLogout()
+    throw new Error('Your session has ended. Please sign in again.')
+  }
+  const response = await fetchWithAuth(`${API_BASE_URL}/courses/recommendations`, {
+    headers: { Authorization: `Bearer ${auth.token}` },
+    signal,
+  }, API_BASE_URL, auth.token)
+  const result = await response.json()
+  if (isInvalidSessionResponse(response, result)) {
+    onLogout()
+    throw new Error('Your session has ended. Please sign in again.')
+  }
+  if (!response.ok) throw new Error(result.message || 'Course recommendations could not be loaded.')
+  if (
+    !Array.isArray(result.recommendations)
+    || !Number.isInteger(result.completedCourseCount)
+    || !Number.isInteger(result.availableCourseCount)
+    || typeof result.allAvailableCoursesCompleted !== 'boolean'
+  ) {
+    throw new Error('The server returned invalid course recommendations.')
+  }
+  return {
+    recommendations: result.recommendations,
+    completedCourseCount: result.completedCourseCount,
+    availableCourseCount: result.availableCourseCount,
+    allAvailableCoursesCompleted: result.allAvailableCoursesCompleted,
+  }
 }
 
 async function fetchStudentLearningSummary(onLogout, signal) {
@@ -690,6 +824,64 @@ async function fetchStudentLearningSummary(onLogout, signal) {
     throw new Error('The server returned invalid learning statistics.')
   }
   return result.summary
+}
+
+function getLocalLearningDateKey(date) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function getLearningActivityDateRanges(now = new Date()) {
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const monday = new Date(today)
+  monday.setDate(today.getDate() - ((today.getDay() + 6) % 7))
+  const previousMonday = new Date(monday)
+  previousMonday.setDate(monday.getDate() - 7)
+  const datesForWeek = (mondayDate) => Array.from({ length: 7 }, (_value, index) => {
+    const date = new Date(mondayDate)
+    date.setDate(mondayDate.getDate() + index)
+    return getLocalLearningDateKey(date)
+  })
+  const currentWeek = datesForWeek(monday)
+  const previousWeek = datesForWeek(previousMonday)
+  return {
+    today: getLocalLearningDateKey(today),
+    currentWeek,
+    previousWeek,
+    start: previousWeek[0],
+    end: currentWeek[currentWeek.length - 1],
+  }
+}
+
+async function fetchStudentLearningActivity(onLogout, startDate, endDate, signal) {
+  const savedAuth = sessionStorage.getItem('lms.auth')
+  const auth = savedAuth ? JSON.parse(savedAuth) : null
+  if (typeof auth?.token !== 'string') {
+    onLogout()
+    throw new Error('Your session has ended. Please sign in again.')
+  }
+  const query = new URLSearchParams({ start: startDate, end: endDate })
+  const response = await fetchWithAuth(`${API_BASE_URL}/learning/activity?${query}`, {
+    headers: { Authorization: `Bearer ${auth.token}` },
+    signal,
+  }, API_BASE_URL, auth.token)
+  const result = await response.json()
+  if (isInvalidSessionResponse(response, result)) {
+    onLogout()
+    throw new Error('Your session has ended. Please sign in again.')
+  }
+  if (!response.ok) throw new Error(result.message || 'Learning activity could not be loaded.')
+  if (!Array.isArray(result.days) || result.days.some((day) => (
+    typeof day.date !== 'string'
+    || !Number.isFinite(day.seconds)
+    || !Number.isFinite(day.videosWatched)
+    || !Number.isFinite(day.lessonsCompleted)
+  ))) {
+    throw new Error('The server returned invalid learning activity data.')
+  }
+  return result.days
 }
 
 async function fetchStudentCourseContent(courseId, onLogout, signal) {
@@ -732,8 +924,11 @@ async function fetchStudentPageEnrollments(onLogout) {
 
   let request = studentEnrollmentRequests.get(cacheKey)
   if (!request) {
+    const generation = studentLearningCacheGeneration
     request = fetchMyEnrollments(onLogout).then((enrollments) => {
-      studentEnrollmentCache.set(cacheKey, { enrollments, savedAt: Date.now() })
+      if (generation === studentLearningCacheGeneration && cacheKey === getStudentPageCacheKey()) {
+        studentEnrollmentCache.set(cacheKey, { enrollments, savedAt: Date.now() })
+      }
       return enrollments
     })
     studentEnrollmentRequests.set(cacheKey, request)
@@ -742,6 +937,37 @@ async function fetchStudentPageEnrollments(onLogout) {
     return await request
   } finally {
     if (studentEnrollmentRequests.get(cacheKey) === request) studentEnrollmentRequests.delete(cacheKey)
+  }
+}
+
+function getCachedStudentPagePublishedCourses() {
+  const cacheKey = getStudentPageCacheKey()
+  return cacheKey ? studentPublishedCourseCache.get(cacheKey)?.courses || null : null
+}
+
+async function fetchStudentPagePublishedCourses(onLogout) {
+  const cacheKey = getStudentPageCacheKey()
+  if (!cacheKey) return fetchPublishedCourses(onLogout)
+  const cached = studentPublishedCourseCache.get(cacheKey)
+  if (cached && Date.now() - cached.savedAt < studentLearningPageCacheTtlMs) return cached.courses
+
+  let request = studentPublishedCourseRequests.get(cacheKey)
+  if (!request) {
+    const generation = studentDashboardCacheGeneration
+    request = fetchPublishedCourses(onLogout).then((courses) => {
+      if (generation === studentDashboardCacheGeneration && cacheKey === getStudentPageCacheKey()) {
+        studentPublishedCourseCache.set(cacheKey, { courses, savedAt: Date.now() })
+      }
+      return courses
+    })
+    studentPublishedCourseRequests.set(cacheKey, request)
+  }
+  try {
+    return await request
+  } finally {
+    if (studentPublishedCourseRequests.get(cacheKey) === request) {
+      studentPublishedCourseRequests.delete(cacheKey)
+    }
   }
 }
 
@@ -755,6 +981,50 @@ function getCachedStudentPageCourseContent(courseId) {
   return cacheKey ? studentCourseContentCache.get(cacheKey)?.content || null : null
 }
 
+function hasFreshStudentPageCourseContent(courseId) {
+  const cacheKey = getStudentCourseContentCacheKey(courseId)
+  const cached = cacheKey ? studentCourseContentCache.get(cacheKey) : null
+  return Boolean(cached && Date.now() - cached.savedAt < studentLearningPageCacheTtlMs)
+}
+
+function seedStudentCourseLearning(enrollment) {
+  const courseId = enrollment?.courseId?._id || (typeof enrollment?.courseId === 'string' ? enrollment.courseId : null)
+  if (!courseId) return
+  const cacheKey = getStudentCourseContentCacheKey(String(courseId))
+  if (!cacheKey || !enrollment?._id) return
+  studentCourseLearningSeeds.set(cacheKey, { enrollment, savedAt: Date.now() })
+}
+
+function getStudentCourseLearningSeed(courseId) {
+  const cacheKey = getStudentCourseContentCacheKey(courseId)
+  const seed = cacheKey ? studentCourseLearningSeeds.get(cacheKey) : null
+  if (!seed) return null
+  if (Date.now() - seed.savedAt >= studentLearningPageCacheTtlMs) {
+    studentCourseLearningSeeds.delete(cacheKey)
+    return null
+  }
+  return seed.enrollment
+}
+
+function getInitialStudentCourseLearningEnrollment(courseId) {
+  if (!courseId) return null
+  const cachedContent = getCachedStudentPageCourseContent(courseId)
+  if (cachedContent?.enrollment && cachedContent.enrollment.courseId && typeof cachedContent.enrollment.courseId === 'object') {
+    return {
+      ...cachedContent.enrollment,
+      assignmentSubmissions: cachedContent.assignmentSubmissions || [],
+      quizAttempts: cachedContent.quizAttempts || [],
+    }
+  }
+  const enrollment = getStudentCourseLearningSeed(courseId)
+  if (!enrollment?.courseId || typeof enrollment.courseId !== 'object') return null
+  return {
+    ...enrollment,
+    assignmentSubmissions: normalizeArray(enrollment.assignmentSubmissions),
+    quizAttempts: normalizeArray(enrollment.quizAttempts),
+  }
+}
+
 async function fetchStudentPageCourseContent(courseId, onLogout) {
   const cacheKey = getStudentCourseContentCacheKey(courseId)
   if (!cacheKey) return fetchStudentCourseContent(courseId, onLogout)
@@ -763,8 +1033,11 @@ async function fetchStudentPageCourseContent(courseId, onLogout) {
 
   let request = studentCourseContentRequests.get(cacheKey)
   if (!request) {
+    const generation = studentLearningCacheGeneration
     request = fetchStudentCourseContent(courseId, onLogout).then((content) => {
-      studentCourseContentCache.set(cacheKey, { content, savedAt: Date.now() })
+      if (generation === studentLearningCacheGeneration && cacheKey.startsWith(`${getStudentPageCacheKey()}:`)) {
+        studentCourseContentCache.set(cacheKey, { content, savedAt: Date.now() })
+      }
       return content
     })
     studentCourseContentRequests.set(cacheKey, request)
@@ -805,12 +1078,23 @@ function invalidateStudentResultsCache() {
 function invalidateStudentLearningPageCaches() {
   const cacheKey = getStudentPageCacheKey()
   if (!cacheKey) return
-  studentEnrollmentCache.delete(cacheKey)
+  studentLearningCacheGeneration += 1
+  const cachedEnrollments = studentEnrollmentCache.get(cacheKey)
+  if (cachedEnrollments) {
+    studentEnrollmentCache.set(cacheKey, { ...cachedEnrollments, savedAt: 0 })
+  }
   studentResultsCache.delete(cacheKey)
   studentCertificateCache.delete(cacheKey)
   const coursePrefix = `${cacheKey}:`
-  studentCourseContentCache.forEach((_, key) => {
-    if (key.startsWith(coursePrefix)) studentCourseContentCache.delete(key)
+  studentEnrollmentRequests.delete(cacheKey)
+  studentCourseContentCache.forEach((cached, key) => {
+    if (key.startsWith(coursePrefix)) {
+      studentCourseContentCache.set(key, { ...cached, savedAt: 0 })
+      studentCourseContentRequests.delete(key)
+    }
+  })
+  studentCourseLearningSeeds.forEach((_, key) => {
+    if (key.startsWith(coursePrefix)) studentCourseLearningSeeds.delete(key)
   })
 }
 
@@ -841,99 +1125,6 @@ async function fetchStudentCertificates(onLogout, signal) {
   if (!Array.isArray(result.certificates)) throw new Error('The server returned invalid certificate data.')
   return result.certificates
 }
-
-
-
-
-
-async function fetchStudentActivities(onLogout, signal) {
-  const savedAuth = sessionStorage.getItem('lms.auth')
-  const auth = savedAuth ? JSON.parse(savedAuth) : null
-  if (typeof auth?.token !== 'string') {
-    onLogout()
-    throw new Error('Your session has ended. Please sign in again.')
-  }
-  const response = await fetchWithAuth(`${API_BASE_URL}/learning/activities`, {
-    headers: { Authorization: `Bearer ${auth.token}` },
-    signal,
-  }, API_BASE_URL, auth.token)
-  const result = await response.json()
-  if (isInvalidSessionResponse(response, result)) {
-    onLogout()
-    throw new Error('Your session has ended. Please sign in again.')
-  }
-  if (!response.ok) throw new Error(result.message || 'Quizzes and assignments could not be loaded.')
-  return result
-}
-
-async function fetchCourseDetails(courseId, onLogout, signal) {
-  const savedAuth = sessionStorage.getItem('lms.auth')
-  const auth = savedAuth ? JSON.parse(savedAuth) : null
-  if (typeof auth?.token !== 'string') {
-    onLogout()
-    throw new Error('Your session has ended. Please sign in again.')
-  }
-  const response = await fetchWithAuth(`${API_BASE_URL}/courses/${encodeURIComponent(courseId)}/details`, {
-    headers: { Authorization: `Bearer ${auth.token}` },
-    signal,
-  }, API_BASE_URL, auth.token)
-  const result = await response.json()
-  if (isInvalidSessionResponse(response, result)) {
-    onLogout()
-    throw new Error('Your session has ended. Please sign in again.')
-  }
-  if (!response.ok) throw new Error(result.message || 'Course details could not be loaded.')
-  return result
-}
-
-async function enrollInCourse(courseId, onLogout) {
-  const savedAuth = sessionStorage.getItem('lms.auth')
-  const auth = savedAuth ? JSON.parse(savedAuth) : null
-  if (typeof auth?.token !== 'string') {
-    onLogout()
-    throw new Error('Your session has ended. Please sign in again.')
-  }
-  const response = await fetchWithAuth(`${API_BASE_URL}/courses/${encodeURIComponent(courseId)}/enroll`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${auth.token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ courseId }),
-  }, API_BASE_URL, auth.token)
-  const result = await response.json()
-  if (isInvalidSessionResponse(response, result)) {
-    onLogout()
-    throw new Error('Your session has ended. Please sign in again.')
-  }
-  if (!response.ok) throw new Error(result.message || 'You could not be enrolled in this course.')
-  return result
-}
-
-async function unenrollFromCourse(courseId, onLogout) {
-  const savedAuth = sessionStorage.getItem('lms.auth')
-  const auth = savedAuth ? JSON.parse(savedAuth) : null
-  if (typeof auth?.token !== 'string') {
-    onLogout()
-    throw new Error('Your session has ended. Please sign in again.')
-  }
-  const response = await fetchWithAuth(`${API_BASE_URL}/courses/${encodeURIComponent(courseId)}/unenroll`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${auth.token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ courseId }),
-  }, API_BASE_URL, auth.token)
-  const result = await response.json()
-  if (isInvalidSessionResponse(response, result)) {
-    onLogout()
-    throw new Error('Your session has ended. Please sign in again.')
-  }
-  if (!response.ok) throw new Error(result.message || 'Could not unenroll from this course.')
-  return result
-}
-
 
 function getCourseQuizTitle(course, quizId) {
   const quizzes = [
@@ -976,6 +1167,52 @@ function getCourseAssignments(course) {
   }))
 }
 
+function getAssignmentAcademicResult(submission, assignment) {
+  if (!submission) return null
+  const marks = Number(
+    submission.finalMarks
+      ?? submission.marksObtained
+      ?? submission.aiEvaluation?.totalMarks,
+  )
+  const maximumMarks = Number(
+    submission.aiEvaluation?.maximumMarks
+      ?? submission.humanEvaluation?.maximumMarks
+      ?? assignment?.points
+      ?? assignment?.maximumMarks,
+  )
+  if (
+    !Number.isFinite(marks)
+    || !Number.isFinite(maximumMarks)
+    || maximumMarks <= 0
+    || marks < 0
+    || marks > maximumMarks
+  ) return null
+
+  const scorePercentage = (marks / maximumMarks) * 100
+  return {
+    scorePercentage,
+    status: scorePercentage >= ASSIGNMENT_PASSING_PERCENTAGE ? 'Passed' : 'Failed',
+  }
+}
+
+function AssignmentAcademicBadge({ submission, assignment }) {
+  const result = getAssignmentAcademicResult(submission, assignment)
+  if (!result) return null
+  const isPassed = result.status === 'Passed'
+  return (
+    <span
+      className={`student-assignment-academic-result is-${isPassed ? 'passed' : 'failed'}`}
+      role="status"
+      aria-label={`${result.status} · ${Math.round(result.scorePercentage)}%`}
+    >
+      <span className="student-assignment-academic-result__icon" aria-hidden="true">
+        {isPassed ? '✓' : '!'}
+      </span>
+      {result.status}
+    </span>
+  )
+}
+
 function getLatestAssignmentSubmission(submissions, assignmentId) {
   return submissions
     .filter((submission) => String(submission.assignmentId) === String(assignmentId))
@@ -984,9 +1221,27 @@ function getLatestAssignmentSubmission(submissions, assignmentId) {
 
 function getAssignmentRecordStatus(submission) {
   if (!submission) return 'pending'
+  if (['AI Graded', 'Re-evaluation Requested', 'Human Review', 'Final Result'].includes(submission.gradingStatus)) {
+    return 'graded'
+  }
+  if (['AI Grading', 'AI Grading Failed', 'Submitted'].includes(submission.gradingStatus)) return 'submitted'
   if (submission.reviewStatus === 'approved') return 'graded'
   if (submission.reviewStatus === 'pending') return 'submitted'
   return 'pending'
+}
+
+function getAssignmentStatusLabel(submission, status) {
+  if (submission?.gradingStatus) return submission.gradingStatus
+  if (submission?.reviewStatus === 'rejected') return 'Rejected'
+  if (status === 'graded') return 'Approved'
+  return status === 'submitted' ? 'Submitted' : 'Pending'
+}
+
+function getAssignmentWorkflowStatusLabel(submission) {
+  if (submission?.gradingStatus) return submission.gradingStatus
+  if (submission?.reviewStatus === 'approved') return 'Evaluated'
+  if (submission?.reviewStatus === 'rejected') return 'Changes Requested'
+  return 'Submitted'
 }
 
 function getLatestEnrollmentsByCourse(enrollments) {
@@ -1000,11 +1255,91 @@ function getLatestEnrollmentsByCourse(enrollments) {
   return latestEnrollmentByCourse
 }
 
+function getStudentResourceRecords(enrollments) {
+  const list = []
+  for (const enrollment of getLatestEnrollmentsByCourse(enrollments).values()) {
+    const course = enrollment.courseId
+    if (!course || typeof course !== 'object') continue
+    const courseId = String(course._id || '')
+    if (!courseId) continue
+
+    function addCandidate(resource, topic, date) {
+      const url = typeof resource?.url === 'string' ? resource.url.trim() : ''
+      if (!url) return
+      const fileName = url.split(/[?#]/, 1)[0].split('/').pop()
+      const format = resource.format
+        || (fileName?.includes('.') ? fileName.split('.').pop() : '')
+        || 'FILE'
+
+      const candidate = {
+        ...resource,
+        key: `${courseId}:${resource._id || resource.publicId || url}`,
+        title: resource.title?.trim() || fileName || 'Learning resource',
+        url,
+        format: String(format).toUpperCase(),
+        bytes: resource.bytes,
+        topic: course.category || topic || course.title || 'Course',
+        courseId,
+        courseName: course.title || 'Course',
+        date,
+      }
+
+      const existingIndex = list.findIndex((item) => item.courseId === courseId && isSameResource(item, candidate))
+      if (existingIndex >= 0) {
+        list[existingIndex] = mergeResources(list[existingIndex], candidate)
+      } else {
+        list.push(candidate)
+      }
+    }
+
+    for (const resource of normalizeArray(course.resources)) {
+      addCandidate(resource, 'Course Materials', course.updatedAt || enrollment.createdAt)
+    }
+
+    for (const module of normalizeArray(course.modules)) {
+      for (const resource of normalizeArray(module.resources)) {
+        addCandidate(resource, module.title, module.updatedAt || course.updatedAt)
+      }
+      const contentItems = [
+        ...normalizeLessons(module.lessons),
+        ...normalizeArray(module.contentItems),
+      ]
+      for (const item of contentItems) {
+        for (const resource of normalizeArray(item.resources)) {
+          addCandidate(resource, module.title || item.title, item.updatedAt || course.updatedAt || enrollment.createdAt)
+        }
+      }
+    }
+  }
+  return list
+}
+
+function formatStudentResourceSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return ''
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function formatStudentResourceDate(value) {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  }).format(date)
+}
+
 function createStudentAssignmentRows(courseResults) {
   return courseResults.flatMap(({ enrollment, submissions }) => {
     const course = enrollment.courseId
     return getCourseAssignments(course).map((assignment) => {
-      const submission = getLatestAssignmentSubmission(submissions, assignment._id)
+      const assignmentSubmissions = submissions.filter((entry) => (
+        String(entry.assignmentId) === String(assignment._id)
+      ))
+      const submission = getLatestAssignmentSubmission(assignmentSubmissions, assignment._id)
       return {
         key: `${enrollment._id}:${assignment._id}`,
         courseId: String(course._id),
@@ -1012,6 +1347,7 @@ function createStudentAssignmentRows(courseResults) {
         enrollmentId: String(enrollment._id),
         assignment,
         submission,
+        submissionHistory: assignmentSubmissions,
         status: getAssignmentRecordStatus(submission),
       }
     })
@@ -1021,8 +1357,18 @@ function createStudentAssignmentRows(courseResults) {
 async function fetchStudentAssignmentRows(onLogout) {
   const enrollments = await fetchStudentPageEnrollments(onLogout)
   const latestEnrollments = getLatestEnrollmentsByCourse(enrollments)
+  const cachedSubmissionsAvailable = [...latestEnrollments.values()].every((enrollment) => (
+    Array.isArray(enrollment.assignmentSubmissions)
+  ))
+  if (cachedSubmissionsAvailable) {
+    return createStudentAssignmentRows([...latestEnrollments.values()].map((enrollment) => ({
+      enrollment,
+      submissions: enrollment.assignmentSubmissions,
+    })))
+  }
+
   const courseResults = await Promise.all([...latestEnrollments.keys()].map(async (courseId) => {
-    const result = await fetchStudentPageCourseContent(courseId, onLogout)
+    const result = await fetchStudentCourseContent(courseId, onLogout)
     return { enrollment: result.enrollment, submissions: result.assignmentSubmissions }
   }))
   return createStudentAssignmentRows(courseResults)
@@ -1033,6 +1379,10 @@ function getCachedStudentAssignmentRows() {
   if (!enrollments) return null
   const latestEnrollments = getLatestEnrollmentsByCourse(enrollments)
   const courseResults = [...latestEnrollments.keys()].map((courseId) => {
+    const enrollment = latestEnrollments.get(courseId)
+    if (Array.isArray(enrollment?.assignmentSubmissions)) {
+      return { enrollment, submissions: enrollment.assignmentSubmissions }
+    }
     const content = getCachedStudentPageCourseContent(courseId)
     return content
       ? { enrollment: content.enrollment, submissions: content.assignmentSubmissions }
@@ -1043,9 +1393,19 @@ function getCachedStudentAssignmentRows() {
 }
 
 function getDashboardAssignmentStatus(entry) {
+  const gradingStatus = entry.submission?.gradingStatus
+  const academicResult = getAssignmentAcademicResult(entry.submission, entry.assignment)
+  if (!gradingStatus && academicResult) return { label: 'Evaluated', tone: 'evaluated' }
+  if (gradingStatus) {
+    if (['AI Graded', 'Re-evaluation Requested', 'Human Review', 'Final Result'].includes(gradingStatus)) {
+      return { label: gradingStatus, tone: 'evaluated' }
+    }
+    if (gradingStatus === 'AI Grading Failed') return { label: gradingStatus, tone: 'rejected' }
+    return { label: gradingStatus, tone: 'submitted' }
+  }
   const reviewStatus = entry.submission?.reviewStatus
   if (!entry.submission) return { label: 'Pending', tone: 'pending' }
-  if (reviewStatus === 'approved') return { label: 'Approved', tone: 'approved' }
+  if (reviewStatus === 'approved') return { label: 'Evaluated', tone: 'evaluated' }
   if (reviewStatus === 'rejected') return { label: 'Rejected', tone: 'rejected' }
   if (reviewStatus === 'pending') return { label: 'Awaiting Review', tone: 'awaiting' }
   return { label: 'Submitted', tone: 'submitted' }
@@ -1129,6 +1489,7 @@ function StudentDashboardUpcomingAssignments({ onLogout }) {
               <strong>{entry.assignment.title || 'Assignment'}</strong>
               <span>{entry.courseName}</span>
               <small>{dueDateLabel}</small>
+              <AssignmentAcademicBadge submission={entry.submission} assignment={entry.assignment} />
             </span>
             <span className={`student-dashboard-assignment__status is-${status.tone}`}>{status.label}</span>
           </Link>
@@ -1152,6 +1513,157 @@ function StudentDashboardUpcomingAssignments({ onLogout }) {
   )
 }
 
+function StudentResourcesPage({ onLogout }) {
+  const navigate = useNavigate()
+  const [recommendations, setRecommendations] = useState([])
+  const [recommendationSummary, setRecommendationSummary] = useState(null)
+  const [recommendationsLoading, setRecommendationsLoading] = useState(true)
+  const [recommendationsError, setRecommendationsError] = useState('')
+  const [recommendationsRetryCount, setRecommendationsRetryCount] = useState(0)
+
+  useEffect(() => {
+    const controller = new AbortController()
+    let active = true
+    setRecommendationsLoading(true)
+    setRecommendationsError('')
+    setRecommendationSummary(null)
+    fetchStudentRecommendations(onLogout, controller.signal)
+      .then((result) => {
+        if (active) {
+          setRecommendations(result.recommendations)
+          setRecommendationSummary({
+            completedCourseCount: result.completedCourseCount,
+            availableCourseCount: result.availableCourseCount,
+            allAvailableCoursesCompleted: result.allAvailableCoursesCompleted,
+          })
+        }
+      })
+      .catch((error) => {
+        if (active && error?.name !== 'AbortError') {
+          setRecommendationsError(error instanceof Error ? error.message : 'Course recommendations could not be loaded.')
+        }
+      })
+      .finally(() => {
+        if (active) setRecommendationsLoading(false)
+      })
+    return () => {
+      active = false
+      controller.abort()
+    }
+  }, [onLogout, recommendationsRetryCount])
+
+  useEffect(() => {
+    const refreshRecommendations = () => setRecommendationsRetryCount((count) => count + 1)
+    window.addEventListener(STUDENT_LEARNING_PROGRESS_UPDATED_EVENT, refreshRecommendations)
+    return () => window.removeEventListener(STUDENT_LEARNING_PROGRESS_UPDATED_EVENT, refreshRecommendations)
+  }, [])
+
+  const noRecommendationsMessage = !recommendationSummary
+    ? 'Recommendations are not available right now.'
+    : recommendationSummary.availableCourseCount === 0
+      ? 'There are no courses currently available. Check back when new courses are published.'
+      : recommendationSummary.allAvailableCoursesCompleted
+        ? 'You have completed all currently available courses. Check back when new courses are published.'
+        : recommendationSummary.completedCourseCount === 0
+          ? 'No new beginner-friendly recommendations are available right now. Check back as courses become available.'
+          : 'No new courses currently match your completed learning. Check back as new courses are published.'
+
+  return (
+    <div className="student-resource-library">
+      <header className="student-resource-library__intro">
+        <p className="student-resource-library__eyebrow">YOUR NEXT STEP</p>
+        <h1>Upgrade Yourself</h1>
+        <p>Course suggestions based on all of your completed learning.</p>
+      </header>
+
+      <section className="student-recommendations" aria-label="Recommended for You">
+        {recommendationsError ? (
+          <div className="student-resource-library__error" role="alert">
+            <span>{recommendationsError}</span>
+            <button type="button" onClick={() => setRecommendationsRetryCount((count) => count + 1)}>Try again</button>
+          </div>
+        ) : recommendationsLoading ? (
+          <p className="student-recommendations__state" role="status" aria-busy="true">Finding your next courses...</p>
+        ) : recommendations.length ? (
+          <div className="student-recommendations__grid">
+            {recommendations.map((course) => (
+              <article className="student-resource-recommendation-card" key={course.id}>
+                {course.thumbnailUrl && (
+                  <img
+                    className="student-resource-recommendation-card__thumbnail"
+                    src={course.thumbnailUrl}
+                    alt={`${course.title} course thumbnail`}
+                  />
+                )}
+                <div className="student-resource-recommendation-card__topline">
+                  <span>Recommended course</span>
+                  <span>{[course.category, course.difficulty].filter(Boolean).join(' · ')}</span>
+                </div>
+                <h3>{course.title}</h3>
+                {course.description && <p className="student-resource-recommendation-card__description">{course.description}</p>}
+                {course.estimatedDurationMinutes > 0 && (
+                  <p className="student-resource-recommendation-card__duration">
+                    Estimated duration: {course.estimatedDurationMinutes >= 60
+                      ? `${Math.floor(course.estimatedDurationMinutes / 60)} hr${course.estimatedDurationMinutes >= 120 ? 's' : ''}${course.estimatedDurationMinutes % 60 ? ` ${course.estimatedDurationMinutes % 60} min` : ''}`
+                      : `${course.estimatedDurationMinutes} min`}
+                  </p>
+                )}
+                <div className="student-resource-recommendation-card__connection">
+                  <strong>
+                    {course.basedOnCourses?.length
+                      ? course.basedOnCourses.length > 1
+                        ? 'Based on your completed courses'
+                        : 'Based on your completed course'
+                      : 'A beginner-friendly starting point'}
+                  </strong>
+                  {course.basedOnCourses?.length
+                    ? <ul>{course.basedOnCourses.map((entry) => <li key={entry.id}>{entry.title}</li>)}</ul>
+                    : <span>{course.category}</span>}
+                </div>
+                <section>
+                  <h4>Why recommended?</h4>
+                  <p>{course.why}</p>
+                </section>
+                {course.basedOnCourses?.length > 0 && (
+                  <section>
+                    <h4>How it complements your learning</h4>
+                    <ul>{course.basedOnCourses.map((entry) => <li key={entry.id}>{entry.complements}</li>)}</ul>
+                  </section>
+                )}
+                {course.combinationBenefits?.length > 0 && (
+                  <section>
+                    <h4>How combining these courses improves your skills</h4>
+                    <ul>{course.combinationBenefits.map((benefit) => <li key={benefit}>{benefit}</li>)}</ul>
+                  </section>
+                )}
+                <section>
+                  <h4>Skills you will gain</h4>
+                  {course.skills.length ? (
+                    <ul>{course.skills.map((skill) => <li key={skill}>{skill}</li>)}</ul>
+                  ) : <p>Course skills have not been listed yet.</p>}
+                </section>
+                <section>
+                  <h4>Practical applications and benefits</h4>
+                  <ul>{course.benefits.map((benefit) => <li key={benefit}>{benefit}</li>)}</ul>
+                </section>
+                <button
+                  type="button"
+                  className="student-resource-recommendation-card__explore"
+                  onClick={() => navigate(`/student/course/${encodeURIComponent(course.id)}`)}
+                >
+                  Explore Course
+                </button>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className="student-recommendations__state">{noRecommendationsMessage}</p>
+        )}
+      </section>
+    </div>
+  )
+}
+
 function StudentAssignmentsPage({ onLogout, onLearningDataChanged }) {
   const [initialAssignments] = useState(getCachedStudentAssignmentRows)
   const [assignments, setAssignments] = useState(initialAssignments || [])
@@ -1163,6 +1675,9 @@ function StudentAssignmentsPage({ onLogout, onLearningDataChanged }) {
   const [activeAssignmentKey, setActiveAssignmentKey] = useState('')
   const [refreshToken, setRefreshToken] = useState(0)
   const hasAssignmentDataRef = useRef(initialAssignments !== null)
+  const hasPendingGrading = assignments.some(({ submission }) => (
+    ['Submitted', 'AI Grading'].includes(submission?.gradingStatus)
+  ))
 
   useEffect(() => {
     let active = true
@@ -1190,15 +1705,18 @@ function StudentAssignmentsPage({ onLogout, onLearningDataChanged }) {
 
   useEffect(() => {
     const refresh = () => {
-      if (document.visibilityState === 'visible') setRefreshToken((current) => current + 1)
+      if (document.visibilityState === 'visible') {
+        invalidateStudentLearningPageCaches()
+        setRefreshToken((current) => current + 1)
+      }
     }
-    const intervalId = window.setInterval(refresh, 30000)
+    const intervalId = window.setInterval(refresh, hasPendingGrading ? 3000 : 30000)
     window.addEventListener('focus', refresh)
     return () => {
       window.clearInterval(intervalId)
       window.removeEventListener('focus', refresh)
     }
-  }, [])
+  }, [hasPendingGrading])
 
   const activeAssignment = assignments.find(({ key }) => key === activeAssignmentKey) || null
   const courseAssignments = selectedCourseId === 'all'
@@ -1219,11 +1737,26 @@ function StudentAssignmentsPage({ onLogout, onLearningDataChanged }) {
   })
   const courses = [...new Map(assignments.map(({ courseId, courseName }) => [courseId, courseName])).entries()]
   function updateSubmission(entryKey, submission) {
-    setAssignments((current) => current.map((entry) => (
-      entry.key === entryKey
-        ? { ...entry, submission, status: getAssignmentRecordStatus(submission) }
-        : entry
-    )))
+    setAssignments((current) => current.map((entry) => {
+      if (entry.key !== entryKey) return entry
+      const history = entry.submissionHistory || (entry.submission ? [entry.submission] : [])
+      const previousSubmission = history.find((item) => String(item._id) === String(submission._id))
+      const updatedSubmission = {
+        ...previousSubmission,
+        ...submission,
+        attemptState: submission.attemptState || previousSubmission?.attemptState,
+      }
+      const submissionHistory = previousSubmission
+        ? history.map((item) => String(item._id) === String(submission._id) ? updatedSubmission : item)
+        : [updatedSubmission, ...history]
+      const latestSubmission = getLatestAssignmentSubmission(submissionHistory, entry.assignment._id)
+      return {
+        ...entry,
+        submission: latestSubmission,
+        submissionHistory,
+        status: getAssignmentRecordStatus(latestSubmission),
+      }
+    }))
     const entry = assignments.find(({ key }) => key === entryKey)
     if (entry) {
       studentCourseContentCache.delete(getStudentCourseContentCacheKey(entry.courseId))
@@ -1347,7 +1880,7 @@ function StudentAssignmentsPage({ onLogout, onLearningDataChanged }) {
             const hasMarks = submission?.marksObtained !== null
               && submission?.marksObtained !== undefined
               && Number.isFinite(Number(submission.marksObtained))
-            const statusLabel = rejected ? 'Rejected' : status === 'graded' ? 'Approved' : status === 'submitted' ? 'Submitted' : 'Pending'
+            const statusLabel = rejected ? 'Rejected' : getAssignmentStatusLabel(submission, status)
             const actionLabel = rejected ? 'Resubmit' : status === 'graded' ? 'View Details' : status === 'submitted' ? 'View Submission' : 'View & Submit'
             return (
               <article className="student-assignment-item" key={entry.key}>
@@ -1362,8 +1895,11 @@ function StudentAssignmentsPage({ onLogout, onLearningDataChanged }) {
                   <Icon name="clock" size={14} />
                   <span>{assignment.dueDate ? `Due: ${formatResultDate(assignment.dueDate)}` : 'No due date'}</span>
                 </div>
-                <span className={`student-assignment-item__status is-${rejected ? 'rejected' : status === 'graded' ? 'graded' : status}`}>
-                  {statusLabel}
+                <span className="student-assignment-item__status-stack">
+                  <span className={`student-assignment-item__status is-${rejected ? 'rejected' : status === 'graded' ? 'graded' : status}`}>
+                    {statusLabel}
+                  </span>
+                  <AssignmentAcademicBadge submission={submission} assignment={assignment} />
                 </span>
                 {status === 'graded' && hasMarks ? (
                   <span className="student-assignment-item__score">
@@ -1461,6 +1997,7 @@ function StudentResultsTableSkeleton() {
 
 function StudentResultsPage({ onLogout }) {
   const navigate = useNavigate()
+  const [progressRefresh, setProgressRefresh] = useState(0)
   const [initialResults] = useState(getCachedStudentResults)
   const [courseResults, setCourseResults] = useState(initialResults?.courseResults || [])
   const [certificates, setCertificates] = useState(initialResults?.certificates || [])
@@ -1473,6 +2010,15 @@ function StudentResultsPage({ onLogout }) {
   const [error, setError] = useState('')
 
   useEffect(() => {
+    const refreshProgress = () => {
+      invalidateStudentLearningPageCaches()
+      setProgressRefresh((refresh) => refresh + 1)
+    }
+    window.addEventListener(STUDENT_LEARNING_PROGRESS_UPDATED_EVENT, refreshProgress)
+    return () => window.removeEventListener(STUDENT_LEARNING_PROGRESS_UPDATED_EVENT, refreshProgress)
+  }, [])
+
+  useEffect(() => {
     let active = true
     async function loadResults() {
       setError('')
@@ -1481,7 +2027,7 @@ function StudentResultsPage({ onLogout }) {
         const latestEnrollments = getLatestEnrollmentsByCourse(enrollments)
         const [loadedCourseResults, loadedCertificates] = await Promise.all([
           Promise.all([...latestEnrollments.keys()].map(async (courseId) => {
-            const result = await fetchStudentPageCourseContent(courseId, onLogout)
+            const result = await fetchStudentCourseContent(courseId, onLogout)
             return {
               courseId,
               enrollment: result.enrollment,
@@ -1517,15 +2063,14 @@ function StudentResultsPage({ onLogout }) {
     }
     void loadResults()
     return () => { active = false }
-  }, [onLogout])
+  }, [onLogout, progressRefresh])
 
   const courseRows = courseResults.map((result) => {
     const lessonEntries = getCourseLessons(result.course)
     const completedLessonIds = new Set((result.enrollment.completedLessonIds || []).map(String))
     const completedLessons = lessonEntries.filter(({ lesson }) => completedLessonIds.has(String(lesson._id))).length
-    const progress = lessonEntries.length
-      ? Math.round((completedLessons / lessonEntries.length) * 100)
-      : result.enrollment.status === 'completed' ? 100 : 0
+    const activityProgress = getCourseProgress(result.enrollment)
+    const progress = activityProgress.percentage
     const submittedQuizzes = result.quizAttempts.filter((attempt) => attempt.status === 'submitted')
     const scores = submittedQuizzes.map(getAttemptScore).filter((score) => score !== null)
     const averageScore = scores.length
@@ -1539,6 +2084,8 @@ function StudentResultsPage({ onLogout }) {
       ...result,
       completedLessons,
       lessonCount: lessonEntries.length,
+      completedActivityCount: activityProgress.completedCount,
+      totalActivityCount: activityProgress.totalCount,
       progress,
       status: progress >= 100 ? 'completed' : progress > 0 ? 'in-progress' : 'not-started',
       submittedQuizzes,
@@ -1559,14 +2106,17 @@ function StudentResultsPage({ onLogout }) {
     courseId: course.courseId,
     courseName: course.course.title || 'Course',
     assignmentTitle: getCourseAssignmentTitle(course.course, submission.assignmentId),
+    assignment: getCourseAssignments(course.course).find((entry) => (
+      String(entry._id) === String(submission.assignmentId)
+    )),
   }))).sort((left, right) => new Date(right.submittedAt).getTime() - new Date(left.submittedAt).getTime())
   const scoredAttempts = allQuizAttempts.filter((attempt) => attempt.score !== null)
   const averageScore = scoredAttempts.length
     ? Math.round(scoredAttempts.reduce((total, attempt) => total + attempt.score, 0) / scoredAttempts.length)
     : null
-  const lessonCount = courseRows.reduce((total, course) => total + course.lessonCount, 0)
-  const completedLessons = courseRows.reduce((total, course) => total + course.completedLessons, 0)
-  const overallProgress = lessonCount ? Math.round((completedLessons / lessonCount) * 100) : 0
+  const totalActivities = courseRows.reduce((total, course) => total + course.totalActivityCount, 0)
+  const completedActivities = courseRows.reduce((total, course) => total + course.completedActivityCount, 0)
+  const overallProgress = totalActivities ? Math.round((completedActivities / totalActivities) * 100) : 0
   const completedCourseCount = courseRows.filter((course) => course.status === 'completed').length
   const inProgressCourseCount = courseRows.filter((course) => course.status === 'in-progress').length
   const notStartedCourseCount = courseRows.filter((course) => course.status === 'not-started').length
@@ -1586,7 +2136,7 @@ function StudentResultsPage({ onLogout }) {
         <div className="student-results__heading">
           <span className="student-results__hero-icon"><Icon name="award" size={27} /></span>
           <div>
-            <h1>Grades &amp; Results</h1>
+            <h1>Your Grades &amp; Results</h1>
             <p>Track your performance and view your results</p>
           </div>
         </div>
@@ -1664,7 +2214,10 @@ function StudentResultsPage({ onLogout }) {
                         </td>
                         <td>
                           <div className="student-results__progress">
-                            <span><small>{course.progress}%</small><small>{course.progress}%</small></span>
+                            <span>
+                              <small>{course.progress}%</small>
+                              <small>{course.completedActivityCount} of {course.totalActivityCount} activities</small>
+                            </span>
                             <i><b className={course.status === 'completed' ? 'is-completed' : ''} style={{ width: `${course.progress}%` }} /></i>
                           </div>
                         </td>
@@ -1680,12 +2233,14 @@ function StudentResultsPage({ onLogout }) {
             {activeTab === 'assignments' && (
               allAssignments.length
                 ? <table className="student-results__table">
-                    <thead><tr><th>Assignment</th><th>Course</th><th>Status</th><th>Submitted</th><th /></tr></thead>
+                    <thead><tr><th>Assignment</th><th>Course</th><th>Grading status</th><th>Score</th><th>Result</th><th>Submitted</th><th /></tr></thead>
                     <tbody>{allAssignments.map((assignment) => (
                       <tr key={assignment._id}>
                         <td>{assignment.assignmentTitle}</td>
                         <td>{assignment.courseName}</td>
-                        <td><span className={`student-results__status is-${assignment.reviewStatus === 'approved' ? 'completed' : assignment.reviewStatus === 'rejected' ? 'not-started' : 'in-progress'}`}>{assignment.reviewStatus === 'approved' ? 'Approved' : assignment.reviewStatus === 'rejected' ? 'Changes Requested' : 'In Review'}</span></td>
+                        <td><span className={`student-results__status is-${assignment.gradingStatus === 'AI Graded' || assignment.gradingStatus === 'Re-evaluation Requested' || assignment.gradingStatus === 'Human Review' || assignment.gradingStatus === 'Final Result' ? 'evaluated' : assignment.gradingStatus === 'AI Grading Failed' ? 'not-started' : 'in-progress'}`}>{getAssignmentWorkflowStatusLabel(assignment)}</span></td>
+                        <td>{Number.isFinite(assignment.finalMarks) ? assignment.finalMarks : Number.isFinite(assignment.marksObtained) ? assignment.marksObtained : '—'} / {assignment.aiEvaluation?.maximumMarks ?? assignment.assignment?.points ?? assignment.assignment?.maximumMarks ?? '—'}</td>
+                        <td><AssignmentAcademicBadge submission={assignment} assignment={assignment.assignment} /></td>
                         <td>{formatResultDate(assignment.submittedAt)}</td>
                         <td><button className="student-results__details" type="button" onClick={() => openCourse(assignment.courseId)}>Open Course <Icon name="arrow" size={15} /></button></td>
                       </tr>
@@ -1702,7 +2257,7 @@ function StudentResultsPage({ onLogout }) {
                         <td>{attempt.quizTitle}</td>
                         <td>{attempt.courseName}</td>
                         <td>{attempt.score === null ? '—' : `${Math.round(attempt.score)}%`}</td>
-                        <td><span className={`student-results__status is-${attempt.passed ? 'completed' : 'in-progress'}`}>{attempt.passed ? 'Passed' : 'Submitted'}</span></td>
+                        <td><span className={`student-results__status is-${attempt.passed ? 'completed' : 'in-progress'}`}>{attempt.passed ? 'Passed' : 'Failed'}</span></td>
                         <td>{formatResultDate(attempt.submittedAt || attempt.createdAt)}</td>
                         <td><button className="student-results__details" type="button" onClick={() => openCourse(attempt.courseId)}>Open Course <Icon name="arrow" size={15} /></button></td>
                       </tr>
@@ -1811,16 +2366,12 @@ async function fetchPublishedCourses(onLogout, signal) {
   return result.courses
 }
 
-
-
 function getCourseCounts(course) {
-  const lessonCount = (course.modules || []).reduce((count, module) => {
-    const items = module.contentItems || []
-    return count + (items.length
-      ? items.filter((item) => item.type === 'video-lesson').length
-      : (module.lessons || []).length)
+  const modules = normalizeArray(course?.modules)
+  const lessonCount = modules.reduce((count, module) => {
+    return count + getModuleVideoLessons(module).length
   }, 0)
-  return { modules: course.modules?.length || 0, lessons: lessonCount }
+  return { modules: modules.length, lessons: lessonCount }
 }
 
 function formatCourseDuration(minutes) {
@@ -1831,127 +2382,45 @@ function formatCourseDuration(minutes) {
   return remainder ? `${hours} hr ${remainder} min` : `${hours} hr`
 }
 
+function isValidLessonId(value) {
+  return /^[a-f\d]{24}$/i.test(String(value || ''))
+}
 
+function getVideoCompletionDuration(video) {
+  const duration = Number(video?.duration)
+  if (Number.isFinite(duration) && duration > 0) return duration
+
+  if (video?.seekable?.length) {
+    const seekableEnd = Number(video.seekable.end(video.seekable.length - 1))
+    if (Number.isFinite(seekableEnd) && seekableEnd > 0) return seekableEnd
+  }
+
+  return 0
+}
 
 function getCourseLessons(course) {
-  return (course?.modules || []).flatMap((module, moduleIndex) => {
-    const videoItems = (module.contentItems || []).filter((item) => item.type === 'video-lesson')
-    const lessons = videoItems.length ? videoItems : module.lessons || []
+  const modules = normalizeArray(course?.modules)
+    .map((module, index) => ({ module, index }))
+    .sort((left, right) => (left.module.order ?? left.index) - (right.module.order ?? right.index))
+  return modules.flatMap(({ module, index: moduleIndex }) => {
+    const lessons = getModuleVideoLessons(module)
     return lessons.map((lesson, lessonIndex) => ({
       module,
       lesson,
-      moduleKey: String(module._id || `${module.title}-${moduleIndex}`),
-      lessonKey: String(lesson._id || `${moduleIndex}-${lessonIndex}`),
+      moduleKey: String(module?._id || `${module?.title || 'module'}-${moduleIndex}`),
+      lessonKey: String(lesson?._id || `${moduleIndex}-${lessonIndex}`),
     }))
   })
 }
 
-
-
-function buildClientCourseSequence(course) {
-  const lessons = getCourseLessons(course)
-  const existingQuizzes = [
-    ...(course?.modules || []).flatMap((m) => [
-      ...(m.contentItems || []).filter((i) => i.type === 'quiz').map((i) => i.quiz || i),
-      ...(m.quiz?.questions?.length ? [m.quiz] : []),
-    ]),
-    ...(course?.quizzes || []),
-  ].filter((q, idx, arr) => q?._id && arr.findIndex((x) => String(x._id) === String(q._id)) === idx)
-
-  const existingAssessments = [
-    ...(course?.modules || []).flatMap((m) => (m.contentItems || []).filter((i) => i.type === 'assignment')),
-    ...(course?.assignments || []),
-  ].filter((a, idx, arr) => a?._id && arr.findIndex((x) => String(x._id) === String(a._id)) === idx)
-
-  const totalVideos = lessons.length
-  const shouldSequence = totalVideos >= 4 || existingQuizzes.length > 0 || existingAssessments.length > 0
-
-  const sequence = []
-  let videoCount = 0
-  let quizIndex = 0
-  let assessmentIndex = 0
-
-  for (const entry of lessons) {
-    videoCount++
-    sequence.push({
-      sequenceIndex: sequence.length + 1,
-      type: 'video-lesson',
-      id: String(entry.lesson._id || entry.lessonKey),
-      title: entry.lesson.title,
-      durationSeconds: entry.lesson.durationSeconds,
-      lessonEntry: entry,
-      lesson: entry.lesson,
-      _learningKey: String(entry.lesson._id || entry.lessonKey),
-    })
-
-    if (shouldSequence) {
-      if (videoCount % 2 === 0) {
-        quizIndex++
-        const quizObj = existingQuizzes[quizIndex - 1] || {
-          _id: `derived-quiz-${course?._id}-${quizIndex}`,
-          title: `Quiz ${quizIndex}`,
-          passingPercentage: 70,
-          maxAttempts: 3,
-        }
-        sequence.push({
-          sequenceIndex: sequence.length + 1,
-          type: 'quiz',
-          id: String(quizObj._id),
-          title: quizObj.title || `Quiz ${quizIndex}`,
-          quiz: quizObj,
-          _learningKey: String(quizObj._id),
-        })
-      }
-
-      if (videoCount % 4 === 0) {
-        assessmentIndex++
-        const assessmentObj = existingAssessments[assessmentIndex - 1] || {
-          _id: `derived-assessment-${course?._id}-${assessmentIndex}`,
-          title: `Assessment ${assessmentIndex}`,
-          points: 100,
-        }
-        sequence.push({
-          sequenceIndex: sequence.length + 1,
-          type: 'assessment',
-          id: String(assessmentObj._id),
-          title: assessmentObj.title || `Assessment ${assessmentIndex}`,
-          assignment: assessmentObj,
-          _learningKey: String(assessmentObj._id),
-        })
-      }
-    }
-  }
-
-  while (quizIndex < existingQuizzes.length) {
-    const quizObj = existingQuizzes[quizIndex]
-    quizIndex++
-    sequence.push({
-      sequenceIndex: sequence.length + 1,
-      type: 'quiz',
-      id: String(quizObj._id),
-      title: quizObj.title || `Quiz ${quizIndex}`,
-      quiz: quizObj,
-      _learningKey: String(quizObj._id),
-    })
-  }
-
-  while (assessmentIndex < existingAssessments.length) {
-    const assessmentObj = existingAssessments[assessmentIndex]
-    assessmentIndex++
-    sequence.push({
-      sequenceIndex: sequence.length + 1,
-      type: 'assessment',
-      id: String(assessmentObj._id),
-      title: assessmentObj.title || `Assessment ${assessmentIndex}`,
-      assignment: assessmentObj,
-      _learningKey: String(assessmentObj._id),
-    })
-  }
-
-  return sequence
+function getModuleVideoLessons(module) {
+  const contentItems = normalizeArray(module?.contentItems)
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => item?.type === 'video-lesson')
+    .sort((left, right) => (left.item.order ?? left.index) - (right.item.order ?? right.index))
+    .map(({ item }) => item)
+  return contentItems.length ? contentItems : normalizeLessons(module?.lessons)
 }
-
-
 
 function createEmptyAttentionSession(lessonId = '') {
   return {
@@ -1972,81 +2441,73 @@ function createEmptyAttentionSession(lessonId = '') {
   }
 }
 
-
 function getCourseProgress(enrollment) {
-  if (!enrollment?.courseId) {
-    return {
-      completedCount: 0,
-      totalCount: 0,
-      percentage: 0,
-      isCompleted: false,
-      videoStats: { completed: 0, total: 0 },
-      quizStats: { passed: 0, total: 0 },
-      assessmentStats: { completed: 0, total: 0 },
-      nextActivity: null,
-      status: 'active',
-    }
-  }
-
-  if (enrollment.progress && typeof enrollment.progress.percentage === 'number') {
-    const p = enrollment.progress
-    return {
-      completedCount: p.completedActivities ?? p.completedCount ?? 0,
-      totalCount: p.totalRequiredActivities ?? p.totalLessons ?? 0,
-      percentage: p.percentage ?? p.progressPercentage ?? 0,
-      isCompleted: p.isCompleted === true || enrollment.status === 'completed',
-      videoStats: p.videoStats || { completed: p.completedCount || 0, total: p.totalLessons || 0 },
-      quizStats: p.quizStats || { passed: 0, total: 0 },
-      assessmentStats: p.assessmentStats || { completed: 0, total: 0 },
-      nextActivity: p.nextActivity || null,
-      status: enrollment.status,
-    }
-  }
-
-  const sequence = buildClientCourseSequence(enrollment.courseId)
-  const completedLessonIds = new Set((enrollment.completedLessonIds || []).map(String))
-
-  const videoItems = sequence.filter((item) => item.type === 'video-lesson')
-  const completedVideos = videoItems.filter((item) => completedLessonIds.has(item.id)).length
-  const totalVideos = videoItems.length
-
-  const isCompleted = enrollment.status === 'completed'
-  const percentage = totalVideos ? Math.round((completedVideos / totalVideos) * 100) : 0
-
+  const progress = enrollment.courseProgress
+  const activityGroups = ['videos', 'quizzes', 'assignments'].map((type) => ({
+    completed: Math.max(0, Math.floor(Number(progress?.[type]?.completed) || 0)),
+    total: Math.max(0, Math.floor(Number(progress?.[type]?.total) || 0)),
+  }))
+  const activityCompletedCount = activityGroups.reduce((total, group) => total + group.completed, 0)
+  const activityTotalCount = activityGroups.reduce((total, group) => total + group.total, 0)
+  const hasReportedTotalCount = Number.isSafeInteger(Number(progress?.totalActivities))
+    && Number(progress.totalActivities) >= 0
+  const hasReportedCompletedCount = Number.isSafeInteger(Number(progress?.completedActivities))
+    && Number(progress.completedActivities) >= 0
+  const totalCount = hasReportedTotalCount
+    ? Number(progress.totalActivities)
+    : activityTotalCount
+  const completedCount = Math.min(
+    totalCount,
+    hasReportedCompletedCount ? Number(progress.completedActivities) : activityCompletedCount,
+  )
+  const isComplete = totalCount > 0 && completedCount === totalCount
+  const percentage = isComplete
+    ? 100
+    : totalCount
+      ? Math.min(99, Math.floor((completedCount / totalCount) * 100))
+      : 0
   return {
-    completedCount: completedVideos,
-    totalCount: totalVideos,
+    completedCount,
+    totalCount,
     percentage,
-    isCompleted,
-    videoStats: { completed: completedVideos, total: totalVideos },
-    quizStats: { passed: 0, total: 0 },
-    assessmentStats: { completed: 0, total: 0 },
-    nextActivity: sequence.find((s) => !completedLessonIds.has(s.id)) || null,
-    status: enrollment.status,
   }
 }
 
-
-
 function getModuleLearningItems(module, moduleIndex) {
-  const moduleKey = String(module._id || `${module.title}-${moduleIndex}`)
-  const contentItems = module.contentItems?.length
-    ? module.contentItems
+  const moduleKey = String(module?._id || `${module?.title || 'module'}-${moduleIndex}`)
+  const rawContentItems = normalizeArray(module?.contentItems)
+  const rawLessons = normalizeLessons(module?.lessons)
+  const orderedContentItems = rawContentItems.length
+    ? rawContentItems
       .map((item, index) => ({ item, index }))
       .sort((left, right) => (left.item.order ?? left.index) - (right.item.order ?? right.index))
-      .map(({ item, index }) => ({
+    : []
+  const legacyVideoItems = orderedContentItems.length
+    && !orderedContentItems.some(({ item }) => item.type === 'video-lesson')
+    ? rawLessons.map((lesson, index) => ({
+      ...lesson,
+      type: 'video-lesson',
+      _learningKey: String(lesson._id || `${moduleKey}-lesson-${index}`),
+      _moduleKey: moduleKey,
+    }))
+    : []
+  const contentItems = orderedContentItems.length
+    ? [
+      ...legacyVideoItems,
+      ...orderedContentItems.map(({ item, index }) => ({
         ...item,
         _learningKey: String(item._id || `${moduleKey}-item-${index}`),
         _moduleKey: moduleKey,
-      }))
-    : (module.lessons || []).map((lesson, index) => ({
+      })),
+    ]
+    : rawLessons.map((lesson, index) => ({
       ...lesson,
       type: 'video-lesson',
       _learningKey: String(lesson._id || `${moduleKey}-lesson-${index}`),
       _moduleKey: moduleKey,
     }))
   const items = [...contentItems]
-  if (module.quiz?.questions?.length && !contentItems.some((item) => item.type === 'quiz')) {
+  if (module?.quiz?.questions?.length && !contentItems.some((item) => item.type === 'quiz')) {
     items.push({
       type: 'quiz',
       title: module.quiz.title || 'Module quiz',
@@ -2067,9 +2528,15 @@ function getStudentContentLabel(type) {
   }[type] || 'Course content'
 }
 
-function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submissions, onSubmitted, onLearningDataChanged, onLogout, showHeader = true, canSubmit = true }) {
+function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submissions, onSubmitted, onLearningDataChanged, onLogout, onContinueLearning, showHeader = true, canSubmit = true }) {
   const [file, setFile] = useState(null)
   const [submitting, setSubmitting] = useState(false)
+  const [reviewRequesting, setReviewRequesting] = useState(false)
+  const [reviewFormOpen, setReviewFormOpen] = useState(false)
+  const [selectedReviewReason, setSelectedReviewReason] = useState('')
+  const [otherReviewExplanation, setOtherReviewExplanation] = useState('')
+  const [reviewComments, setReviewComments] = useState('')
+  const [clockNow, setClockNow] = useState(Date.now())
   const [error, setError] = useState('')
   const [isDragging, setIsDragging] = useState(false)
   const [filePreviewUrl, setFilePreviewUrl] = useState('')
@@ -2077,9 +2544,74 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
   const assignmentSubmissions = submissions.filter((submission) => (
     String(submission.assignmentId) === String(assignment._id)
   ))
-  const latestSubmission = assignmentSubmissions
+  const latestRecord = assignmentSubmissions
     .slice()
     .sort((left, right) => new Date(right.submittedAt || 0).getTime() - new Date(left.submittedAt || 0).getTime())[0]
+  const downloadableSubmissions = assignmentSubmissions.filter((submission) => (
+    submission._id && submission.fileName
+  ))
+  const latestSubmission = assignmentSubmissions
+    .filter((submission) => (
+      submission.academicStatus === 'Passed'
+      || submission.academicStatus === 'Failed'
+      || submission.aiEvaluation
+    ))
+    .slice()
+    .sort((left, right) => new Date(right.submittedAt || 0).getTime() - new Date(left.submittedAt || 0).getTime())[0]
+    || latestRecord
+  const attemptState = assignmentSubmissions.find((submission) => submission.attemptState)?.attemptState || {
+    maxAttempts: 3,
+    currentAttemptNumber: latestRecord?.attemptNumber || 0,
+    attemptsUsed: 0,
+    failedAttempts: 0,
+    remainingAttempts: 3,
+    canSubmit: !latestRecord,
+    hasPassed: false,
+    hasTechnicalFailure: false,
+    hasPendingGrading: false,
+    hasPendingHumanReview: false,
+    isLocked: false,
+    lockoutUntil: null,
+    retrySubmissionId: null,
+  }
+  const lockoutUntilTime = attemptState.lockoutUntil ? new Date(attemptState.lockoutUntil).getTime() : 0
+  const isLocked = Boolean(lockoutUntilTime > clockNow)
+  const lockoutExpired = Boolean(lockoutUntilTime && lockoutUntilTime <= clockNow)
+  const failedAttempts = lockoutExpired
+    ? 0
+    : Number.isInteger(attemptState.failedAttempts)
+      ? attemptState.failedAttempts
+      : 0
+  const remainingAttempts = lockoutExpired
+    ? 3
+    : Number.isInteger(attemptState.remainingAttempts)
+      ? attemptState.remainingAttempts
+      : Math.max(0, 3 - failedAttempts)
+  const attemptsUsed = lockoutExpired
+    ? 0
+    : Number.isInteger(attemptState.attemptsUsed)
+      ? attemptState.attemptsUsed
+      : failedAttempts
+  const canSubmitAttempt = canSubmit
+    && !attemptState.hasPassed
+    && !attemptState.hasPendingGrading
+    && !attemptState.hasPendingHumanReview
+    && !isLocked
+    && remainingAttempts > 0
+  const displayAttemptNumber = lockoutExpired
+    ? 1
+    : attemptState.hasPassed || attemptState.hasPendingGrading || attemptState.hasPendingHumanReview
+      ? latestRecord?.attemptNumber || attemptState.currentAttemptNumber || 1
+      : attemptState.nextAttemptNumber || latestRecord?.attemptNumber || 1
+  const lockoutRemainingMs = isLocked ? lockoutUntilTime - clockNow : 0
+  const lockoutCountdown = [
+    Math.floor(lockoutRemainingMs / 3_600_000),
+    Math.floor((lockoutRemainingMs % 3_600_000) / 60_000),
+    Math.floor((lockoutRemainingMs % 60_000) / 1000),
+  ].map((value) => String(value).padStart(2, '0')).join(':')
+  const isWaitingForGrading = submitting
+    || attemptState.hasPendingGrading
+    || ['Submitted', 'AI Grading'].includes(latestRecord?.gradingStatus)
 
   useEffect(() => {
     if (!file) {
@@ -2091,11 +2623,17 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
     return () => URL.revokeObjectURL(previewUrl)
   }, [file])
 
+  useEffect(() => {
+    if (!lockoutUntilTime || lockoutUntilTime <= Date.now()) return undefined
+    const timerId = window.setInterval(() => setClockNow(Date.now()), 1000)
+    return () => window.clearInterval(timerId)
+  }, [lockoutUntilTime])
+
   function chooseAssignmentFile(candidate) {
     if (!candidate) return
     const extension = candidate.name.slice(candidate.name.lastIndexOf('.')).toLowerCase()
-    if (!['.pdf', '.docx', '.txt'].includes(extension)) {
-      setError('Choose a PDF, DOCX, or TXT file.')
+    if (!['.pdf', '.docx', '.txt', '.jpg', '.jpeg', '.png', '.webp'].includes(extension)) {
+      setError('Choose a PDF, DOCX, TXT, JPEG, PNG, or WEBP file.')
       return
     }
     if (!candidate.size || candidate.size > 10 * 1024 * 1024) {
@@ -2113,6 +2651,7 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
   }
 
   function getSubmissionStatusLabel(submission) {
+    if (submission.gradingStatus) return submission.gradingStatus
     if (submission.reviewStatus === 'approved') return 'Approved'
     if (submission.reviewStatus === 'rejected') return 'Rejected — resubmission required'
     return 'Awaiting Admin Review'
@@ -2136,26 +2675,72 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
       }
       const formData = new FormData()
       formData.append('file', file)
-      const response = await fetch(`${API_BASE_URL}/courses/${encodeURIComponent(courseId)}/assignments/${encodeURIComponent(assignment._id)}/submissions`, {
+      const response = await fetchWithAuth(`${API_BASE_URL}/courses/${encodeURIComponent(courseId)}/assignments/${encodeURIComponent(assignment._id)}/submissions`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${auth.token}` },
         body: formData,
-      })
+      }, API_BASE_URL, auth.token)
       const result = await response.json()
       if (isInvalidSessionResponse(response, result)) {
         onLogout()
         return
       }
+      if (result.submission?._id) {
+        onSubmitted(result.submission)
+        onLearningDataChanged()
+      }
       if (!response.ok) throw new Error(result.message || 'Your assignment could not be submitted.')
       if (!result.submission?._id) throw new Error('The server did not confirm your assignment submission.')
-      onSubmitted(result.submission)
       setFile(null)
       form.reset()
-      onLearningDataChanged()
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : 'Your assignment could not be submitted.')
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  async function requestHumanReview(event) {
+    event.preventDefault()
+    if (!latestSubmission?._id) return
+    setReviewRequesting(true)
+    setError('')
+    try {
+      const savedAuth = sessionStorage.getItem('lms.auth')
+      const auth = savedAuth ? JSON.parse(savedAuth) : null
+      if (typeof auth?.token !== 'string') {
+        onLogout()
+        return
+      }
+      const response = await fetchWithAuth(`${API_BASE_URL}/assignment-submissions/${encodeURIComponent(latestSubmission._id)}/human-review-requests`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${auth.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          reasons: selectedReviewReason ? [selectedReviewReason] : [],
+          otherExplanation: otherReviewExplanation,
+          comments: reviewComments,
+        }),
+      }, API_BASE_URL, auth.token)
+      const result = await response.json()
+      if (isInvalidSessionResponse(response, result)) {
+        onLogout()
+        return
+      }
+      if (!response.ok) throw new Error(result.message || 'The human re-evaluation could not be requested.')
+      if (!result.submission?._id) throw new Error('The server did not confirm your re-evaluation request.')
+      onSubmitted(result.submission)
+      onLearningDataChanged()
+      setReviewFormOpen(false)
+      setSelectedReviewReason('')
+      setOtherReviewExplanation('')
+      setReviewComments('')
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'The human re-evaluation could not be requested.')
+    } finally {
+      setReviewRequesting(false)
     }
   }
 
@@ -2167,10 +2752,11 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
           <h2>{assignment.title}</h2>
           <span className="student-course-assignment-view__badge"><Icon name="clipboardCheck" size={13} />Assignment</span>
           {latestSubmission && (
-            <span className={`student-course-assignment-view__status is-${latestSubmission.reviewStatus || 'pending'}`}>
+            <span className={`student-course-assignment-view__status is-${latestSubmission.gradingStatus || latestSubmission.reviewStatus === 'approved' || getAssignmentAcademicResult(latestSubmission, assignment) ? 'evaluated' : latestSubmission.reviewStatus || 'pending'}`}>
               {getSubmissionStatusLabel(latestSubmission)}
             </span>
           )}
+          {latestSubmission && <AssignmentAcademicBadge submission={latestSubmission} assignment={assignment} />}
         </header>
       )}
       {assignment.description && <p className="student-course-activity__instructions">{assignment.description}</p>}
@@ -2191,13 +2777,51 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
           <span>{Number(assignment.points) || 0} points</span>
         </div>
       )}
+      <div className="student-assignment-attempt-summary">
+        <strong>Attempted: {attemptsUsed} of 3</strong>
+        <span>Remaining: {remainingAttempts}</span>
+      </div>
+      {isLocked && (
+        <div className="student-assignment-attempt-lockout" role="status">
+          <p>You have used all 3 attempts and have not achieved the required passing score of 75%. You can submit again after the 24-hour waiting period.</p>
+          <strong>Next submission available in {lockoutCountdown}</strong>
+        </div>
+      )}
+      {lockoutExpired && !attemptState.hasPassed && (
+        <p className="student-assignment-attempt-unlocked" role="status">
+          Your waiting period has ended. Your attempts have reset, and you can submit again.
+        </p>
+      )}
+      {attemptState.hasPassed && (
+        <p className="student-assignment-attempt-passed" role="status">
+          This assignment is passed. Further submissions are disabled.
+        </p>
+      )}
+      {isWaitingForGrading && (
+        <div className="student-assignment-attempt-pending" role="status">
+          <strong>Assignment Being Processed</strong>
+          <p>
+            Your assignment is being evaluated. Until then, continue your learning.
+          </p>
+          {!submitting && latestRecord?._id && onContinueLearning && (
+            <button type="button" className="student-button" onClick={onContinueLearning}>
+              Continue Learning
+            </button>
+          )}
+        </div>
+      )}
+      {attemptState.hasPendingHumanReview && (
+        <p className="student-assignment-attempt-pending" role="status">
+          A human re-evaluation is pending. You can submit another attempt after the review is complete.
+        </p>
+      )}
       {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
-      {canSubmit && (
+      {canSubmitAttempt && (
         <form className={`student-assignment-submit${showHeader ? ' student-assignment-submit--card' : ''}`} onSubmit={submitAssignment}>
           {showHeader && (
             <div className="student-assignment-submit__heading">
               <span className="student-assignment-submit__upload-icon"><Icon name="file" size={20} /></span>
-              <span><strong>Upload your work</strong><small>Upload a PDF, DOCX, or TXT file (max 10 MB)</small></span>
+              <span><strong>{latestRecord ? 'Resubmit Assignment' : 'Upload your work'}</strong><small>Upload a PDF, DOCX, TXT, JPEG, PNG, or WEBP file (max 10 MB)</small></span>
             </div>
           )}
           {showHeader ? (
@@ -2220,7 +2844,7 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
                 ref={fileInputRef}
                 className="student-assignment-submit__file-input"
                 type="file"
-                accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
+                accept=".pdf,.docx,.txt,.jpg,.jpeg,.png,.webp,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,image/jpeg,image/png,image/webp"
                 onChange={(event) => chooseAssignmentFile(event.currentTarget.files?.[0])}
               />
               <Icon name="file" size={32} />
@@ -2230,10 +2854,10 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
             </label>
           ) : (
             <label>
-              <span>Upload your work (PDF, DOCX, or TXT · max 10 MB)</span>
+              <span>Upload your work (PDF, DOCX, TXT, JPEG, PNG, or WEBP · max 10 MB)</span>
               <input
                 type="file"
-                accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
+                accept=".pdf,.docx,.txt,.jpg,.jpeg,.png,.webp,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,image/jpeg,image/png,image/webp"
                 onChange={(event) => chooseAssignmentFile(event.currentTarget.files?.[0])}
               />
             </label>
@@ -2260,25 +2884,194 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
             type="submit"
             disabled={submitting || !assignment._id || (showHeader && !file)}
           >
-            {submitting ? 'Submitting…' : showHeader ? <>Submit assignment <Icon name="arrow" size={15} /></> : 'Submit assignment'}
+            {submitting ? 'Submitting…' : showHeader ? <>{latestRecord ? 'Resubmit Assignment' : 'Submit assignment'} <Icon name="arrow" size={15} /></> : latestRecord ? 'Resubmit Assignment' : 'Submit assignment'}
           </button>
         </form>
       )}
-      {showHeader && latestSubmission && (
-        <div className="student-assignment-submit__review">
+      {latestSubmission && (
+        <section className="student-assignment-submit__review" aria-label="Assignment evaluation">
           <strong>{getSubmissionStatusLabel(latestSubmission)}</strong>
-          {latestSubmission.reviewStatus === 'approved' && latestSubmission.marksObtained !== null && latestSubmission.marksObtained !== undefined && (
-            <span>Score: {latestSubmission.marksObtained} / {assignment.points ?? assignment.maximumMarks ?? '—'}</span>
+          <AssignmentAcademicBadge submission={latestSubmission} assignment={assignment} />
+          {latestSubmission.gradingError && <p>{latestSubmission.gradingError}</p>}
+          {(latestSubmission.gradingStatus === 'AI Graded' || latestSubmission.gradingStatus === 'Re-evaluation Requested'
+            || latestSubmission.gradingStatus === 'Human Review' || latestSubmission.gradingStatus === 'Final Result')
+            && latestSubmission.aiEvaluation && (
+              <>
+                <span>AI marks: {latestSubmission.aiEvaluation.totalMarks} / {latestSubmission.aiEvaluation.maximumMarks}</span>
+                <div className="student-assignment-evaluation__criteria">
+                  <strong>Criterion breakdown</strong>
+                  {latestSubmission.aiEvaluation.criteria.map((criterion, index) => (
+                    <div key={`${criterion.name}-${index}`}>
+                      <strong>{criterion.name}: {criterion.marks} / {criterion.maximumMarks}</strong>
+                      <p>{criterion.feedback}</p>
+                    </div>
+                  ))}
+                </div>
+                {latestSubmission.aiEvaluation.strengths?.length > 0 && (
+                  <p><strong>Strengths:</strong> {latestSubmission.aiEvaluation.strengths.join(' · ')}</p>
+                )}
+                {latestSubmission.aiEvaluation.improvements?.length > 0 && (
+                  <p><strong>Areas to improve:</strong> {latestSubmission.aiEvaluation.improvements.join(' · ')}</p>
+                )}
+                <p><strong>AI feedback:</strong> {latestSubmission.aiEvaluation.overallFeedback}</p>
+              </>
+            )}
+          {latestSubmission.gradingStatus === 'Final Result' && (
+            <div className="student-assignment-evaluation__final">
+              <strong>Final human-reviewed result: {latestSubmission.finalMarks} / {latestSubmission.aiEvaluation?.maximumMarks ?? assignment.points}</strong>
+              <AssignmentAcademicBadge submission={latestSubmission} assignment={assignment} />
+              {latestSubmission.humanEvaluation?.criteria?.map((criterion, index) => (
+                <div key={`human-${criterion.name}-${index}`}>
+                  <strong>{criterion.name}: {criterion.marks} / {criterion.maximumMarks}</strong>
+                  <p>{criterion.feedback}</p>
+                </div>
+              ))}
+              {latestSubmission.finalFeedback && <p>{latestSubmission.finalFeedback}</p>}
+            </div>
           )}
-          {(latestSubmission.reviewComment || latestSubmission.feedback) && (
-            <p>{latestSubmission.reviewComment || latestSubmission.feedback}</p>
+          {!latestSubmission.gradingStatus && (
+            <>
+              {latestSubmission.marksObtained !== null && latestSubmission.marksObtained !== undefined
+                && <span>Score: {latestSubmission.marksObtained} / {assignment.points ?? assignment.maximumMarks ?? '—'}</span>}
+              {(latestSubmission.reviewComment || latestSubmission.feedback)
+                && <p>{latestSubmission.reviewComment || latestSubmission.feedback}</p>}
+            </>
           )}
-        </div>
+          {latestSubmission.attemptNumber && (
+            <p><strong>Attempt:</strong> {latestSubmission.attemptNumber} of 3</p>
+          )}
+          {latestSubmission.humanReviewRequest?.reasons?.length > 0 && (
+            <div className="student-assignment-evaluation__request-summary">
+              <strong>Human re-evaluation reason</strong>
+              <ul>{latestSubmission.humanReviewRequest.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
+              {latestSubmission.humanReviewRequest.otherExplanation && (
+                <p><strong>Other explanation:</strong> {latestSubmission.humanReviewRequest.otherExplanation}</p>
+              )}
+              {latestSubmission.humanReviewRequest.comments && (
+                <p><strong>Additional comments:</strong> {latestSubmission.humanReviewRequest.comments}</p>
+              )}
+            </div>
+          )}
+          {!latestSubmission.humanReviewRequest?.reasons?.length && latestSubmission.humanReviewRequest?.reason && (
+            <p><strong>Re-evaluation reason:</strong> {latestSubmission.humanReviewRequest.reason}</p>
+          )}
+          {latestSubmission.gradingStatus === 'AI Graded' && (
+            <>
+              {!reviewFormOpen ? (
+                <button
+                  type="button"
+                  className="student-button"
+                  onClick={() => setReviewFormOpen(true)}
+                >
+                  Request Human Re-evaluation
+                </button>
+              ) : (
+                <form className="student-assignment-evaluation__request" onSubmit={requestHumanReview}>
+                  <label className="student-assignment-evaluation__text-field">
+                    Reason for requesting human review
+                    <select
+                      required
+                      value={selectedReviewReason}
+                      onChange={(event) => {
+                        const reason = event.target.value
+                        setSelectedReviewReason(reason)
+                        if (reason !== HUMAN_REVIEW_OTHER_REASON) setOtherReviewExplanation('')
+                      }}
+                    >
+                      <option value="" disabled>Select a reason</option>
+                      {HUMAN_REVIEW_REASON_OPTIONS.map((reason) => (
+                        <option key={reason} value={reason}>{reason}</option>
+                      ))}
+                    </select>
+                  </label>
+                  {selectedReviewReason === HUMAN_REVIEW_OTHER_REASON && (
+                    <label className="student-assignment-evaluation__text-field">
+                      Please explain your reason
+                      <textarea
+                        rows="3"
+                        maxLength="2000"
+                        required
+                        value={otherReviewExplanation}
+                        onChange={(event) => setOtherReviewExplanation(event.target.value)}
+                      />
+                    </label>
+                  )}
+                  <label className="student-assignment-evaluation__text-field">
+                    Additional comments (optional)
+                    <textarea
+                      rows="3"
+                      maxLength="2000"
+                      value={reviewComments}
+                      onChange={(event) => setReviewComments(event.target.value)}
+                    />
+                  </label>
+                  <div className="student-assignment-evaluation__request-actions">
+                    <button
+                      type="submit"
+                      className="student-button"
+                      disabled={reviewRequesting || !selectedReviewReason
+                        || (selectedReviewReason === HUMAN_REVIEW_OTHER_REASON && !otherReviewExplanation.trim())}
+                    >
+                      {reviewRequesting ? 'Requesting…' : 'Submit Human Review Request'}
+                    </button>
+                    <button
+                      type="button"
+                      className="student-button student-assignment-evaluation__request-cancel"
+                      disabled={reviewRequesting}
+                      onClick={() => {
+                        setReviewFormOpen(false)
+                        setSelectedReviewReason('')
+                        setOtherReviewExplanation('')
+                        setReviewComments('')
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              )}
+            </>
+          )}
+        </section>
       )}
-      {assignmentSubmissions.length > 0 && (
+      {assignmentSubmissions.length > 1 && (
+        <details className="student-assignment-attempt-history">
+          <summary>Previous attempt history ({assignmentSubmissions.length})</summary>
+          {[...assignmentSubmissions]
+            .sort((left, right) => new Date(right.submittedAt || 0).getTime() - new Date(left.submittedAt || 0).getTime())
+            .map((attempt) => {
+              const evaluation = attempt.humanEvaluation || attempt.aiEvaluation
+              const marks = attempt.finalMarks ?? attempt.marksObtained ?? attempt.aiEvaluation?.totalMarks
+              const maximumMarks = attempt.aiEvaluation?.maximumMarks ?? evaluation?.maximumMarks ?? assignment.points
+              return (
+                <article key={attempt._id} className="student-assignment-attempt-history__item">
+                  <strong>Attempt {attempt.attemptNumber || '—'} · {marks === undefined ? 'No marks' : `${marks} / ${maximumMarks}`}</strong>
+                  <span>{attempt.academicStatus || attempt.gradingStatus || 'Submitted'}</span>
+                  {attempt.aiEvaluation?.overallFeedback && <p><strong>AI feedback:</strong> {attempt.aiEvaluation.overallFeedback}</p>}
+                  {attempt.aiEvaluation?.criteria?.length > 0 && (
+                    <ul>
+                      {attempt.aiEvaluation.criteria.map((criterion, index) => (
+                        <li key={`${attempt._id}-${criterion.name}-${index}`}>
+                          <strong>{criterion.name}: {criterion.marks} / {criterion.maximumMarks}</strong>
+                          {criterion.feedback && <span> — {criterion.feedback}</span>}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {attempt.finalFeedback && <p><strong>Human feedback:</strong> {attempt.finalFeedback}</p>}
+                  {attempt.gradingError && <p>{attempt.gradingError}</p>}
+                  {attempt.humanReviewRequest?.reasons?.length > 0 && (
+                    <p><strong>Human review requested:</strong> {attempt.humanReviewRequest.reasons.join(' · ')}</p>
+                  )}
+                </article>
+              )
+            })}
+        </details>
+      )}
+      {downloadableSubmissions.length > 0 && (
         <div className="student-assignment-submissions">
           <h3>Submissions</h3>
-          {assignmentSubmissions.map((submission) => (
+          {downloadableSubmissions.map((submission) => (
             <a className={showHeader ? 'student-assignment-submissions__file' : undefined} key={submission._id} href={`${API_BASE_URL}/assignment-submissions/${encodeURIComponent(submission._id)}/download`} onClick={async (event) => {
               event.preventDefault()
               try {
@@ -2288,7 +3081,9 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
                   onLogout()
                   return
                 }
-                const response = await fetch(event.currentTarget.href, { headers: { Authorization: `Bearer ${auth.token}` } })
+                const response = await fetchWithAuth(event.currentTarget.href, {
+                  headers: { Authorization: `Bearer ${auth.token}` },
+                }, API_BASE_URL, auth.token)
                 if (isInvalidSessionResponse(response, {})) {
                   onLogout()
                   return
@@ -2323,11 +3118,19 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
 function StudentAssignmentDetail({ entry, onClose, onLogout, onSubmitted, onLearningDataChanged }) {
   const { assignment, submission, status } = entry
   const isRejected = submission?.reviewStatus === 'rejected'
-  const feedback = submission?.reviewComment || submission?.feedback
+  const feedback = submission?.finalFeedback || submission?.aiEvaluation?.overallFeedback || submission?.reviewComment || submission?.feedback
   const hasScore = submission?.marksObtained !== null
     && submission?.marksObtained !== undefined
     && Number.isFinite(Number(submission.marksObtained))
   const maximumMarks = assignment.points ?? assignment.maximumMarks
+  const academicResult = getAssignmentAcademicResult(submission, assignment)
+  const reviewTone = academicResult?.status === 'Failed'
+    ? 'failed'
+    : academicResult?.status === 'Passed'
+      ? 'passed'
+      : submission?.gradingStatus
+        ? 'evaluated'
+        : isRejected ? 'rejected' : 'submitted'
 
   return (
     <div className="student-assignment-dialog" role="presentation" onMouseDown={(event) => {
@@ -2342,24 +3145,24 @@ function StudentAssignmentDetail({ entry, onClose, onLogout, onSubmitted, onLear
           <button type="button" className="student-assignment-dialog__close" onClick={onClose} aria-label="Close assignment details">×</button>
         </header>
         {submission && (
-          <div className={`student-assignment-dialog__review is-${isRejected ? 'rejected' : status}`}>
-            <strong>{isRejected ? 'Rejected — resubmission required' : status === 'graded' ? 'Approved' : 'Awaiting Admin Review'}</strong>
-            {hasScore && status === 'graded' && (
-              <span>Score: {submission.marksObtained}{maximumMarks !== undefined ? ` / ${maximumMarks}` : ''}</span>
+          <div className={`student-assignment-dialog__review is-${reviewTone}`}>
+            <strong>{isRejected ? 'Rejected — resubmission required' : getAssignmentStatusLabel(submission, status)}</strong>
+            <AssignmentAcademicBadge submission={submission} assignment={assignment} />
+            {hasScore && status === 'graded' && !submission.aiEvaluation && (
+              <span>Score: {submission.finalMarks ?? submission.marksObtained}{maximumMarks !== undefined ? ` / ${maximumMarks}` : ''}</span>
             )}
-            {feedback && <p>{feedback}</p>}
+            {feedback && !submission.aiEvaluation && <p>{feedback}</p>}
           </div>
         )}
         <StudentAssignmentPanel
           courseId={entry.courseId}
           enrollmentId={entry.enrollmentId}
           assignment={assignment}
-          submissions={submission ? [submission] : []}
+          submissions={entry.submissionHistory || (submission ? [submission] : [])}
           onSubmitted={onSubmitted}
           onLearningDataChanged={onLearningDataChanged}
           onLogout={onLogout}
           showHeader={false}
-          canSubmit={status === 'pending'}
         />
       </section>
     </div>
@@ -2392,117 +3195,65 @@ function StudentNotePanel({ item }) {
 }
 
 function EnrollmentCourseCard({ enrollment }) {
-  const course = enrollment?.courseId && typeof enrollment.courseId === 'object'
-    ? enrollment.courseId
-    : {}
-  const courseId = String(
-    (enrollment?.courseId && typeof enrollment.courseId === 'object' ? enrollment.courseId._id : null) ||
-    enrollment?.courseId ||
-    enrollment?.course?._id ||
-    ''
-  )
+  const course = enrollment.courseId
+  const courseId = String(course._id)
   const counts = getCourseCounts(course)
-  const progressData = getCourseProgress(enrollment)
-  const {
-    percentage,
-    isCompleted,
-    nextActivity,
-  } = progressData
-
+  const { completedCount, totalCount, percentage } = getCourseProgress(enrollment)
   const difficultyLabels = {
     beginner: 'Beginner',
     intermediate: 'Intermediate',
     advanced: 'Advanced',
     'all-levels': 'All levels',
   }
-
-  const targetActivity = nextActivity || { id: '', type: 'video-lesson' }
-  const coursePath = targetActivity?.id
-    ? targetActivity.type === 'video-lesson'
-      ? `/student/course/${encodeURIComponent(courseId)}/learn?lesson=${encodeURIComponent(targetActivity.id)}`
-      : `/student/course/${encodeURIComponent(courseId)}/learn?activity=${encodeURIComponent(targetActivity.id)}&type=${targetActivity.type}`
-    : `/student/course/${encodeURIComponent(courseId)}/learn`
-
-  const nextLessonTitle = nextActivity?.title || ''
+  const coursePath = `/student/course/${encodeURIComponent(courseId)}/learn`
 
   return (
-    <article className="student-enrolled-course">
-      {course.thumbnailUrl ? (
-        <img
-          className="student-enrolled-course__thumbnail"
-          src={course.thumbnailUrl}
-          alt={`${course.title} course thumbnail`}
-        />
-      ) : (
-        <div
-          className="student-enrolled-course__thumbnail student-enrolled-course__thumbnail--empty"
-          aria-label="No course thumbnail"
-        >
-          <Icon name="book" size={28} />
-        </div>
-      )}
-
-      <div className="student-enrolled-course__body">
-        <div className="student-enrolled-course__header">
-          <div className="student-enrolled-course__meta-top">
-            <span className="student-enrolled-course__category">
-              {course.category || 'General'}
-            </span>
-            <span className="student-enrolled-course__meta-dot">·</span>
-            <span className="student-enrolled-course__difficulty">
-              {difficultyLabels[course.difficulty] || 'All levels'}
-            </span>
+    <article className="student-available-course student-enrolled-course">
+      {course.thumbnailUrl
+        ? <img className="student-available-course__thumbnail" src={course.thumbnailUrl} alt={`${course.title} course thumbnail`} />
+        : <div className="student-available-course__thumbnail student-available-course__thumbnail--empty" aria-label="No course thumbnail"><Icon name="book" size={28} /></div>}
+      <div className="student-available-course__body student-enrolled-course__body">
+        <div className="student-available-course__heading">
+          <div>
+            <p className="student-available-course__category">
+              {course.category || 'Other'} <span>·</span> {difficultyLabels[course.difficulty] || 'Not specified'}
+            </p>
+            <h3>{course.title}</h3>
           </div>
-          <span className={`student-enrolled-course__status ${isCompleted ? 'is-completed' : 'is-progress'}`}>
-            {isCompleted ? 'Completed' : 'In Progress'}
-          </span>
+          <div className="student-enrolled-course__statuses">
+            <span className="student-available-course__status">
+              {course.status === 'published' ? 'Published' : 'Enrolled'}
+            </span>
+            {enrollment.status === 'completed' && (
+              <span className="student-enrolled-course__completed">Completed</span>
+            )}
+          </div>
         </div>
-
-        <h3 className="student-enrolled-course__title" title={course.title}>
-          {course.title}
-        </h3>
-
-        <div className="student-enrolled-course__curriculum-meta">
-          <span>{counts.modules} {counts.modules === 1 ? 'module' : 'modules'}</span>
-          <span className="student-enrolled-course__meta-dot">·</span>
-          <span>{counts.lessons} {counts.lessons === 1 ? 'lesson' : 'lessons'}</span>
+        <p className="student-available-course__description">{course.description || course.detailedDescription || 'No course description is available.'}</p>
+        <div className="student-available-course__meta">
+          <span>{counts.modules} modules</span>
+          <span>{counts.lessons} lessons</span>
+          <span>{formatCourseDuration(course.estimatedDurationMinutes)}</span>
         </div>
-
         <div className="student-enrolled-course__progress">
           <div className="student-enrolled-course__progress-copy">
-            <span>Overall Course Progress</span>
-            <strong>{percentage}%</strong>
+            <span>Learning progress</span>
+            <strong>{completedCount} of {totalCount} activities · {percentage}%</strong>
           </div>
-          <div
-            className="student-enrolled-course__progress-track"
-            role="progressbar"
-            aria-valuemin="0"
-            aria-valuemax="100"
-            aria-valuenow={percentage}
-            aria-label={`${course.title} progress`}
-          >
-            <span
-              className={isCompleted ? 'is-completed' : ''}
-              style={{ width: `${Math.min(100, percentage)}%` }}
-            />
+          <div className="student-enrolled-course__progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={percentage} aria-label={`${course.title} progress`}>
+            <span style={{ width: `${percentage}%` }} />
           </div>
-
-          {!isCompleted && nextLessonTitle && (
-            <p className="student-enrolled-course__next-lesson">
-              <span className="student-enrolled-course__next-label">Next lesson:</span>{' '}
-              <span className="student-enrolled-course__next-title" title={nextLessonTitle}>
-                {nextLessonTitle}
-              </span>
-            </p>
-          )}
         </div>
-
-        <Link
-          className="student-enrolled-course__continue"
-          to={`/student/course/${encodeURIComponent(courseId)}/details`}
-        >
-          <span>Course Details →</span>
-        </Link>
+        <div className="student-enrolled-course__actions">
+          <Link
+            className="student-enrolled-course__continue"
+            to={coursePath}
+            onClick={() => seedStudentCourseLearning(enrollment)}
+          >
+            Continue Learning
+            <Icon name="arrow" size={16} />
+          </Link>
+        </div>
       </div>
     </article>
   )
@@ -2544,22 +3295,38 @@ function EnrollmentCourseSkeletons() {
   )
 }
 
-function StudentDashboardCourses({ onLogout, selectedCategory, refreshKey }) {
+function StudentDashboardCourses({ onLogout, selectedCategory }) {
+  const [progressRefresh, setProgressRefresh] = useState(0)
   const [initialEnrollments] = useState(getCachedStudentPageEnrollments)
   const [enrollments, setEnrollments] = useState(initialEnrollments || [])
   const [loading, setLoading] = useState(initialEnrollments === null)
   const [error, setError] = useState('')
+  const [averageScores, setAverageScores] = useState({})
+  const [scoresLoading, setScoresLoading] = useState(false)
+  const [scoreError, setScoreError] = useState('')
+
+  useEffect(() => {
+    const refreshProgress = () => {
+      invalidateStudentLearningPageCaches()
+      setProgressRefresh((refresh) => refresh + 1)
+    }
+    window.addEventListener(STUDENT_LEARNING_PROGRESS_UPDATED_EVENT, refreshProgress)
+    return () => window.removeEventListener(STUDENT_LEARNING_PROGRESS_UPDATED_EVENT, refreshProgress)
+  }, [])
 
   useEffect(() => {
     let active = true
     fetchStudentPageEnrollments(onLogout)
-      .then((loadedEnrollments) => { if (active) setEnrollments(loadedEnrollments) })
+      .then((loadedEnrollments) => {
+        if (!active) return
+        setEnrollments(loadedEnrollments)
+      })
       .catch((loadError) => {
         if (active) setError(loadError instanceof Error ? loadError.message : 'Your courses could not be loaded.')
       })
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
-  }, [onLogout, refreshKey])
+  }, [onLogout, progressRefresh])
 
   const categoryEnrollments = selectedCategory
     ? enrollments.filter((entry) => (
@@ -2569,23 +3336,194 @@ function StudentDashboardCourses({ onLogout, selectedCategory, refreshKey }) {
     ))
     : enrollments.slice(0, 3)
 
+  const scoreCourseIds = [...new Set(categoryEnrollments
+    .filter((entry) => entry.courseId && typeof entry.courseId === 'object' && entry.courseId._id)
+    .map((entry) => String(entry.courseId._id)))]
+  const scoreCourseIdsKey = scoreCourseIds.join('|')
+  const scoreAttemptDataKey = categoryEnrollments.map((entry) => {
+    const courseId = String(entry.courseId?._id || '')
+    const attempts = entry.quizAttempts
+    return `${courseId}:${Array.isArray(attempts)
+      ? attempts.map((attempt) => [
+        attempt.status,
+        attempt.scorePercentage,
+        attempt.earnedPoints,
+        attempt.totalPoints,
+      ].join(',')).join(';')
+      : 'missing'}`
+  }).join('|')
+
+  useEffect(() => {
+    let active = true
+    const knownScores = {}
+    const missingCourseIds = []
+    categoryEnrollments.forEach((entry) => {
+      const courseId = String(entry.courseId?._id || '')
+      if (!courseId) return
+      if (Array.isArray(entry.quizAttempts)) {
+        knownScores[courseId] = getStudentAverageQuizScore(entry.quizAttempts)
+      } else {
+        missingCourseIds.push(courseId)
+      }
+    })
+    setAverageScores(knownScores)
+    if (!missingCourseIds.length) {
+      setScoreError('')
+      setScoresLoading(false)
+      return () => { active = false }
+    }
+
+    setScoresLoading(true)
+    setScoreError('')
+    Promise.allSettled(missingCourseIds.map(async (courseId) => {
+      const result = await fetchStudentPageCourseContent(courseId, onLogout)
+      return getStudentAverageQuizScore(result.quizAttempts)
+    }))
+      .then((results) => {
+        if (!active) return
+        const nextScores = { ...knownScores }
+        let failed = false
+        results.forEach((result, index) => {
+          if (result.status === 'fulfilled') nextScores[missingCourseIds[index]] = result.value
+          else failed = true
+        })
+        setAverageScores(nextScores)
+        if (failed) setScoreError('Some course average scores could not be loaded.')
+      })
+      .finally(() => {
+        if (active) setScoresLoading(false)
+      })
+
+    return () => { active = false }
+  }, [onLogout, progressRefresh, scoreCourseIdsKey, scoreAttemptDataKey])
+
   return loading
-    ? <EnrollmentCourseSkeletons />
+    ? <StudentDashboardCourseTableSkeleton />
     : error && initialEnrollments === null
       ? <p className="student-courses__message is-error" role="alert">{error}</p>
       : <>
         {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
-        <EnrollmentCourseCards
-        enrollments={categoryEnrollments}
-        emptyTitle={selectedCategory ? `No ${selectedCategory} courses yet` : 'No enrolled courses yet'}
-        emptyDescription={selectedCategory
-          ? `Enrolled courses in ${selectedCategory} will appear here.`
-          : 'Courses assigned or enrolled for your account will appear here.'}
-      />
+        {scoreError && <p className="student-courses__message is-error" role="alert">{scoreError}</p>}
+        <StudentDashboardCourseTable
+          enrollments={categoryEnrollments}
+          averageScores={averageScores}
+          scoresLoading={scoresLoading}
+          emptyTitle={selectedCategory ? `No ${selectedCategory} courses yet` : 'No enrolled courses yet'}
+          emptyDescription={selectedCategory
+            ? `Enrolled courses in ${selectedCategory} will appear here.`
+            : 'Courses assigned or enrolled for your account will appear here.'}
+        />
       </>
 }
 
-function StudentAvailableCourseCard({ course, enrollment, onEnroll, enrolling, error }) {
+function getStudentAverageQuizScore(attempts) {
+  const scores = attempts
+    .filter((attempt) => attempt.status === 'submitted')
+    .map(getAttemptScore)
+    .filter((score) => score !== null)
+  return scores.length
+    ? Math.round(scores.reduce((total, score) => total + score, 0) / scores.length)
+    : null
+}
+
+function StudentDashboardCourseTable({
+  enrollments,
+  averageScores,
+  scoresLoading,
+  emptyTitle,
+  emptyDescription,
+}) {
+  const availableEnrollments = enrollments.filter((entry) => entry.courseId && typeof entry.courseId === 'object')
+  if (!availableEnrollments.length) {
+    return enrollments.length
+      ? <p className="student-courses__message is-error" role="alert">Your enrollment exists, but its course details are unavailable. Please contact your administrator.</p>
+      : <EmptyState icon="book" title={emptyTitle} description={emptyDescription} />
+  }
+
+  return (
+    <div className="student-dashboard-course-table" role="table" aria-label="My courses" aria-busy={scoresLoading}>
+      <div className="student-dashboard-course-table__header" role="row">
+        <span role="columnheader">Course</span>
+        <span role="columnheader">Progress</span>
+        <span role="columnheader">Average Score</span>
+      </div>
+      <div role="rowgroup">
+        {availableEnrollments.map((enrollment) => {
+          const course = enrollment.courseId
+          const courseId = String(course._id)
+          const { completedCount, totalCount, percentage } = getCourseProgress(enrollment)
+          const averageScore = averageScores[courseId]
+          return (
+            <div className="student-dashboard-course-table__row" role="row" key={enrollment._id}>
+              <div className="student-dashboard-course-table__course" role="cell">
+                <Link
+                  to={`/student/course/${encodeURIComponent(courseId)}/learn`}
+                  aria-label={`Continue learning ${course.title || 'course'}`}
+                  onClick={() => seedStudentCourseLearning(enrollment)}
+                >
+                  {course.thumbnailUrl
+                    ? <img src={course.thumbnailUrl} alt="" />
+                    : <span className="student-dashboard-course-table__thumbnail-fallback"><Icon name="book" size={20} /></span>}
+                  <strong>{course.title || 'Course'}</strong>
+                </Link>
+              </div>
+              <div className="student-dashboard-course-table__progress" role="cell">
+                <span className="student-dashboard-course-table__mobile-label">Progress</span>
+                <div className="student-dashboard-course-table__progress-copy">
+                  <strong>{percentage}%</strong>
+                  <small>{completedCount} of {totalCount} activities</small>
+                </div>
+                <div
+                  className="student-dashboard-course-table__progress-track"
+                  role="progressbar"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={percentage}
+                  aria-label={`${course.title || 'Course'} progress`}
+                >
+                  <span style={{ width: `${percentage}%` }} />
+                </div>
+              </div>
+              <div className="student-dashboard-course-table__score" role="cell">
+                <span>Average Score</span>
+                <strong>{averageScore === null || averageScore === undefined ? '—' : `${averageScore}%`}</strong>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function StudentDashboardCourseTableSkeleton() {
+  return (
+    <div className="student-dashboard-course-table student-dashboard-course-table--loading" role="status" aria-label="Loading courses" aria-busy="true">
+      <div className="student-dashboard-course-table__header" aria-hidden="true">
+        <span>Course</span>
+        <span>Progress</span>
+        <span>Average Score</span>
+      </div>
+      {[0, 1].map((row) => (
+        <div className="student-dashboard-course-table__row" key={row} aria-hidden="true">
+          <div className="student-dashboard-course-table__course">
+            <span className="student-page-skeleton student-dashboard-course-table__skeleton-thumbnail" />
+            <span className="student-page-skeleton student-dashboard-course-table__skeleton-title" />
+          </div>
+          <div className="student-dashboard-course-table__progress">
+            <span className="student-page-skeleton student-dashboard-course-table__skeleton-progress-copy" />
+            <span className="student-page-skeleton student-dashboard-course-table__skeleton-progress-track" />
+          </div>
+          <div className="student-dashboard-course-table__score">
+            <span className="student-page-skeleton student-dashboard-course-table__skeleton-score" />
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function StudentAvailableCourseCard({ course, enrollment }) {
   const counts = getCourseCounts(course)
   const difficultyLabels = {
     beginner: 'Beginner',
@@ -2604,11 +3542,7 @@ function StudentAvailableCourseCard({ course, enrollment, onEnroll, enrolling, e
             <p className="student-available-course__category">
               {course.category || 'Other'} <span>·</span> {difficultyLabels[course.difficulty] || 'Beginner'}
             </p>
-            <h3>
-              <Link to={`/student/course/${encodeURIComponent(course._id)}/details`} className="student-available-course__title-link">
-                {course.title}
-              </Link>
-            </h3>
+            <h3>{course.title}</h3>
           </div>
           <span className="student-available-course__status">{enrollment ? 'Enrolled' : 'Not Enrolled'}</span>
         </div>
@@ -2618,46 +3552,54 @@ function StudentAvailableCourseCard({ course, enrollment, onEnroll, enrolling, e
           <span>{counts.lessons} lessons</span>
           <span>{formatCourseDuration(course.estimatedDurationMinutes)}</span>
         </div>
-        {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
         {enrollment
-          ? <Link className="student-available-course__action" to={`/student/course/${encodeURIComponent(course._id)}/learn`}>
+          ? <Link
+            className="student-available-course__action"
+            to={`/student/course/${encodeURIComponent(String(course._id))}/learn`}
+            onClick={() => seedStudentCourseLearning({ ...enrollment, courseId: course })}
+          >
             Continue Learning <Icon name="arrow" size={15} />
           </Link>
-          : <button className="student-available-course__action" type="button" onClick={() => onEnroll(course)} disabled={enrolling}>
-            {enrolling ? 'Enrolling…' : 'Enroll Now'} <Icon name="arrow" size={15} />
-          </button>}
+          : <Link className="student-available-course__action" to={`/student/course/${encodeURIComponent(String(course._id))}`}>
+            View Details <Icon name="arrow" size={15} />
+          </Link>}
       </div>
     </article>
   )
 }
 
-function StudentAvailableCourses({ user, onLogout, onLearningDataChanged, onCategoriesLoaded, selectedCategory }) {
-  const [courses, setCourses] = useState([])
-  const [enrollments, setEnrollments] = useState([])
-  const [enrollingCourseId, setEnrollingCourseId] = useState('')
-  const [enrollmentErrors, setEnrollmentErrors] = useState({})
-  const [loading, setLoading] = useState(true)
+function StudentAvailableCourses({ user, onLogout, onCategoriesLoaded, selectedCategory }) {
+  const cachedCourses = getCachedStudentPagePublishedCourses()
+  const cachedEnrollments = getCachedStudentPageEnrollments()
+  const [courses, setCourses] = useState(cachedCourses || [])
+  const [enrollments, setEnrollments] = useState(cachedEnrollments || [])
+  const [loading, setLoading] = useState(cachedCourses === null)
   const [error, setError] = useState('')
 
   useEffect(() => {
-    const controller = new AbortController()
+    let active = true
+    const cachedPublishedCourses = getCachedStudentPagePublishedCourses()
+    if (cachedPublishedCourses) {
+      onCategoriesLoaded(getCourseCategoryNames(cachedPublishedCourses))
+    }
+    if (!cachedPublishedCourses) setLoading(true)
     Promise.all([
-      fetchPublishedCourses(onLogout, controller.signal),
+      fetchStudentPagePublishedCourses(onLogout),
       fetchStudentPageEnrollments(onLogout),
     ])
       .then(([publishedCourses, currentEnrollments]) => {
-        if (controller.signal.aborted) return
+        if (!active) return
         setCourses(publishedCourses)
         setEnrollments(currentEnrollments)
         onCategoriesLoaded(getCourseCategoryNames(publishedCourses))
       })
       .catch((loadError) => {
-        if (!controller.signal.aborted && loadError.name !== 'AbortError') {
+        if (active) {
           setError(loadError instanceof Error ? loadError.message : 'Available courses could not be loaded.')
         }
       })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false) })
-    return () => controller.abort()
+      .finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
   }, [onCategoriesLoaded, onLogout, user?.id])
 
   const enrollmentsByCourseId = new Map()
@@ -2680,14 +3622,14 @@ function StudentAvailableCourses({ user, onLogout, onLearningDataChanged, onCate
         onLogout()
         return
       }
-      const response = await fetch(`${API_BASE_URL}/enrollments`, {
+      const response = await fetchWithAuth(`${API_BASE_URL}/enrollments`, {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${auth.token}`,
+          Authorization: `******`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ courseId }),
-      })
+      }, API_BASE_URL, auth.token)
       const result = await response.json()
       if (isInvalidSessionResponse(response, result)) {
         onLogout()
@@ -2716,37 +3658,284 @@ function StudentAvailableCourses({ user, onLogout, onLearningDataChanged, onCate
         <div><span className="student-eyebrow">KEEP LEARNING</span><h2 id="student-available-courses-title">All Courses</h2></div>
       </div>
       {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
-      {loading ? <p role="status">Loading courses…</p> : !error && (
-        categoryCourses.length
+      {loading && !courses.length
+        ? <p role="status">Loading courses…</p>
+        : categoryCourses.length
           ? <div className="student-available-courses__grid">
             {categoryCourses.map((course) => (
               <StudentAvailableCourseCard
                 key={course._id}
                 course={course}
                 enrollment={enrollmentsByCourseId.get(String(course._id))}
-                onEnroll={enrollInCourse}
-                enrolling={enrollingCourseId === String(course._id)}
-                error={enrollmentErrors[String(course._id)]}
               />
             ))}
           </div>
-          : selectedCategory
+          : !error && (selectedCategory
             ? <EmptyState
               icon="book"
               title={`No ${selectedCategory} courses found`}
               description={`Published courses in ${selectedCategory} will appear here.`}
             />
             : <EmptyState
-            icon="book"
-            title="No published courses yet"
-            description="Published courses will appear here when the administrator adds them."
-          />
-      )}
+              icon="book"
+              title="No published courses yet"
+              description="Published courses will appear here when the administrator adds them."
+            />)}
     </section>
   )
 }
 
+function FileFormatIcon({ format }) {
+  switch (format) {
+    case 'pdf':
+      return (
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+          <path d="M14 2v6h6" />
+          <path d="M9 13h1.5a1.5 1.5 0 0 0 0-3H9v6" />
+          <path d="M14 10h2a1.5 1.5 0 0 1 1.5 1.5v3A1.5 1.5 0 0 1 16 16h-2z" />
+        </svg>
+      )
+    case 'doc':
+      return (
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+          <path d="M14 2v6h6M8 12h8m-8 4h6" />
+        </svg>
+      )
+    case 'ppt':
+      return (
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <rect x="2" y="3" width="20" height="14" rx="2" />
+          <path d="M8 21h8m-4-4v4m-3-11h3a2 2 0 0 1 0 4H9v2" />
+        </svg>
+      )
+    case 'sheet':
+      return (
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+          <path d="M14 2v6h6M8 13h8m-8 4h8M12 9v11" />
+        </svg>
+      )
+    case 'zip':
+      return (
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M10 2v4m4-4v4M10 10v4m4-4v4M10 18v4m4-4v4" />
+          <rect x="3" y="2" width="18" height="20" rx="2" />
+          <path d="M12 18a2 2 0 1 0 0 4 2 2 0 0 0 0-4z" />
+        </svg>
+      )
+    case 'code':
+      return (
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="m8 10-3 3 3 3m8-6 3 3-3 3m-5-8-2 12" />
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+        </svg>
+      )
+    case 'image':
+      return (
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <rect x="3" y="3" width="18" height="18" rx="2" />
+          <circle cx="8.5" cy="8.5" r="1.5" />
+          <path d="m21 15-5-5L5 21" />
+        </svg>
+      )
+    case 'video':
+      return (
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <rect x="2" y="4" width="20" height="16" rx="2" />
+          <path d="m10 9 5 3-5 3z" />
+        </svg>
+      )
+    default:
+      return (
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+          <path d="M14 2v6h6M8 13h8m-8 4h8" />
+        </svg>
+      )
+  }
+}
 
+function getFormatKey(format, url = '') {
+  const f = (format || '').toLowerCase().trim().replace(/^\./, '')
+  if (['pdf'].includes(f)) return 'pdf'
+  if (['doc', 'docx', 'txt', 'rtf', 'odt', 'pages'].includes(f)) return 'doc'
+  if (['ppt', 'pptx', 'key'].includes(f)) return 'ppt'
+  if (['xls', 'xlsx', 'csv', 'numbers'].includes(f)) return 'sheet'
+  if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2'].includes(f)) return 'zip'
+  if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp'].includes(f)) return 'image'
+  if (['mp4', 'mov', 'avi', 'mkv', 'webm'].includes(f)) return 'video'
+  if (['mp3', 'wav', 'ogg', 'm4a', 'flac'].includes(f)) return 'audio'
+  if (['js', 'jsx', 'ts', 'tsx', 'py', 'java', 'c', 'cpp', 'cs', 'html', 'css', 'json', 'sql'].includes(f)) return 'code'
+
+  const cleanUrl = (url || '').split('?')[0].split('#')[0]
+  const ext = (cleanUrl.split('.').pop() || '').toLowerCase()
+  if (ext === 'pdf') return 'pdf'
+  if (['doc', 'docx', 'txt'].includes(ext)) return 'doc'
+  if (['ppt', 'pptx'].includes(ext)) return 'ppt'
+  if (['xls', 'xlsx', 'csv'].includes(ext)) return 'sheet'
+  if (['zip', 'rar', '7z'].includes(ext)) return 'zip'
+  if (['png', 'jpg', 'jpeg', 'webp'].includes(ext)) return 'image'
+  if (['mp4', 'mov', 'webm'].includes(ext)) return 'video'
+  return 'file'
+}
+
+function getFormatLabel(formatKey) {
+  switch (formatKey) {
+    case 'pdf': return 'PDF Document'
+    case 'doc': return 'Word Document'
+    case 'ppt': return 'Presentation'
+    case 'sheet': return 'Spreadsheet'
+    case 'zip': return 'Archive / ZIP'
+    case 'image': return 'Image File'
+    case 'video': return 'Video File'
+    case 'audio': return 'Audio File'
+    case 'code': return 'Source Code'
+    default: return 'Document'
+  }
+}
+
+function getResourceFileName(resource) {
+  if (resource.title && typeof resource.title === 'string' && resource.title.trim()) {
+    return resource.title.trim()
+  }
+  const url = resource.url || ''
+  const cleanUrl = url.split('?')[0].split('#')[0]
+  const filename = cleanUrl.split('/').pop()
+  return filename ? decodeURIComponent(filename) : 'Learning Resource'
+}
+
+function getResourceOriginalFileName(resource) {
+  const url = resource.url || resource.publicId || ''
+  const cleanUrl = url.split('?')[0].split('#')[0]
+  const filename = cleanUrl.split('/').pop()
+  return filename ? decodeURIComponent(filename) : ''
+}
+
+function normalizeResourceName(name) {
+  if (!name || typeof name !== 'string') return ''
+  return name
+    .toLowerCase()
+    .replace(/\.[a-z0-9]{2,5}$/i, '')
+    .replace(/[^a-z0-9]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function canonicalStoragePath(url) {
+  if (!url || typeof url !== 'string') return ''
+  const clean = url.split('?')[0].split('#')[0]
+  return clean
+    .replace(/\/s--[A-Za-z0-9_-]+--\//, '/')
+    .replace(/\/v\d+\//, '/')
+}
+
+function isSameResource(a, b) {
+  if (!a || !b) return false
+  if (a._id && b._id && String(a._id) === String(b._id)) return true
+  if (a.publicId && b.publicId && a.publicId === b.publicId) return true
+  if (a.url && b.url && a.url.trim() === b.url.trim()) return true
+  if (
+    (a.fileHash && b.fileHash && a.fileHash === b.fileHash)
+    || (a.etag && b.etag && a.etag === b.etag)
+  ) {
+    return true
+  }
+  const pathA = canonicalStoragePath(a.url)
+  const pathB = canonicalStoragePath(b.url)
+  if (pathA && pathB && pathA === pathB) return true
+
+  const bytesA = Number(a.bytes)
+  const bytesB = Number(b.bytes)
+  if (Number.isFinite(bytesA) && Number.isFinite(bytesB) && bytesA > 0 && bytesA === bytesB) {
+    const normA = normalizeResourceName(a.title || a.url)
+    const normB = normalizeResourceName(b.title || b.url)
+    if (normA && normB && normA === normB) return true
+  }
+  return false
+}
+
+function mergeResources(primary, duplicate) {
+  const titleA = primary.title?.trim() || ''
+  const titleB = duplicate.title?.trim() || ''
+  const isAFilename = titleA.includes('_') || /\.[a-z0-9]{2,5}$/i.test(titleA)
+  const isBFilename = titleB.includes('_') || /\.[a-z0-9]{2,5}$/i.test(titleB)
+
+  let preferredTitle = titleA || titleB
+  if (isAFilename && !isBFilename && titleB) {
+    preferredTitle = titleB
+  } else if (!isAFilename && isBFilename && titleA) {
+    preferredTitle = titleA
+  }
+
+  const primarySources = primary.sourceType ? primary.sourceType.split(' & ') : []
+  const duplicateSources = duplicate.sourceType ? duplicate.sourceType.split(' & ') : []
+  const combinedSources = Array.from(new Set([...primarySources, ...duplicateSources])).filter(Boolean)
+  const combinedSourceType = combinedSources.join(' & ')
+
+  return {
+    ...duplicate,
+    ...primary,
+    title: preferredTitle,
+    format: primary.format || duplicate.format || '',
+    bytes: primary.bytes || duplicate.bytes || 0,
+    sourceType: combinedSourceType || primary.sourceType || duplicate.sourceType,
+    alternatePublicIds: Array.from(new Set([...(primary.alternatePublicIds || []), primary.publicId, duplicate.publicId].filter(Boolean))),
+    alternateUrls: Array.from(new Set([...(primary.alternateUrls || []), primary.url, duplicate.url].filter(Boolean))),
+    alternateIds: Array.from(new Set([...(primary.alternateIds || []), primary._id, duplicate._id].filter(Boolean))),
+  }
+}
+
+function getStudentResourceFileUrl(courseId, resource, download = false) {
+  if (!courseId) return resource?.url || ''
+  let token = ''
+  try {
+    const auth = JSON.parse(sessionStorage.getItem('lms.auth') || 'null')
+    if (typeof auth?.token === 'string') token = auth.token
+  } catch {}
+
+  const targetId = resource?._id || resource?.publicId || 'file'
+  const params = new URLSearchParams()
+  if (token) params.set('token', token)
+  if (download) params.set('download', 'true')
+  if (resource?.publicId) params.set('publicId', resource.publicId)
+  if (resource?.url) params.set('url', resource.url)
+
+  return `${API_BASE_URL}/courses/${encodeURIComponent(courseId)}/resources/${encodeURIComponent(targetId)}/file?${params.toString()}`
+}
+
+function formatResourceDate(dateValue) {
+  if (!dateValue) return null
+  try {
+    const d = new Date(dateValue)
+    if (Number.isNaN(d.getTime())) return null
+    return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric' }).format(d)
+  } catch {
+    return null
+  }
+}
+
+function formatFileSize(bytes) {
+  if (!bytes || typeof bytes !== 'number' || bytes <= 0 || !Number.isFinite(bytes)) return null
+  const units = ['B', 'KB', 'MB', 'GB']
+  let size = bytes
+  let unitIndex = 0
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024
+    unitIndex += 1
+  }
+  return `${size >= 10 ? Math.round(size) : size.toFixed(1)} ${units[unitIndex]}`
+}
+
+function getDownloadUrl(url, filename) {
+  if (!url || typeof url !== 'string') return ''
+  if (url.includes('cloudinary.com') && url.includes('/upload/')) {
+    const safeFilename = encodeURIComponent((filename || 'download').replace(/[/\\?%*:|"<>]/g, '_'))
+    return url.replace(/\/upload\/(?:v\d+\/)?/, `/upload/fl_attachment:${safeFilename}/`)
+  }
+  return url
+}
 
 function StudentCourseLearning({
   enrollment,
@@ -2757,108 +3946,147 @@ function StudentCourseLearning({
   requestedActivityId,
   requestedActivityType,
   contentSearch,
+  courseContentStatus,
 }) {
   const location = useLocation()
   const navigate = useNavigate()
-  const course = enrollment.courseId
-  const lessons = getCourseLessons(course)
-  const moduleItems = (course.modules || []).map((module, index) => ({
+  const course = enrollment?.courseId && typeof enrollment.courseId === 'object'
+    ? enrollment.courseId
+    : {}
+  const orderedCourseModules = normalizeArray(course.modules)
+    .map((module, index) => ({ module, index }))
+    .sort((left, right) => (left.module?.order ?? left.index) - (right.module?.order ?? right.index))
+  const orderedCourse = { ...course, modules: orderedCourseModules.map(({ module }) => module) }
+  const lessons = getCourseLessons(orderedCourse)
+  const moduleItems = orderedCourseModules.map(({ module, index }) => ({
     module,
-    moduleKey: String(module._id || `${module.title}-${index}`),
+    moduleKey: String(module?._id || `${module?.title || 'module'}-${index}`),
     items: getModuleLearningItems(module, index),
   }))
   const courseLevelItems = [
-    ...(course.quizzes || []).map((quiz, index) => ({
+    ...normalizeArray(course.quizzes).map((quiz, index) => ({
       type: 'quiz',
-      title: quiz.title || `Course quiz ${index + 1}`,
+      title: quiz?.title || `Course quiz ${index + 1}`,
       quiz,
-      _learningKey: String(quiz._id || `course-quiz-${index}`),
+      _learningKey: String(quiz?._id || `course-quiz-${index}`),
       _moduleKey: '',
     })),
-    ...(course.assignments || []).map((assignment, index) => ({
+    ...normalizeArray(course.assignments).map((assignment, index) => ({
       ...assignment,
       type: 'assignment',
-      _learningKey: String(assignment._id || `course-assignment-${index}`),
+      _learningKey: String(assignment?._id || `course-assignment-${index}`),
       _moduleKey: '',
     })),
   ]
-    const sequencedActivities = useMemo(() => {
-    if (enrollment.progress?.sequence?.length) {
-      return enrollment.progress.sequence.map((item, idx) => ({
-        ...item,
-        _learningKey: String(item.id || item.quizId || item.assignmentId || item.lessonId),
-        _moduleKey: item.moduleId ? String(item.moduleId) : '',
-        sequenceNumber: item.sequenceIndex || (idx + 1),
-      }))
-    }
-    return buildClientCourseSequence(course).map((item, idx) => ({
-      ...item,
-      _learningKey: String(item.id),
-      _moduleKey: '',
-      sequenceNumber: item.sequenceIndex || (idx + 1),
-    }))
-  }, [course, enrollment.progress])
-
-  const allContentItems = useMemo(() => {
-    if (sequencedActivities.length > 0) {
-      return sequencedActivities.map((item) => {
-        if (item.type === 'video-lesson') {
-          const entry = lessons.find((l) => String(l.lesson._id || l.lessonKey) === String(item.id || item.lessonId))
-          return {
-            ...item,
-            lesson: entry?.lesson || item.lesson || { _id: item.id, title: item.title, videoUrl: item.videoUrl },
-            module: entry?.module || item.module,
-            moduleKey: entry?.moduleKey || item._moduleKey,
-          }
-        }
-        return item
-      })
-    }
-    return [...moduleItems.flatMap(({ items }) => items), ...courseLevelItems]
-  }, [sequencedActivities, lessons, moduleItems, courseLevelItems])
-  const [activeLessonId, setActiveLessonId] = useState(() => (
-    lessons.some(({ lesson }) => String(lesson._id) === requestedLessonId)
-      ? requestedLessonId
-      : lessons[0]?.lessonKey || ''
+  const allContentItems = [...moduleItems.flatMap(({ items }) => items), ...courseLevelItems]
+  const initialCompletedLessonIds = new Set(normalizeArray(enrollment.completedLessonIds).map(String))
+  const initialQuizAttempts = normalizeArray(enrollment.quizAttempts)
+  const initialAssignmentSubmissions = normalizeArray(enrollment.assignmentSubmissions)
+  const activityItems = allContentItems.filter((item) => (
+    ['video-lesson', 'quiz', 'assignment'].includes(item.type)
   ))
-  const [activeContentItemId, setActiveContentItemId] = useState(() => {
-    if (!requestedActivityId || !['quiz', 'assignment'].includes(requestedActivityType)) return ''
-    return allContentItems.find((item) => (
+  const isInitiallyCompleted = (item) => {
+    if (item.type === 'video-lesson') {
+      return initialCompletedLessonIds.has(String(item._id || item._learningKey))
+    }
+    if (item.type === 'quiz') {
+      const quizId = String(item.quiz?._id || item._learningKey)
+      return initialQuizAttempts.some((attempt) => (
+        String(attempt.quizId) === quizId && attempt.status === 'submitted' && attempt.passed === true
+      ))
+    }
+    const assignmentId = String(item._id || item._learningKey)
+    const latestSubmission = initialAssignmentSubmissions
+      .filter((submission) => String(submission.assignmentId) === assignmentId)
+      .sort((left, right) => (
+        new Date(right.submittedAt || 0).getTime() - new Date(left.submittedAt || 0).getTime()
+      ))[0]
+    return Boolean(latestSubmission)
+  }
+  const initialFrontierIndex = activityItems.findIndex((item) => !isInitiallyCompleted(item))
+  const requestedActivityItem = requestedActivityId && ['quiz', 'assignment'].includes(requestedActivityType)
+    ? allContentItems.find((item) => (
       item.type === requestedActivityType
       && String(item.type === 'quiz' ? item.quiz?._id || item._learningKey : item._learningKey) === requestedActivityId
-    ))?._learningKey || ''
-  })
+    ))
+    : null
+  const requestedLessonItem = requestedLessonId
+    ? activityItems.find((item) => item.type === 'video-lesson' && String(item._id || item._learningKey) === requestedLessonId)
+    : null
+  const requestedInitialItem = requestedActivityItem || requestedLessonItem
+  const requestedInitialIndex = activityItems.indexOf(requestedInitialItem)
+  const requestedInitialAccessible = requestedInitialItem && (
+    isInitiallyCompleted(requestedInitialItem)
+    || initialFrontierIndex < 0
+    || requestedInitialIndex <= initialFrontierIndex
+  )
+  const initialActivity = requestedInitialAccessible
+    ? requestedInitialItem
+    : activityItems[initialFrontierIndex] || activityItems[0]
+  const initialLessonId = initialActivity?.type === 'video-lesson'
+    ? String(initialActivity._id || initialActivity._learningKey)
+    : lessons[0]?.lessonKey || ''
+  const [activeLessonId, setActiveLessonId] = useState(initialLessonId)
+  const [activeContentItemId, setActiveContentItemId] = useState(
+    initialActivity?.type && initialActivity.type !== 'video-lesson'
+      ? initialActivity._learningKey
+      : '',
+  )
   const [detailsTab, setDetailsTab] = useState('overview')
   const [lessonInfoTab, setLessonInfoTab] = useState('overview')
   const [videoOpenSequence, setVideoOpenSequence] = useState(0)
   const [transcriptPlayback, setTranscriptPlayback] = useState({ lessonKey: '', cueIndex: -1 })
   const [expandedModules, setExpandedModules] = useState(() => new Set(
-    course.modules?.length ? [String(course.modules[0]._id || `${course.modules[0].title}-0`)] : [],
+    orderedCourseModules.length
+      ? [String(orderedCourseModules[0].module._id || `${orderedCourseModules[0].module.title}-0`)]
+      : [],
   ))
   const [savingLessonId, setSavingLessonId] = useState('')
+  const [optimisticallyCompletedLessonIds, setOptimisticallyCompletedLessonIds] = useState(() => new Set())
   const [progressError, setProgressError] = useState('')
   const [autoplayBlockedLessonId, setAutoplayBlockedLessonId] = useState('')
   const [assignmentSubmissions, setAssignmentSubmissions] = useState(enrollment.assignmentSubmissions || [])
   const [quizAttempts, setQuizAttempts] = useState(enrollment.quizAttempts || [])
+  useEffect(() => {
+    setAssignmentSubmissions(enrollment.assignmentSubmissions || [])
+  }, [enrollment.assignmentSubmissions])
+  useEffect(() => {
+    setQuizAttempts(enrollment.quizAttempts || [])
+  }, [enrollment.quizAttempts])
   const [courseCertificate, setCourseCertificate] = useState(null)
   const [courseCertificateLoading, setCourseCertificateLoading] = useState(true)
   const [courseCertificateError, setCourseCertificateError] = useState('')
   const [courseCertificateRefresh, setCourseCertificateRefresh] = useState(0)
   const [courseCertificatePdf, setCourseCertificatePdf] = useState({ certificateId: '', url: '' })
+  const [downloadingResourceId, setDownloadingResourceId] = useState('')
+  const [resourceAccessError, setResourceAccessError] = useState('')
+
   const [courseCertificatePdfLoading, setCourseCertificatePdfLoading] = useState(false)
   const [courseCertificatePdfError, setCourseCertificatePdfError] = useState('')
   const [courseCertificatePdfRetry, setCourseCertificatePdfRetry] = useState(0)
   const courseCertificatePdfUrlRef = useRef('')
   const videoPlayerRef = useRef(null)
-  const pendingSeekTimeRef = useRef(null)
-  const requestOpenNoteEditorRef = useRef(null)
+  const videoPlayerContainerRef = useRef(null)
+  const videoControlsHideTimeoutRef = useRef(null)
+  const [failedVideoSourceKey, setFailedVideoSourceKey] = useState('')
+  const [isVideoPlayerFullscreen, setIsVideoPlayerFullscreen] = useState(false)
+  const [videoPlayerFullscreenError, setVideoPlayerFullscreenError] = useState('')
+  const [isVideoMuted, setIsVideoMuted] = useState(false)
+  const [areVideoControlsVisible, setAreVideoControlsVisible] = useState(false)
+  const [areVideoControlsKeyboardFocused, setAreVideoControlsKeyboardFocused] = useState(false)
   const transcriptCueListRef = useRef(null)
   const transcriptCueRefs = useRef([])
   const transcriptScriptRef = useRef(null)
   const transcriptScriptCueRefs = useRef([])
   const assignmentStatusRefreshRef = useRef(false)
   const lessonPlaybackPositionsRef = useRef({ ...(enrollment.lessonPlaybackPositions || {}) })
+  const lessonWatchedPositionsRef = useRef({
+    ...(enrollment.lessonPlaybackPositions || {}),
+    ...(enrollment.lessonWatchedPositions || {}),
+  })
   const playbackPositionSaveRef = useRef(new Map())
+  const learningActivitySampleRef = useRef({ lessonId: '', positionSeconds: 0, sampledAt: 0 })
+  const learningActivityPendingRef = useRef(new Map())
   const initialAttentionLesson = lessons.find(({ lesson, lessonKey }) => (
     String(lesson._id || lessonKey) === activeLessonId
   ))?.lesson
@@ -2879,26 +4107,65 @@ function StudentCourseLearning({
     ...(enrollment.startedLessonIds || []).map(String),
     ...(enrollment.completedLessonIds || []).map(String),
   ]))
-  const activeIndex = Math.max(0, lessons.findIndex(({ lesson, lessonKey }) => (
-    String(lesson._id || lessonKey) === activeLessonId
-  )))
-  const activeEntry = lessons[activeIndex]
-  const activeVideoKey = `${String(course._id)}:${String(activeEntry?.lesson?._id || activeEntry?.lessonKey || '')}`
+  const activeIndex = lessons.length
+    ? Math.max(0, lessons.findIndex(({ lesson, lessonKey }) => (
+        String(lesson?._id || lessonKey) === activeLessonId
+      )))
+    : -1
+  const activeEntry = activeIndex >= 0 ? lessons[activeIndex] : null
+  const activeVideoKey = activeEntry
+    ? `${String(course._id || '')}:${String(activeEntry.lesson?._id || activeEntry.lessonKey || '')}`
+    : ''
+  const activeVideoUrl = activeEntry?.lesson?.videoUrl || ''
+  const videoSourceKey = activeVideoUrl
+    ? `${activeVideoKey}:${activeVideoUrl}:${videoOpenSequence}`
+    : ''
+  const videoMediaFailed = Boolean(videoSourceKey && failedVideoSourceKey === videoSourceKey)
   const transcriptCues = Array.isArray(activeEntry?.lesson?.transcriptCues)
     ? activeEntry.lesson.transcriptCues
     : []
   const activeTranscriptCueIndex = transcriptPlayback.lessonKey === activeVideoKey
     ? transcriptPlayback.cueIndex
     : findActiveTranscriptCueIndex(transcriptCues, 0)
-  const activeContentItem = allContentItems.find((item) => String(item._learningKey || item.id) === activeContentItemId)
+  const activeContentItem = allContentItems.find((item) => item._learningKey === activeContentItemId)
   const showCourseCertificate = course.generateCertificate !== false
-  const hasCurrentCourseCertificate = String(courseCertificate?.courseId || '') === String(course._id)
-  const completedLessonIds = new Set((enrollment.completedLessonIds || []).map(String))
+  const hasCurrentCourseCertificate = String(courseCertificate?.courseId || '') === String(course._id || '')
+  const completedLessonIds = new Set([
+    ...(enrollment.completedLessonIds || []).map(String),
+    ...optimisticallyCompletedLessonIds,
+    ...(savingLessonId ? [savingLessonId] : []),
+  ])
   const hasPassedQuiz = (quizId) => Boolean(quizId) && quizAttempts.some((attempt) => (
     String(attempt.quizId) === String(quizId)
     && attempt.status === 'submitted'
     && attempt.passed === true
   ))
+  const getLatestAssignmentSubmission = (assignmentId) => assignmentSubmissions
+    .filter((submission) => String(submission.assignmentId) === String(assignmentId))
+    .sort((left, right) => (
+      new Date(right.submittedAt || 0).getTime() - new Date(left.submittedAt || 0).getTime()
+    ))[0]
+  const isActivityComplete = (item) => {
+    if (item.type === 'video-lesson') {
+      return (enrollment.completedLessonIds || []).some((id) => (
+        String(id) === String(item._id || item._learningKey)
+      ))
+    }
+    if (item.type === 'quiz') return hasPassedQuiz(item.quiz?._id || item._learningKey)
+    if (item.type === 'assignment') {
+      return Boolean(getLatestAssignmentSubmission(item._id || item._learningKey))
+    }
+    return false
+  }
+  const nextIncompleteActivity = activityItems.find((item) => !isActivityComplete(item)) || null
+  const nextIncompleteActivityIndex = nextIncompleteActivity ? activityItems.indexOf(nextIncompleteActivity) : -1
+  const isCourseItemAccessible = (item) => {
+    if (!item || !['video-lesson', 'quiz', 'assignment'].includes(item.type)) return true
+    const itemIndex = activityItems.indexOf(item)
+    return isActivityComplete(item)
+      || nextIncompleteActivityIndex < 0
+      || (itemIndex >= 0 && itemIndex <= nextIncompleteActivityIndex)
+  }
   const filteredModuleItems = moduleItems.map((group) => ({
     ...group,
     items: group.items.filter((item) => (
@@ -2908,21 +4175,56 @@ function StudentCourseLearning({
   const filteredCourseLevelItems = courseLevelItems.filter((item) => (
     !contentSearch || item.title?.toLowerCase().includes(contentSearch.trim().toLowerCase())
   ))
-  const courseResources = [
-    ...lessons.flatMap(({ lesson }) => lesson.resources || []),
-    ...allContentItems.flatMap((item) => item.resources || []),
-  ].filter((resource) => resource.url)
-    .filter((resource, index, resources) => resources.findIndex((entry) => entry.url === resource.url) === index)
+  const courseResources = useMemo(() => {
+    const list = []
+
+    function addResource(resource, parentTitle = '', parentType = '') {
+      if (!resource || !resource.url || typeof resource.url !== 'string') return
+      const trimmedUrl = resource.url.trim()
+      if (!trimmedUrl) return
+
+      const candidate = {
+        ...resource,
+        url: trimmedUrl,
+        _key: String(resource._id || resource.publicId || trimmedUrl),
+        sourceTitle: parentTitle || '',
+        sourceType: parentType || '',
+      }
+
+      const existingIndex = list.findIndex((item) => isSameResource(item, candidate))
+      if (existingIndex >= 0) {
+        list[existingIndex] = mergeResources(list[existingIndex], candidate)
+      } else {
+        list.push(candidate)
+      }
+    }
+
+    normalizeArray(course?.resources).forEach((res) => addResource(res, course?.title || '', 'Course'))
+
+    normalizeArray(course?.modules).forEach((mod) => {
+      if (!mod) return
+      normalizeArray(mod.resources).forEach((res) => addResource(res, mod.title || '', 'Module'))
+
+      normalizeLessons(mod.lessons).forEach((les) => {
+        if (!les) return
+        normalizeArray(les.resources).forEach((res) => addResource(res, les.title || '', 'Lesson'))
+      })
+
+      normalizeArray(mod.contentItems).forEach((item) => {
+        if (!item) return
+        normalizeArray(item.resources).forEach((res) => addResource(res, item.title || '', item.type === 'note' ? 'Notes' : 'Lesson'))
+      })
+    })
+
+    return list
+  }, [course])
   const courseNotes = allContentItems.filter((item) => item.type === 'note')
   const activeContentIndex = allContentItems.findIndex((item) => (
     item._learningKey === activeContentItemId
     || (!activeContentItemId && item.type === 'video-lesson' && item._learningKey === activeEntry?.lessonKey)
   ))
-  const showVideoPlayer = (detailsTab === 'overview' || detailsTab === 'notes' || detailsTab === 'resources')
-    && activeContentItemId !== COURSE_NOTES_KEY
-    && activeContentItemId !== COURSE_RESOURCES_KEY
-    && activeContentItemId !== COURSE_CERTIFICATE_KEY
-    && detailsTab !== 'certificate'
+  const showVideoPlayer = detailsTab === 'overview'
+    && Boolean(activeEntry?.lesson)
     && (!activeContentItem || activeContentItem.type === 'video-lesson')
   const isActiveQuiz = detailsTab === 'overview' && activeContentItem?.type === 'quiz'
   const isActiveAssignment = detailsTab === 'overview' && activeContentItem?.type === 'assignment'
@@ -2930,6 +4232,32 @@ function StudentCourseLearning({
     String(attempt.quizId) === String(activeContentItem.quiz?._id)
     && attempt.status === 'started'
   ))
+  const hasPendingAssignmentGrading = assignmentSubmissions.some((submission) => (
+    ['Submitted', 'AI Grading'].includes(submission.gradingStatus)
+  ))
+
+  useEffect(() => {
+    setAssignmentSubmissions(enrollment.assignmentSubmissions || [])
+  }, [enrollment.assignmentSubmissions])
+
+  useEffect(() => {
+    setQuizAttempts(enrollment.quizAttempts || [])
+  }, [enrollment.quizAttempts])
+
+  useEffect(() => {
+    lessonPlaybackPositionsRef.current = {
+      ...lessonPlaybackPositionsRef.current,
+      ...(enrollment.lessonPlaybackPositions || {}),
+    }
+    lessonWatchedPositionsRef.current = {
+      ...lessonWatchedPositionsRef.current,
+      ...(enrollment.lessonWatchedPositions || {}),
+    }
+  }, [enrollment.lessonPlaybackPositions, enrollment.lessonWatchedPositions])
+
+  useEffect(() => {
+    setProgressError('')
+  }, [enrollment.courseId])
 
   useEffect(() => {
     if (activeTranscriptCueIndex < 0) return
@@ -3008,7 +4336,7 @@ function StudentCourseLearning({
   useEffect(() => {
     const controller = new AbortController()
     async function refreshAssignmentStatuses() {
-      if (assignmentStatusRefreshRef.current) return
+      if (!course?._id || assignmentStatusRefreshRef.current) return
       assignmentStatusRefreshRef.current = true
       try {
         const { assignmentSubmissions: submissions } = await fetchStudentCourseContent(
@@ -3017,7 +4345,7 @@ function StudentCourseLearning({
           controller.signal,
         )
         if (controller.signal.aborted) return
-        setProgressError((current) => current === 'API route not found.' ? '' : current)
+        setProgressError((current) => current === 'API route not found.' || current?.toLowerCase().includes('failed to fetch') ? '' : current)
         setAssignmentSubmissions((current) => {
           const currentById = new Map(current.map((submission) => [String(submission._id), submission]))
           const refreshedIds = new Set(submissions.map((submission) => String(submission._id)))
@@ -3029,9 +4357,13 @@ function StudentCourseLearning({
         })
       } catch (refreshError) {
         if (!controller.signal.aborted) {
-          setProgressError(refreshError instanceof Error
-            ? refreshError.message
-            : 'Assignment review status could not be loaded.')
+          const message = refreshError instanceof Error ? refreshError.message : ''
+          const isNetworkOrAbort = refreshError?.name === 'AbortError'
+            || message.toLowerCase().includes('failed to fetch')
+            || message.toLowerCase().includes('abort')
+          if (!isNetworkOrAbort) {
+            setProgressError(message || 'Assignment review status could not be loaded.')
+          }
         }
       } finally {
         assignmentStatusRefreshRef.current = false
@@ -3041,14 +4373,53 @@ function StudentCourseLearning({
     const handleFocus = () => { void refreshAssignmentStatuses() }
     const intervalId = window.setInterval(() => {
       if (document.visibilityState === 'visible') void refreshAssignmentStatuses()
-    }, 30000)
+    }, hasPendingAssignmentGrading ? 3000 : 30000)
     window.addEventListener('focus', handleFocus)
     return () => {
       window.clearInterval(intervalId)
       window.removeEventListener('focus', handleFocus)
       controller.abort()
     }
-  }, [course._id, enrollment._id, onLogout])
+  }, [course?._id, enrollment?._id, hasPendingAssignmentGrading, onLogout])
+
+  async function handleDownloadResource(e, resource, displayTitle) {
+    e.preventDefault()
+    setResourceAccessError('')
+    setDownloadingResourceId(resource._key)
+    try {
+      const courseId = course?._id || enrollment?.courseId?._id || enrollment?.courseId
+      const downloadUrl = getStudentResourceFileUrl(courseId, resource, true)
+      let token = ''
+      try {
+        const auth = JSON.parse(sessionStorage.getItem('lms.auth') || 'null')
+        if (typeof auth?.token === 'string') token = auth.token
+      } catch {}
+      const headers = token ? { Authorization: `Bearer ${token}` } : {}
+      const response = await fetch(downloadUrl, { headers })
+      if (!response.ok) {
+        const errorJson = await response.json().catch(() => ({}))
+        throw new Error(errorJson.message || `Download failed with status ${response.status}.`)
+      }
+      const blob = await response.blob()
+      const blobUrl = window.URL.createObjectURL(blob)
+      const ext = (resource.format || 'pdf').replace(/^\./, '')
+      let filename = displayTitle || 'download'
+      if (!filename.toLowerCase().endsWith(`.${ext.toLowerCase()}`)) {
+        filename = `${filename}.${ext}`
+      }
+      const anchor = document.createElement('a')
+      anchor.href = blobUrl
+      anchor.download = filename
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      window.URL.revokeObjectURL(blobUrl)
+    } catch (err) {
+      setResourceAccessError(err instanceof Error ? err.message : 'Unable to download this resource.')
+    } finally {
+      setDownloadingResourceId('')
+    }
+  }
 
   useEffect(() => {
     const certificate = courseCertificate?.certificate
@@ -3338,6 +4709,100 @@ function StudentCourseLearning({
   }
 
   useEffect(() => {
+    const updateFullscreenState = () => {
+      setIsVideoPlayerFullscreen(document.fullscreenElement === videoPlayerContainerRef.current)
+    }
+    document.addEventListener('fullscreenchange', updateFullscreenState)
+    return () => document.removeEventListener('fullscreenchange', updateFullscreenState)
+  }, [])
+
+  useEffect(() => () => {
+    if (videoControlsHideTimeoutRef.current !== null) {
+      window.clearTimeout(videoControlsHideTimeoutRef.current)
+    }
+  }, [])
+
+  function revealVideoControls() {
+    setAreVideoControlsVisible(true)
+    if (videoControlsHideTimeoutRef.current !== null) {
+      window.clearTimeout(videoControlsHideTimeoutRef.current)
+    }
+    videoControlsHideTimeoutRef.current = window.setTimeout(() => {
+      videoControlsHideTimeoutRef.current = null
+      setAreVideoControlsVisible(false)
+    }, 2000)
+  }
+
+  function hideVideoControls() {
+    if (videoControlsHideTimeoutRef.current !== null) {
+      window.clearTimeout(videoControlsHideTimeoutRef.current)
+      videoControlsHideTimeoutRef.current = null
+    }
+    setAreVideoControlsVisible(false)
+  }
+
+  async function toggleVideoPlayerFullscreen() {
+    const player = videoPlayerContainerRef.current
+    if (!player) return
+    setVideoPlayerFullscreenError('')
+    try {
+      if (document.fullscreenElement === player) {
+        await document.exitFullscreen()
+      } else if (typeof player.requestFullscreen === 'function') {
+        await player.requestFullscreen()
+      } else {
+        setVideoPlayerFullscreenError('Fullscreen mode is not supported by this browser.')
+      }
+    } catch {
+      setVideoPlayerFullscreenError('Fullscreen mode could not be changed. Please try again.')
+    }
+  }
+
+  function toggleVideoMute() {
+    const video = videoPlayerRef.current
+    if (!video) return
+    video.muted = !video.muted
+    setIsVideoMuted(video.muted)
+  }
+
+  function toggleVideoPlaybackFromSurface(event) {
+    const video = event.currentTarget
+    if (
+      attentionCheckChallenge ||
+      attentionCheckLoading ||
+      attentionSessionRef.current.blocked
+    ) return
+
+    const bounds = video.getBoundingClientRect()
+    if (event.clientY >= bounds.bottom - Math.min(72, bounds.height * 0.2)) return
+
+    const pausedBeforeClick = video.paused
+    const timeBeforeClick = video.currentTime
+    const mutedBeforeClick = video.muted
+    const volumeBeforeClick = video.volume
+    const fullscreenBeforeClick = document.fullscreenElement
+    window.setTimeout(() => {
+      if (
+        !video.isConnected ||
+        video.paused !== pausedBeforeClick ||
+        Math.abs(video.currentTime - timeBeforeClick) > 0.1 ||
+        video.muted !== mutedBeforeClick ||
+        video.volume !== volumeBeforeClick ||
+        document.fullscreenElement !== fullscreenBeforeClick
+      ) return
+
+      if (video.paused) {
+        const playback = video.play()
+        if (playback && typeof playback.catch === 'function') {
+          playback.catch(() => setAttentionCheckPlaybackError('Video playback could not start. Press Play to try again.'))
+        }
+      } else {
+        video.pause()
+      }
+    }, 0)
+  }
+
+  useEffect(() => {
     if (!attentionCheckChallenge) {
       setAttentionCheckSecondsRemaining(10)
       return undefined
@@ -3387,12 +4852,17 @@ function StudentCourseLearning({
     setAttentionCheckConfigurationError('')
     setAttentionCheckPlaybackError('')
     setAttentionCheckRetry(null)
+    setVideoPlayerFullscreenError('')
     setAutoplayBlockedLessonId('')
   }, [activeLessonId])
 
   useEffect(() => {
     const matchedLesson = lessons.find(({ lesson }) => String(lesson._id) === requestedLessonId)
-    if (matchedLesson) {
+    const matchedActivity = activityItems.find((item) => (
+      item.type === 'video-lesson'
+      && String(item._id || item._learningKey) === requestedLessonId
+    ))
+    if (matchedLesson && matchedActivity && isCourseItemAccessible(matchedActivity)) {
       setActiveLessonId(String(matchedLesson.lesson._id))
       setExpandedModules((current) => new Set(current).add(matchedLesson.moduleKey))
     } else if (lessons.length && !lessons.some(({ lesson, lessonKey }) => String(lesson._id || lessonKey) === activeLessonId)) {
@@ -3406,7 +4876,7 @@ function StudentCourseLearning({
       entry.type === requestedActivityType
       && String(entry.type === 'quiz' ? entry.quiz?._id || entry._learningKey : entry._learningKey) === requestedActivityId
     ))
-    if (!item) return
+    if (!item || !isCourseItemAccessible(item)) return
     videoPlayerRef.current?.pause()
     setActiveContentItemId(item._learningKey)
     setDetailsTab('overview')
@@ -3416,13 +4886,26 @@ function StudentCourseLearning({
   }, [requestedActivityId, requestedActivityType, course._id])
 
   useEffect(() => {
-    if (activeEntry && !activeContentItemId) void setLessonStarted(activeEntry)
+    if (!activeEntry || activeContentItemId) return
+    const item = activityItems.find((activity) => (
+      activity.type === 'video-lesson'
+      && String(activity._id || activity._learningKey) === String(activeEntry.lesson._id || activeEntry.lessonKey)
+    ))
+    if (item && isCourseItemAccessible(item)) void setLessonStarted(activeEntry)
   }, [activeLessonId, activeContentItemId, enrollment._id])
 
   function selectLesson(entry) {
     if (attentionCheckChallenge || attentionCheckLoading || attentionSessionRef.current.blocked) return
     const id = String(entry.lesson._id || entry.lessonKey)
+    const activityItem = activityItems.find((item) => (
+      item.type === 'video-lesson' && String(item._id || item._learningKey) === id
+    ))
+    if (!activityItem || !isCourseItemAccessible(activityItem)) return
+    if (entry.lesson._progressionLocked) {
+      window.dispatchEvent(new Event(STUDENT_LEARNING_PROGRESS_UPDATED_EVENT))
+    }
     if (videoPlayerRef.current && activeEntry) {
+      recordLearningActivity(activeEntry, videoPlayerRef.current, true)
       saveLessonPlaybackPosition(activeEntry, videoPlayerRef.current.currentTime, true)
       videoPlayerRef.current.pause()
     }
@@ -3441,10 +4924,14 @@ function StudentCourseLearning({
 
   function selectContentItem(item) {
     if (attentionCheckChallenge || attentionCheckLoading || attentionSessionRef.current.blocked) return
+    if (!isCourseItemAccessible(item)) return
     if (item.type === 'video-lesson') {
       const lesson = lessons.find((entry) => String(entry.lesson._id || entry.lessonKey) === item._learningKey)
       if (lesson) selectLesson(lesson)
       return
+    }
+    if (item._progressionLocked) {
+      window.dispatchEvent(new Event(STUDENT_LEARNING_PROGRESS_UPDATED_EVENT))
     }
     endCurrentAttentionCheckSession()
     videoPlayerRef.current?.pause()
@@ -3460,48 +4947,51 @@ function StudentCourseLearning({
     setCourseCertificateRefresh((current) => current + 1)
   }
 
-  function addQuizAttempt(attempt) {
+  function addQuizAttempt(attempt, courseProgress) {
     setQuizAttempts((current) => [attempt, ...current.filter((entry) => String(entry._id) !== String(attempt._id))])
+    if (courseProgress) {
+      onEnrollmentUpdated({
+        courseProgress,
+        ...(courseProgress.status ? { status: courseProgress.status } : {}),
+      })
+    }
     if (attempt.status === 'submitted') {
       setCourseCertificateRefresh((current) => current + 1)
     }
   }
 
   function getAssignmentReviewStatus(assignment) {
-    const submission = assignmentSubmissions.find((entry) => (
-      String(entry.assignmentId) === String(assignment?._id)
-    ))
+    const submission = getLatestAssignmentSubmission(assignment?._id)
     if (!submission) return 'not-submitted'
+    const academicResult = getAssignmentAcademicResult(submission, assignment)
+    if (academicResult) return academicResult.status.toLowerCase()
+    if (submission.gradingStatus) {
+      if (['AI Graded', 'Final Result'].includes(submission.gradingStatus)) return 'submitted'
+      return 'pending'
+    }
     if (['approved', 'rejected', 'pending'].includes(submission.reviewStatus)) {
-      return submission.reviewStatus
+      return submission.reviewStatus === 'approved' ? 'submitted' : submission.reviewStatus
     }
-    const requirement = courseCertificate?.pendingRequirements?.find((entry) => (
-      entry.type === 'assignment' && String(entry.id) === String(assignment?._id)
-    ))
-    if (requirement?.status === 'resubmit') return 'rejected'
-    if (requirement) return 'pending'
-    if (
-      assignment?.requiredForCertificate !== false
-      && Array.isArray(courseCertificate?.pendingRequirements)
-      && hasCurrentCourseCertificate
-    ) {
-      return 'approved'
-    }
-    return 'pending'
+    return 'submitted'
   }
 
   function getAssignmentSidebarLabel(status) {
-    if (status === 'approved') return 'Completed'
-    if (status === 'pending') return 'Awaiting Admin Review'
+    if (status === 'passed') return 'Passed'
+    if (status === 'failed') return 'Failed'
+    if (status === 'pending') return 'AI Grading'
     if (status === 'rejected') return 'Rejected'
+    if (status === 'submitted') return 'Submitted'
     return 'Assignment'
   }
 
-  function saveLessonPlaybackPosition(entry, positionSeconds, force = false) {
+  function saveLessonPlaybackPosition(entry, positionSeconds, force = false, isPlayingOverride) {
     const lessonId = String(entry?.lesson?._id || '')
     if (!isValidLessonId(lessonId) || !Number.isFinite(positionSeconds) || positionSeconds < 0) return
 
     const position = Math.min(43200, Math.floor(positionSeconds))
+    const isPlaying = typeof isPlayingOverride === 'boolean'
+      ? isPlayingOverride
+      : videoPlayerRef.current?.paused === false
     let saveState = playbackPositionSaveRef.current.get(lessonId)
     if (!saveState) {
       const savedPosition = Number(lessonPlaybackPositionsRef.current[lessonId])
@@ -3513,7 +5003,7 @@ function StudentCourseLearning({
       playbackPositionSaveRef.current.set(lessonId, saveState)
     }
     if (saveState.inFlight) {
-      if (force) saveState.queuedPosition = position
+      if (force) saveState.queuedPosition = { position, isPlaying }
       return
     }
     if (!force && (
@@ -3536,12 +5026,15 @@ function StudentCourseLearning({
             Authorization: `Bearer ${auth.token}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ lessonId, positionSeconds: position }),
+          body: JSON.stringify({ lessonId, positionSeconds: position, isPlaying }),
         }, API_BASE_URL, auth.token)
         const result = await response.json()
         if (isInvalidSessionResponse(response, result)) {
           onLogout()
           return
+        }
+        if (Number.isFinite(result.maxPositionSeconds)) {
+          lessonWatchedPositionsRef.current[lessonId] = result.maxPositionSeconds
         }
         if (!response.ok) throw new Error(result.message || 'Video playback position could not be saved.')
         saveState.lastSavedPosition = position
@@ -3549,28 +5042,145 @@ function StudentCourseLearning({
           ...lessonPlaybackPositionsRef.current,
           [lessonId]: position,
         }
-        onEnrollmentUpdated({ lessonPlaybackPositions: { ...lessonPlaybackPositionsRef.current } })
+        if (Number.isFinite(result.lessonWatchedPositions?.[lessonId])) {
+          lessonWatchedPositionsRef.current[lessonId] = result.lessonWatchedPositions[lessonId]
+        }
+        onEnrollmentUpdated({
+          lessonPlaybackPositions: { ...lessonPlaybackPositionsRef.current },
+          lessonWatchedPositions: { ...lessonWatchedPositionsRef.current },
+        })
       } catch (saveError) {
         setProgressError(saveError instanceof Error ? saveError.message : 'Video playback position could not be saved.')
       } finally {
         saveState.inFlight = false
         const queuedPosition = saveState.queuedPosition
         saveState.queuedPosition = null
-        if (queuedPosition !== null && queuedPosition !== saveState.lastSavedPosition) {
-          saveLessonPlaybackPosition(entry, queuedPosition, true)
+        if (queuedPosition && queuedPosition.position !== saveState.lastSavedPosition) {
+          saveLessonPlaybackPosition(entry, queuedPosition.position, true, queuedPosition.isPlaying)
         }
       }
     })()
   }
 
+  function getWatchedPosition(lessonId) {
+    return Math.max(
+      Number(lessonWatchedPositionsRef.current[lessonId]) || 0,
+      Number(lessonPlaybackPositionsRef.current[lessonId]) || 0,
+    )
+  }
+
+  function updateWatchedPosition(entry, video) {
+    if (video.paused || video.seeking) return
+    const lessonId = String(entry?.lesson?._id || '')
+    const position = Number(video.currentTime)
+    if (!lessonId || !Number.isFinite(position) || position <= getWatchedPosition(lessonId)) return
+    lessonWatchedPositionsRef.current[lessonId] = position
+  }
+
+  function resetLearningActivitySample(entry, video) {
+    learningActivitySampleRef.current = {
+      lessonId: String(entry?.lesson?._id || ''),
+      positionSeconds: Number(video?.currentTime) || 0,
+      sampledAt: performance.now(),
+    }
+  }
+
+  function flushLearningActivity(entry) {
+    const lessonId = String(entry?.lesson?._id || '')
+    if (!isValidLessonId(lessonId)) return
+    const activityState = learningActivityPendingRef.current.get(lessonId)
+    if (!activityState || activityState.inFlight) return
+    const seconds = Math.min(60, Math.floor(activityState.seconds))
+    if (seconds < 1) return
+
+    activityState.seconds -= seconds
+    activityState.inFlight = true
+    let saved = false
+    void (async () => {
+      try {
+        const savedAuth = sessionStorage.getItem('lms.auth')
+        const auth = savedAuth ? JSON.parse(savedAuth) : null
+        if (typeof auth?.token !== 'string') {
+          onLogout()
+          return
+        }
+        const response = await fetchWithAuth(
+          `${API_BASE_URL}/enrollments/${encodeURIComponent(enrollment._id)}/learning-activity`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${auth.token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              lessonId,
+              seconds,
+              activityDate: getLocalLearningDateKey(new Date()),
+            }),
+          },
+          API_BASE_URL,
+          auth.token,
+        )
+        const result = await response.json()
+        if (isInvalidSessionResponse(response, result)) {
+          onLogout()
+          return
+        }
+        if (!response.ok) throw new Error(result.message || 'Video learning time could not be saved.')
+        saved = true
+      } catch (activityError) {
+        activityState.seconds += seconds
+        setProgressError(activityError instanceof Error
+          ? activityError.message
+          : 'Video learning time could not be saved.')
+      } finally {
+        activityState.inFlight = false
+        if (saved && activityState.seconds >= 15) flushLearningActivity(entry)
+      }
+    })()
+  }
+
+  function recordLearningActivity(entry, video, flush = false) {
+    const lessonId = String(entry?.lesson?._id || '')
+    if (!isValidLessonId(lessonId) || !video) return
+    const now = performance.now()
+    const positionSeconds = Number(video.currentTime) || 0
+    const previousSample = learningActivitySampleRef.current
+    const elapsedSeconds = (now - previousSample.sampledAt) / 1000
+    const positionDelta = positionSeconds - previousSample.positionSeconds
+
+    if (
+      previousSample.lessonId === lessonId
+      && !video.paused
+      && !video.seeking
+      && elapsedSeconds > 0
+      && elapsedSeconds <= 4
+      && positionDelta > 0
+      && positionDelta <= elapsedSeconds * Math.max(1, Number(video.playbackRate) || 1) + 1
+    ) {
+      const activityState = learningActivityPendingRef.current.get(lessonId) || { seconds: 0, inFlight: false }
+      activityState.seconds += Math.min(2, elapsedSeconds)
+      learningActivityPendingRef.current.set(lessonId, activityState)
+    }
+
+    learningActivitySampleRef.current = { lessonId, positionSeconds, sampledAt: now }
+    const activityState = learningActivityPendingRef.current.get(lessonId)
+    if (activityState && (flush || activityState.seconds >= 15)) flushLearningActivity(entry)
+  }
+
   function handleVideoMetadata(video, entry) {
     initializeAttentionCheckSession(video, entry)
-    if (pendingSeekTimeRef.current !== null && !isNaN(pendingSeekTimeRef.current)) {
-      video.currentTime = pendingSeekTimeRef.current
-      pendingSeekTimeRef.current = null
-    } else {
-      video.currentTime = 0
-    }
+    const lessonId = String(entry?.lesson?._id || '')
+    const savedPosition = Number(lessonPlaybackPositionsRef.current[lessonId])
+    const duration = getVideoCompletionDuration(video)
+    const resumePosition = Number.isFinite(savedPosition) && savedPosition >= 0
+      ? Math.min(savedPosition, duration || savedPosition)
+      : 0
+    lessonWatchedPositionsRef.current[lessonId] = Math.max(
+      getWatchedPosition(lessonId),
+      resumePosition,
+    )
+    video.currentTime = resumePosition
     updateTranscriptPlaybackTime(video)
     setAutoplayBlockedLessonId('')
     const playback = video.play()
@@ -3580,28 +5190,6 @@ function StudentCourseLearning({
           setAutoplayBlockedLessonId(lessonId)
         }
       })
-    }
-  }
-
-  function handleSeekToLessonTimestamp(targetLessonId, timestampSeconds) {
-    const matchedEntry = lessons.find(({ lesson, lessonKey }) => (
-      String(lesson._id || lessonKey) === String(targetLessonId)
-    ))
-
-    const currentLessonId = String(activeEntry?.lesson?._id || activeEntry?.lessonKey || '')
-    const isSameLesson = matchedEntry && String(matchedEntry.lesson._id || matchedEntry.lessonKey) === currentLessonId
-
-    if (isSameLesson) {
-      if (videoPlayerRef.current && timestampSeconds != null && !isNaN(timestampSeconds)) {
-        videoPlayerRef.current.currentTime = timestampSeconds
-        videoPlayerRef.current.play().catch(() => {})
-        videoPlayerRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' })
-      }
-    } else if (matchedEntry) {
-      if (timestampSeconds != null && !isNaN(timestampSeconds)) {
-        pendingSeekTimeRef.current = timestampSeconds
-      }
-      selectLesson(matchedEntry)
     }
   }
 
@@ -3640,15 +5228,24 @@ function StudentCourseLearning({
     }
   }
 
-  async function setLessonCompleted(entry, completed) {
+  async function setLessonCompleted(entry, completed, video = videoPlayerRef.current) {
     const lessonId = String(entry.lesson._id || '')
+    const positionSeconds = Number(video?.currentTime)
+    const playerDuration = getVideoCompletionDuration(video)
+    const videoDuration = playerDuration > 0 ? playerDuration : positionSeconds
     if (!isValidLessonId(lessonId)) {
       setProgressError('This lesson cannot be tracked because it has no saved lesson ID.')
       return
     }
-    if (completed && !videoPlayerRef.current?.ended) {
+    if (completed && (
+      videoDuration <= 0
+      || !Number.isFinite(positionSeconds)
+    )) {
       setProgressError('Watch the entire video before completing this lesson.')
       return
+    }
+    if (completed) {
+      setOptimisticallyCompletedLessonIds((current) => new Set(current).add(lessonId))
     }
     setSavingLessonId(lessonId)
     setProgressError('')
@@ -3665,7 +5262,15 @@ function StudentCourseLearning({
           Authorization: `Bearer ${auth.token}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ lessonId, completed }),
+        body: JSON.stringify({
+          lessonId,
+          completed,
+          ...(completed ? {
+            positionSeconds,
+            videoDurationSeconds: videoDuration,
+            isPlaying: false,
+          } : {}),
+        }),
       }, API_BASE_URL, auth.token)
       const result = await response.json()
       if (isInvalidSessionResponse(response, result)) {
@@ -3673,16 +5278,46 @@ function StudentCourseLearning({
         return
       }
       if (!response.ok) throw new Error(result.message || 'Lesson progress could not be saved.')
+      const savedCompletedLessonIds = (result.completedLessonIds || []).map(String)
+      if (completed && !savedCompletedLessonIds.includes(lessonId)) {
+        throw new Error('The server did not confirm this lesson completion.')
+      }
+      if (result.lessonPlaybackPositions) {
+        lessonPlaybackPositionsRef.current = result.lessonPlaybackPositions
+      }
+      if (result.lessonWatchedPositions) {
+        lessonWatchedPositionsRef.current = result.lessonWatchedPositions
+      }
       onEnrollmentUpdated({
         ...enrollment,
-        completedLessonIds: result.completedLessonIds || [],
+        status: result.status || enrollment.status,
+        courseProgress: result.courseProgress || enrollment.courseProgress,
+        completedLessonIds: savedCompletedLessonIds,
         lessonPlaybackPositions: { ...lessonPlaybackPositionsRef.current },
+        lessonWatchedPositions: { ...lessonWatchedPositionsRef.current },
       })
+      if (completed) {
+        setOptimisticallyCompletedLessonIds((current) => {
+          const next = new Set(current)
+          next.delete(lessonId)
+          return next
+        })
+      }
       startedLessonIds.current.add(lessonId)
       if (completed) setCourseCertificateRefresh((current) => current + 1)
       onLearningDataChanged()
     } catch (saveError) {
-      setProgressError(saveError instanceof Error ? saveError.message : 'Lesson progress could not be saved.')
+      const message = saveError instanceof Error ? saveError.message : 'Lesson progress could not be saved.'
+      if (completed) {
+        setOptimisticallyCompletedLessonIds((current) => {
+          const next = new Set(current)
+          next.delete(lessonId)
+          return next
+        })
+      }
+      setProgressError(completed
+        ? `Video finished, but completion could not be synced: ${message}`
+        : message)
     } finally {
       setSavingLessonId('')
     }
@@ -3781,90 +5416,186 @@ function StudentCourseLearning({
 
   function moveContent(offset) {
     const nextItem = allContentItems[activeContentIndex + offset]
-    if (nextItem) selectContentItem(nextItem)
+    if (nextItem && isCourseItemAccessible(nextItem)) selectContentItem(nextItem)
+  }
+
+  function renderCourseResources() {
+    return (
+      <div className="student-course-resources">
+        <header className="student-course-resources__header">
+          <div className="student-course-resources__heading-group">
+            <span className="student-course-resources__eyebrow">
+              <Icon name="folderOpen" size={14} />
+              <span>Course Materials</span>
+            </span>
+            <h2>Learning Resources</h2>
+            <p>Access study materials and resources shared for this course.</p>
+          </div>
+          {courseResources.length > 0 && (
+            <div className="student-course-resources__stats">
+              <span className="student-course-resources__count-badge">
+                <strong>{courseResources.length}</strong> {courseResources.length === 1 ? 'file available' : 'files available'}
+              </span>
+            </div>
+          )}
+        </header>
+
+        {resourceAccessError && (
+          <div className="student-course-resources__error-banner" role="alert">
+            <Icon name="circleX" size={16} />
+            <span>{resourceAccessError}</span>
+            <button
+              type="button"
+              className="student-course-resources__error-dismiss"
+              onClick={() => setResourceAccessError('')}
+              aria-label="Dismiss error"
+            >
+              <Icon name="x" size={14} />
+            </button>
+          </div>
+        )}
+
+        {courseResources.length > 0 ? (
+          <div className="student-course-resources__grid">
+            {courseResources.map((resource, index) => {
+              const formatKey = getFormatKey(resource.format, resource.url)
+              const formatLabel = getFormatLabel(formatKey)
+              const originalFileName = getResourceOriginalFileName(resource)
+              const displayTitle = resource.title && resource.title.trim() ? resource.title.trim() : (originalFileName || 'Learning Resource')
+              const isDifferentFilename = originalFileName && originalFileName !== displayTitle && !displayTitle.includes(originalFileName)
+              const fileSize = formatFileSize(resource.bytes)
+              const uploadDate = formatResourceDate(resource.createdAt || resource.updatedAt || course?.updatedAt)
+              const description = resource.description || resource.caption || ''
+              const sourceTitle = resource.sourceTitle
+              const sourceType = resource.sourceType
+
+              const courseId = course?._id || enrollment?.courseId?._id || enrollment?.courseId
+              const viewUrl = getStudentResourceFileUrl(courseId, resource, false)
+              const downloadUrl = getStudentResourceFileUrl(courseId, resource, true)
+              const isDownloading = downloadingResourceId === resource._key
+
+              return (
+                <article
+                  className="student-resource-card"
+                  key={resource._key || resource._id || `${resource.url}-${index}`}
+                >
+                  <div className="student-resource-card__header">
+                    <div className={`student-resource-card__icon-box is-${formatKey}`}>
+                      <FileFormatIcon format={formatKey} />
+                      <span className="student-resource-card__format-tag">
+                        {formatKey.toUpperCase()}
+                      </span>
+                    </div>
+
+                    <div className="student-resource-card__info">
+                      <h3 className="student-resource-card__title" title={displayTitle}>
+                        {displayTitle}
+                      </h3>
+                      {sourceTitle && (
+                        <span className="student-resource-card__source" title={`${sourceType}: ${sourceTitle}`}>
+                          {sourceType ? `${sourceType}: ` : ''}{sourceTitle}
+                        </span>
+                      )}
+                      {isDifferentFilename && (
+                        <span className="student-resource-card__source" title={originalFileName}>
+                          {originalFileName}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {description && (
+                    <p className="student-resource-card__description">
+                      {description}
+                    </p>
+                  )}
+
+                  <div className="student-resource-card__meta">
+                    <span className="student-resource-card__meta-item">
+                      <Icon name="file" size={13} />
+                      <span>{formatLabel}</span>
+                    </span>
+                    {fileSize && (
+                      <>
+                        <span className="student-resource-card__meta-dot">•</span>
+                        <span className="student-resource-card__meta-item">
+                          <span>{fileSize}</span>
+                        </span>
+                      </>
+                    )}
+                    {uploadDate && (
+                      <>
+                        <span className="student-resource-card__meta-dot">•</span>
+                        <span className="student-resource-card__meta-item">
+                          <Icon name="clock" size={13} />
+                          <span>{uploadDate}</span>
+                        </span>
+                      </>
+                    )}
+                  </div>
+
+                  <div className="student-resource-card__actions">
+                    <a
+                      href={viewUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="student-resource-btn student-resource-btn--view"
+                      title={`View ${displayTitle}`}
+                    >
+                      <Icon name="eye" size={15} />
+                      <span>View</span>
+                    </a>
+                    <a
+                      href={downloadUrl}
+                      download={displayTitle}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className={`student-resource-btn student-resource-btn--download${isDownloading ? ' is-loading' : ''}`}
+                      title={`Download ${displayTitle}`}
+                      onClick={(e) => handleDownloadResource(e, resource, displayTitle)}
+                    >
+                      <Icon name={isDownloading ? 'loader' : 'download'} size={15} className={isDownloading ? 'is-spinning' : ''} />
+                      <span>{isDownloading ? 'Downloading…' : 'Download'}</span>
+                    </a>
+                  </div>
+                </article>
+              )
+            })}
+          </div>
+        ) : (
+          <div className="student-course-resources__empty">
+            <div className="student-course-resources__empty-icon">
+              <Icon name="folderOpen" size={34} />
+            </div>
+            <h3>No learning resources available for this course yet</h3>
+            <p>Study materials and downloadable guides shared for this course will appear here once added by the instructor.</p>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  function continueLearning() {
+    if (activeContentIndex >= 0 && activeContentIndex < allContentItems.length - 1) {
+      moveContent(1)
+      return
+    }
+    setActiveContentItemId('')
+    setDetailsTab('overview')
   }
 
   return (
     <div className="student-course-learning">
-      {progressError && <p className="student-courses__message is-error" role="alert">{progressError}</p>}
+      {progressError && !progressError.toLowerCase().includes('failed to fetch') && (
+        <p className="student-courses__message is-error" role="alert">{progressError}</p>
+      )}
       {allContentItems.length ? (
         <div className="student-course-learning__layout">
           <aside className="student-course-learning__sidebar" aria-label="Course modules and lessons">
             <header className="student-course-learning__sidebar-header">
-              <h2 className={course.title?.trim().toLowerCase() === 'python' ? 'is-python' : undefined}>{course.title}</h2>
+              <h2 className={typeof course?.title === 'string' && course.title.trim().toLowerCase() === 'python' ? 'is-python' : undefined}>{course?.title || 'Course'}</h2>
             </header>
-            {sequencedActivities.length > 0 ? (
-              <section className="student-course-learning__module is-expanded" style={{ borderBottom: 'none' }}>
-                <div style={{ padding: '10px 16px 6px', fontWeight: '700', fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--student-ink-muted, #777)' }}>
-                  Course Activities ({allContentItems.length})
-                </div>
-                <ul>
-                  {allContentItems
-                    .filter((item) => !contentSearch || item.title?.toLowerCase().includes(contentSearch.trim().toLowerCase()))
-                    .map((item, index) => {
-                      const isSelected = String(item._learningKey || item.id) === String(activeContentItemId)
-                        || (!activeContentItemId && detailsTab === 'overview' && item.type === 'video-lesson' && String(item._learningKey || item.id) === String(activeEntry?.lessonKey || activeEntry?.lesson?._id))
-
-                      const isLessonCompleted = item.type === 'video-lesson' && completedLessonIds.has(String(item.id || item.lesson?._id))
-
-                      const attempts = quizAttempts.filter((a) => String(a.quizId) === String(item.quizId || item.quiz?._id || item.id))
-                      const isQuizPassed = attempts.some((a) => a.status === 'submitted' && a.passed === true) || (item.isCompleted === true && item.type === 'quiz')
-                      const isQuizFailed = attempts.length > 0 && !isQuizPassed
-
-                      const isAssessmentSubmitted = (item.type === 'assignment' || item.type === 'assessment') && (
-                        assignmentSubmissions.some((s) => String(s.assignmentId) === String(item.assignmentId || item._id || item.id))
-                        || (item.isCompleted === true)
-                      )
-
-                      const isItemComplete = isLessonCompleted || isQuizPassed || isAssessmentSubmitted
-                      const isItemFailed = isQuizFailed
-
-                      const statusText = item.type === 'video-lesson'
-                        ? isItemComplete ? 'Completed' : item.durationSeconds ? `${Math.ceil(item.durationSeconds / 60)} min` : 'Video'
-                        : item.type === 'quiz'
-                          ? isItemComplete ? 'Passed (✓)' : isItemFailed ? 'Failed - Retry' : 'Quiz (Pending)'
-                          : item.type === 'assessment' || item.type === 'assignment'
-                            ? isItemComplete ? 'Submitted (✓)' : 'Pending submission'
-                            : getStudentContentLabel(item.type)
-
-                      return (
-                        <li key={item._learningKey || `${item.type}-${index}`}>
-                          <button
-                            id={item.id ? `student-content-${item.id}` : undefined}
-                            className={`${isSelected ? 'is-selected' : ''} ${isItemFailed ? 'is-item-failed' : ''}`}
-                            type="button"
-                            aria-current={isSelected ? 'true' : undefined}
-                            onClick={() => selectContentItem(item)}
-                            style={isItemFailed ? { borderColor: 'rgba(211, 47, 47, 0.4)' } : undefined}
-                          >
-                            <span
-                              className={`student-course-learning__item-icon${isItemComplete ? ' is-complete' : ''}${isItemFailed ? ' is-failed' : ''}`}
-                              style={isItemFailed ? { background: 'rgba(211, 47, 47, 0.15)', color: '#d32f2f' } : undefined}
-                            >
-                              <Icon
-                                name={isItemComplete ? 'check' : isItemFailed ? 'alertCircle' : item.type === 'assignment' || item.type === 'assessment' ? 'clipboardCheck' : item.type === 'quiz' ? 'clipboardCheck' : 'play'}
-                                size={15}
-                              />
-                            </span>
-                            <span className="student-course-learning__item-copy">
-                              <strong>
-                                <span style={{ color: 'var(--student-ink-muted, #777)', marginRight: '4px', fontSize: '11px' }}>
-                                  #${item.sequenceNumber || item.sequenceIndex || (index + 1)}.
-                                </span>
-                                {item.title}
-                              </strong>
-                              <small style={isItemFailed ? { color: '#d32f2f', fontWeight: '600' } : undefined}>
-                                {statusText}
-                              </small>
-                            </span>
-                            {isSelected && <span className="student-course-learning__play">▶</span>}
-                          </button>
-                        </li>
-                      )
-                    })}
-                </ul>
-              </section>
-            ) : filteredModuleItems.map(({ module, moduleKey, items }) => {
+            {filteredModuleItems.map(({ module, moduleKey, items }) => {
               const expanded = expandedModules.has(moduleKey) || Boolean(contentSearch.trim())
               return (
                 <section className={`student-course-learning__module${expanded ? ' is-expanded' : ''}`} key={moduleKey}>
@@ -3886,16 +5617,20 @@ function StudentCourseLearning({
                       const assignmentReviewStatus = item.type === 'assignment'
                         ? getAssignmentReviewStatus(item)
                         : ''
-                      const assignmentApproved = assignmentReviewStatus === 'approved'
+                      const assignmentPassed = assignmentReviewStatus === 'passed'
                       const assignmentAwaitingReview = assignmentReviewStatus === 'pending'
                       const assignmentRejected = assignmentReviewStatus === 'rejected'
+                      const assignmentFailed = assignmentReviewStatus === 'failed'
                       const isCompleted = (item.type === 'video-lesson' && completedLessonIds.has(String(item._id)))
                         || quizPassed
-                        || assignmentApproved
+                        || assignmentPassed
+                      const isLocked = !isCourseItemAccessible(item)
                       const quizAttemptCount = item.quiz?._id
                         ? quizAttempts.filter((attempt) => String(attempt.quizId) === String(item.quiz._id)).length
                         : 0
-                      const status = item.type === 'video-lesson'
+                      const status = isLocked
+                        ? 'Locked until previous activity is complete'
+                        : item.type === 'video-lesson'
                         ? isCompleted ? 'Completed' : item.durationSeconds ? `${Math.ceil(item.durationSeconds / 60)} min` : 'Video'
                         : item.type === 'quiz'
                           ? quizPassed ? 'Passed' : `${quizAttemptCount} ${quizAttemptCount === 1 ? 'attempt' : 'attempts'}`
@@ -3907,15 +5642,18 @@ function StudentCourseLearning({
                         isCompleted && 'is-complete',
                         assignmentAwaitingReview && 'is-awaiting-review',
                         assignmentRejected && 'is-rejected',
+                        assignmentFailed && 'is-failed',
                       ].filter(Boolean).join(' ')
                       const statusClassName = assignmentAwaitingReview
                         ? 'is-awaiting-review'
-                        : assignmentRejected ? 'is-rejected' : ''
-                      const itemIcon = isCompleted
+                        : assignmentRejected || assignmentFailed ? 'is-failed' : ''
+                      const itemIcon = isLocked
+                        ? 'lock'
+                        : isCompleted
                         ? 'check'
                         : assignmentAwaitingReview
                           ? 'clock'
-                          : assignmentRejected
+                          : assignmentRejected || assignmentFailed
                             ? 'circleX'
                             : item.type === 'assignment' || item.type === 'quiz'
                               ? 'clipboardCheck'
@@ -3926,11 +5664,14 @@ function StudentCourseLearning({
                             id={item._id ? `student-content-${item._id}` : undefined}
                             className={isSelected ? 'is-selected' : ''}
                             type="button"
+                            disabled={isLocked}
                             aria-current={isSelected ? 'true' : undefined}
                             onClick={() => selectContentItem(item)}
                           >
                             <span className={itemIconClassName}>
-                              <Icon name={itemIcon} size={15} />
+                              {assignmentFailed
+                                ? <span className="student-course-learning__failure-mark" aria-hidden="true">!</span>
+                                : <Icon name={itemIcon} size={15} />}
                             </span>
                             <span className="student-course-learning__item-copy"><strong>{item.title}</strong><small className={statusClassName}>{status}</small></span>
                             {isSelected && <span className="student-course-learning__play">▶</span>}
@@ -3950,37 +5691,47 @@ function StudentCourseLearning({
                   const assignmentReviewStatus = item.type === 'assignment'
                     ? getAssignmentReviewStatus(item)
                     : ''
-                  const assignmentApproved = assignmentReviewStatus === 'approved'
+                  const assignmentPassed = assignmentReviewStatus === 'passed'
                   const assignmentAwaitingReview = assignmentReviewStatus === 'pending'
                   const assignmentRejected = assignmentReviewStatus === 'rejected'
-                  const isCompleted = quizPassed || assignmentApproved
+                  const assignmentFailed = assignmentReviewStatus === 'failed'
+                  const isCompleted = quizPassed || assignmentPassed
+                  const isLocked = !isCourseItemAccessible(item)
                   const itemIconClassName = [
                     'student-course-learning__item-icon',
                     isCompleted && 'is-complete',
                     assignmentAwaitingReview && 'is-awaiting-review',
                     assignmentRejected && 'is-rejected',
+                    assignmentFailed && 'is-failed',
                   ].filter(Boolean).join(' ')
                   const statusClassName = assignmentAwaitingReview
                     ? 'is-awaiting-review'
-                    : assignmentRejected ? 'is-rejected' : ''
+                    : assignmentRejected || assignmentFailed ? 'is-failed' : ''
                   return (
                     <li key={item._learningKey}>
                       <button
                         className={item._learningKey === activeContentItemId ? 'is-selected' : ''}
                         type="button"
+                        disabled={isLocked}
                         aria-current={item._learningKey === activeContentItemId ? 'true' : undefined}
                         onClick={() => selectContentItem(item)}
                       >
                         <span className={itemIconClassName}>
-                          <Icon
-                            name={isCompleted ? 'check' : assignmentAwaitingReview ? 'clock' : assignmentRejected ? 'circleX' : 'clipboardCheck'}
-                            size={15}
-                          />
+                          {isLocked
+                            ? <Icon name="lock" size={15} />
+                            : assignmentFailed
+                            ? <span className="student-course-learning__failure-mark" aria-hidden="true">!</span>
+                            : <Icon
+                                name={isCompleted ? 'check' : assignmentAwaitingReview ? 'clock' : assignmentRejected ? 'circleX' : 'clipboardCheck'}
+                                size={15}
+                              />}
                         </span>
                         <span className="student-course-learning__item-copy">
                           <strong>{item.title}</strong>
                           <small className={statusClassName}>
-                            {item.type === 'assignment'
+                            {isLocked
+                              ? 'Locked until previous activity is complete'
+                              : item.type === 'assignment'
                               ? getAssignmentSidebarLabel(assignmentReviewStatus)
                               : quizPassed ? 'Passed' : getStudentContentLabel(item.type)}
                           </small>
@@ -4036,8 +5787,8 @@ function StudentCourseLearning({
                   setDetailsTab('resources')
                 }}
               >
-                <span className="student-course-learning__item-icon"><Icon name="link" size={15} /></span>
-                <strong>Resources</strong>
+                <span className="student-course-learning__item-icon"><Icon name="folderOpen" size={15} /></span>
+                <strong>Learning Resources</strong>
               </button>
             </section>
             {contentSearch && !filteredModuleItems.some(({ items }) => items.length) && !filteredCourseLevelItems.length && (
@@ -4060,7 +5811,7 @@ function StudentCourseLearning({
             {showVideoPlayer && (
               <div className="student-course-learning__active-heading">
                 <div>
-                  <h2>{activeEntry?.lesson.title || 'Select course content'}</h2>
+                  <h2>{activeEntry?.lesson?.title || activeContentItem?.title || 'Select course content'}</h2>
                   <span className="student-course-learning__type student-course-learning__type--video-lesson">
                     <Icon name="book" size={14} />
                     {getStudentContentLabel('video-lesson')}
@@ -4069,22 +5820,35 @@ function StudentCourseLearning({
               </div>
             )}
             {showVideoPlayer && (
-              <div className="student-course-learning__player">
-                {activeEntry?.lesson.videoUrl
+              <div
+                className="student-course-learning__player"
+                ref={videoPlayerContainerRef}
+                onPointerMove={revealVideoControls}
+                onPointerLeave={hideVideoControls}
+              >
+                {activeVideoUrl
                   ? <video
                     ref={videoPlayerRef}
-                    key={`${String(activeEntry.lesson._id || activeEntry.lessonKey)}:${activeEntry.lesson.videoUrl}:${videoOpenSequence}`}
+                    key={videoSourceKey}
                     controls
+                    controlsList="nodownload noplaybackrate nofullscreen"
+                    disablePictureInPicture
                     playsInline
-                    preload="metadata"
-                    src={activeEntry.lesson.videoUrl}
+                    preload="auto"
+                    src={activeVideoUrl}
+                    onClick={toggleVideoPlaybackFromSurface}
                     onLoadedMetadata={(event) => {
                       handleVideoMetadata(event.currentTarget, activeEntry)
                       updateTranscriptPlaybackTime(event.currentTarget)
+                      setIsVideoMuted(event.currentTarget.muted)
                     }}
+                    onError={() => setFailedVideoSourceKey(videoSourceKey)}
+                    onVolumeChange={(event) => setIsVideoMuted(event.currentTarget.muted)}
+                    onPlaying={(event) => resetLearningActivitySample(activeEntry, event.currentTarget)}
                     onPlay={(event) => {
                       updateTranscriptPlaybackTime(event.currentTarget)
-                      saveLessonPlaybackPosition(activeEntry, event.currentTarget.currentTime, true)
+                      resetLearningActivitySample(activeEntry, event.currentTarget)
+                      saveLessonPlaybackPosition(activeEntry, event.currentTarget.currentTime, true, true)
                       const settings = activeEntry.lesson.attentionCheck
                       if (settings?.enabled === true) {
                         initializeAttentionCheckSession(event.currentTarget)
@@ -4093,34 +5857,104 @@ function StudentCourseLearning({
                     }}
                     onTimeUpdate={(event) => {
                       updateTranscriptPlaybackTime(event.currentTarget)
+                      recordLearningActivity(activeEntry, event.currentTarget)
+                      updateWatchedPosition(activeEntry, event.currentTarget)
                       saveLessonPlaybackPosition(activeEntry, event.currentTarget.currentTime)
                       checkAttentionSchedule(event.currentTarget)
                     }}
                     onSeeking={(event) => {
                       updateTranscriptPlaybackTime(event.currentTarget)
+                      resetLearningActivitySample(activeEntry, event.currentTarget)
                       handleAttentionVideoSeeking(event.currentTarget)
                     }}
-                    onSeeked={(event) => updateTranscriptPlaybackTime(event.currentTarget)}
+                    onSeeked={(event) => {
+                      updateTranscriptPlaybackTime(event.currentTarget)
+                      resetLearningActivitySample(activeEntry, event.currentTarget)
+                    }}
+                    onWaiting={(event) => resetLearningActivitySample(activeEntry, event.currentTarget)}
                     onPause={(event) => {
                       updateTranscriptPlaybackTime(event.currentTarget)
-                      saveLessonPlaybackPosition(activeEntry, event.currentTarget.currentTime, true)
+                      recordLearningActivity(activeEntry, event.currentTarget, true)
+                      saveLessonPlaybackPosition(activeEntry, event.currentTarget.currentTime, true, false)
                     }}
-                    onEnded={() => {
+                    onEnded={(event) => {
+                      recordLearningActivity(activeEntry, event.currentTarget, true)
                       endCurrentAttentionCheckSession()
-                      const video = videoPlayerRef.current
-                      if (video) updateTranscriptPlaybackTime(video)
-                      saveLessonPlaybackPosition(activeEntry, video?.currentTime || 0, true)
-                      if (!completedLessonIds.has(String(activeEntry.lesson._id))) setLessonCompleted(activeEntry, true)
+                      const video = event.currentTarget
+                      updateWatchedPosition(activeEntry, video)
+                      updateTranscriptPlaybackTime(video)
+                      saveLessonPlaybackPosition(activeEntry, video.currentTime, true, false)
+                      if (activeEntry?.lesson?._id && !completedLessonIds.has(String(activeEntry.lesson._id))) {
+                        void setLessonCompleted(activeEntry, true, video)
+                      }
                     }}
                   >
                     Your browser does not support video playback.
                   </video>
-                  : <div className="student-course-learning__no-video">No video has been uploaded for this lesson.</div>}
+                  : courseContentStatus === 'loading'
+                    ? <div className="student-course-learning__video-state student-course-learning__video-state--loading" role="status" aria-busy="true">
+                      <span className="student-loader" aria-hidden="true" />
+                      <span>Loading video…</span>
+                    </div>
+                    : courseContentStatus === 'error'
+                      ? <div className="student-course-learning__video-state" role="alert">
+                        Video details could not be loaded.
+                      </div>
+                      : activeEntry
+                        ? <div className="student-course-learning__no-video">No video has been uploaded for this lesson.</div>
+                        : <div className="student-course-learning__no-video">Select a lesson to view its video.</div>}
+                {videoMediaFailed && (
+                  <div className="student-course-learning__video-state" role="alert">
+                    This video could not be loaded. Please try selecting the lesson again.
+                  </div>
+                )}
+                {activeVideoUrl && (
+                  <div
+                    className={`student-course-learning__custom-controls${areVideoControlsVisible ? ' is-visible' : ''}${areVideoControlsKeyboardFocused ? ' is-keyboard-focused' : ''}`}
+                    role="group"
+                    aria-label="Video controls"
+                    onFocus={(event) => setAreVideoControlsKeyboardFocused(event.target.matches(':focus-visible'))}
+                    onBlur={(event) => {
+                      if (!event.currentTarget.contains(event.relatedTarget)) {
+                        setAreVideoControlsKeyboardFocused(false)
+                      }
+                    }}
+                  >
+                    <button
+                      className="student-course-learning__volume-button"
+                      type="button"
+                      aria-label={isVideoMuted ? 'Unmute video' : 'Mute video'}
+                      aria-pressed={isVideoMuted}
+                      onClick={toggleVideoMute}
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M3 9v6h4l5 4V5L7 9H3z" />
+                        {isVideoMuted
+                          ? <path d="m16 9 5 6m0-6-5 6" />
+                          : <><path d="M16 9a5 5 0 0 1 0 6" /><path d="M18.5 6a9 9 0 0 1 0 12" /></>}
+                      </svg>
+                    </button>
+                    <button
+                      className="student-course-learning__fullscreen-button"
+                      type="button"
+                      aria-label={isVideoPlayerFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+                      title={isVideoPlayerFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+                      aria-pressed={isVideoPlayerFullscreen}
+                      onClick={() => void toggleVideoPlayerFullscreen()}
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        {isVideoPlayerFullscreen
+                          ? <path d="M9 3v6H3M21 9h-6V3M15 21v-6h6M3 15h6v6" />
+                          : <path d="M3 9V3h6M15 3h6v6M21 15v6h-6M9 21H3v-6" />}
+                      </svg>
+                    </button>
+                  </div>
+                )}
                 {attentionCheckLoading && !attentionCheckChallenge && (
                   <div className="student-course-learning__attention-overlay" role="status">Loading attention check…</div>
                 )}
                 {attentionCheckChallenge && (
-                  <form className="student-course-learning__attention-overlay" onSubmit={submitAttentionAnswer} role="dialog" aria-modal="true" aria-labelledby="student-attention-question">
+                  <form className="student-course-learning__attention-overlay student-course-learning__attention-overlay--question" onSubmit={submitAttentionAnswer} role="dialog" aria-modal="true" aria-labelledby="student-attention-question">
                     <h3 id="student-attention-question">{attentionCheckChallenge.question.prompt}</h3>
                     <p role="timer" aria-live="off">Time remaining: {attentionCheckSecondsRemaining}s</p>
                     <div className="student-course-learning__attention-options">
@@ -4131,13 +5965,13 @@ function StudentCourseLearning({
                           <label key={`${index}-${option}`}>
                             <input
                               type={multiSelect ? 'checkbox' : 'radio'}
-                              name={`attention-${activeEntry.lesson._id}-${attentionCheckChallenge.triggerIndex}`}
+                              name={`attention-${activeEntry?.lesson?._id || 'lesson'}-${attentionCheckChallenge.triggerIndex}`}
                               checked={checked}
                               disabled={attentionCheckLoading || attentionCheckSecondsRemaining <= 0}
                               onChange={(event) => setAttentionCheckAnswer((current) => (
                                 multiSelect
-                                  ? event.target.checked ? [...current, index] : current.filter((value) => value !== index)
-                                  : [index]
+                                    ? event.target.checked ? [...current, index] : current.filter((value) => value !== index)
+                                    : [index]
                               ))}
                             />
                             <span>{option}</span>
@@ -4159,6 +5993,11 @@ function StudentCourseLearning({
                     )}
                   </div>
                 )}
+                {videoPlayerFullscreenError && (
+                  <div className="student-course-learning__fullscreen-error" role="alert">
+                    {videoPlayerFullscreenError}
+                  </div>
+                )}
               </div>
             )}
             {showVideoPlayer && attentionCheckConfigurationError && (
@@ -4175,88 +6014,77 @@ function StudentCourseLearning({
                 }}>Resume video</button>
               </p>
             )}
-            {showVideoPlayer && autoplayBlockedLessonId === String(activeEntry?.lesson?._id || activeEntry?.lessonKey) && (
+            {showVideoPlayer && autoplayBlockedLessonId === String(activeEntry?.lesson?._id || activeEntry?.lessonKey || '') && (
               <p className="student-course-learning__attention-warning" role="status">
                 Autoplay was blocked by your browser. Press Play on the video controls to start the lesson.
               </p>
             )}
             {showVideoPlayer && (
-              <div className="student-course-learning__video-nav">
-                <button type="button" disabled={activeContentIndex <= 0} onClick={() => moveContent(-1)}>← Previous</button>
-                <button
-                  type="button"
-                  className="student-course-learning__take-note-nav-btn"
-                  onClick={() => {
-                    setActiveContentItemId('')
-                    setDetailsTab('notes')
-                    if (requestOpenNoteEditorRef.current) {
-                      requestOpenNoteEditorRef.current()
-                    }
-                  }}
-                  title="Add a personal study note at this exact video moment"
-                >
-                  <Icon name="pen" size={13} />
-                  <span>Take Note</span>
-                </button>
-                <button type="button" disabled={activeContentIndex < 0 || activeContentIndex >= allContentItems.length - 1} onClick={() => moveContent(1)}>Next →</button>
-              </div>
-            )}
-            {showVideoPlayer && activeEntry && (
-              <div className="student-course-learning__video-completion">
-                <button
-                  className={`student-button${completedLessonIds.has(String(activeEntry.lesson._id)) ? ' student-button--quiet' : ''}`}
-                  type="button"
-                  disabled={
-                    savingLessonId === String(activeEntry.lesson._id)
-                    || !activeEntry.lesson._id
-                    || !completedLessonIds.has(String(activeEntry.lesson._id))
-                  }
-                  title={completedLessonIds.has(String(activeEntry.lesson._id))
-                    ? 'This lesson is complete.'
-                    : 'Watch the entire video to complete this lesson.'}
-                >
-                  {savingLessonId === String(activeEntry.lesson._id)
-                    ? 'Saving…'
-                    : completedLessonIds.has(String(activeEntry.lesson._id)) ? 'Completed' : 'Watch video to complete'}
-                </button>
+              <div className="student-course-learning__video-actions">
+                {activeEntry?.lesson && (
+                  <div className="student-course-learning__video-completion">
+                    <button
+                      className={`student-button${completedLessonIds.has(String(activeEntry.lesson._id)) ? ' student-button--quiet' : ''}`}
+                      type="button"
+                      disabled={
+                        savingLessonId === String(activeEntry.lesson._id)
+                        || !activeEntry.lesson._id
+                        || !completedLessonIds.has(String(activeEntry.lesson._id))
+                      }
+                      title={completedLessonIds.has(String(activeEntry.lesson._id))
+                        ? 'This lesson is complete.'
+                        : 'Watch the entire video to complete this lesson.'}
+                    >
+                      {savingLessonId === String(activeEntry.lesson._id)
+                        ? 'Saving…'
+                        : completedLessonIds.has(String(activeEntry.lesson._id)) ? 'Completed' : 'Watch video to complete'}
+                    </button>
+                  </div>
+                )}
+                <div className="student-course-learning__video-nav">
+                  <button type="button" disabled={activeContentIndex <= 0} onClick={() => moveContent(-1)}>← Previous</button>
+                  <button
+                    type="button"
+                    disabled={activeContentIndex < 0 || activeContentIndex >= allContentItems.length - 1 || !isCourseItemAccessible(allContentItems[activeContentIndex + 1])}
+                    onClick={() => moveContent(1)}
+                  >Next →</button>
+                </div>
               </div>
             )}
             <section className="student-course-learning__details">
-              {!showVideoPlayer && !isActiveAssignment && <div className="student-course-learning__active-heading">
+              {!showVideoPlayer && !isActiveAssignment && detailsTab !== 'resources' && <div className="student-course-learning__active-heading">
                 <div>
-                  <h2>{detailsTab === 'certificate' ? 'Course Certificate' : activeContentItem?.title || (detailsTab === 'notes' ? 'Notes' : detailsTab === 'resources' ? 'Resources' : activeEntry?.lesson.title) || 'Select course content'}</h2>
+                  <h2>{detailsTab === 'certificate' ? 'Course Certificate' : activeContentItem?.title || (detailsTab === 'notes' ? 'Notes' : activeEntry?.lesson?.title) || 'Select course content'}</h2>
                   {detailsTab === 'certificate'
                     ? <span className="student-course-learning__type student-course-learning__type--certificate"><Icon name="award" size={14} />Certificate</span>
                     : <span className={`student-course-learning__type student-course-learning__type--${activeContentItem?.type || 'video-lesson'}`}>
-                      <Icon name={activeContentItem?.type === 'assignment' ? 'clipboardCheck' : activeContentItem?.type === 'note' || detailsTab === 'notes' ? 'folderOpen' : activeContentItem?.type === 'quiz' ? 'check' : detailsTab === 'resources' ? 'link' : 'book'} size={14} />
-                      {detailsTab === 'resources'
-                        ? 'Resources'
-                        : getStudentContentLabel(activeContentItem?.type || (detailsTab === 'notes' ? 'note' : 'video-lesson'))}
+                      <Icon name={activeContentItem?.type === 'assignment' ? 'clipboardCheck' : activeContentItem?.type === 'note' || detailsTab === 'notes' ? 'folderOpen' : activeContentItem?.type === 'quiz' ? 'check' : 'book'} size={14} />
+                      {getStudentContentLabel(activeContentItem?.type || (detailsTab === 'notes' ? 'note' : 'video-lesson'))}
                     </span>}
                 </div>
                 {!showVideoPlayer && detailsTab !== 'certificate' && !isActiveQuiz && <div className="student-course-learning__detail-nav">
                   <button type="button" disabled={activeContentIndex <= 0} onClick={() => moveContent(-1)}>← Previous</button>
-                  <button type="button" disabled={activeContentIndex < 0 || activeContentIndex >= allContentItems.length - 1} onClick={() => moveContent(1)}>Next →</button>
+                  <button
+                    type="button"
+                    disabled={activeContentIndex < 0 || activeContentIndex >= allContentItems.length - 1 || !isCourseItemAccessible(allContentItems[activeContentIndex + 1])}
+                    onClick={() => moveContent(1)}
+                  >Next →</button>
                 </div>}
               </div>}
-              {detailsTab === 'overview' && !isActiveAssignment && (activeContentItem?.description || (!activeContentItem && activeEntry?.lesson.content)) && (
+              {detailsTab === 'overview' && !isActiveAssignment && (activeContentItem?.description || (!activeContentItem && activeEntry?.lesson?.content)) && (
                 <p className="student-course-learning__active-description">
-                  {activeContentItem?.description || activeEntry?.lesson.content}
+                  {activeContentItem?.description || activeEntry?.lesson?.content}
                 </p>
               )}
-              {detailsTab !== 'certificate' && !isActiveAssignment && <div className="student-course-learning__tabs" role="tablist" aria-label="Course information">
+              {detailsTab !== 'certificate' && detailsTab !== 'resources' && !isActiveAssignment && <div className="student-course-learning__tabs" role="tablist" aria-label="Course information">
                 {showVideoPlayer ? (
                   <>
                     <button
                       type="button"
                       role="tab"
-                      aria-selected={detailsTab === 'overview' && lessonInfoTab === 'overview'}
-                      className={detailsTab === 'overview' && lessonInfoTab === 'overview' ? 'is-active' : ''}
-                      onClick={() => {
-                        setActiveContentItemId('')
-                        setDetailsTab('overview')
-                        setLessonInfoTab('overview')
-                      }}
+                      aria-selected={lessonInfoTab === 'overview'}
+                      className={lessonInfoTab === 'overview' ? 'is-active' : ''}
+                      onClick={() => setLessonInfoTab('overview')}
                     >
                       <Icon name="book" size={15} />
                       Lesson Overview
@@ -4264,13 +6092,9 @@ function StudentCourseLearning({
                     <button
                       type="button"
                       role="tab"
-                      aria-selected={detailsTab === 'overview' && lessonInfoTab === 'transcript'}
-                      className={detailsTab === 'overview' && lessonInfoTab === 'transcript' ? 'is-active' : ''}
-                      onClick={() => {
-                        setActiveContentItemId('')
-                        setDetailsTab('overview')
-                        setLessonInfoTab('transcript')
-                      }}
+                      aria-selected={lessonInfoTab === 'transcript'}
+                      className={lessonInfoTab === 'transcript' ? 'is-active' : ''}
+                      onClick={() => setLessonInfoTab('transcript')}
                     >
                       <Icon name="book" size={15} />
                       Transcript
@@ -4291,63 +6115,33 @@ function StudentCourseLearning({
                     Overview
                   </button>
                 )}
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={detailsTab === 'notes'}
-                  className={detailsTab === 'notes' ? 'is-active' : ''}
-                  onClick={() => {
-                    setActiveContentItemId('')
-                    setDetailsTab('notes')
-                  }}
-                >
-                  <Icon name="pen" size={15} />
-                  My Notes
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={detailsTab === 'resources'}
-                  className={detailsTab === 'resources' ? 'is-active' : ''}
-                  onClick={() => {
-                    setActiveContentItemId('')
-                    setDetailsTab('resources')
-                  }}
-                >
-                  <Icon name="link" size={15} />
-                  Resources
-                  {courseResources.length > 0 && <span className="student-course-learning__tab-badge">{courseResources.length}</span>}
-                </button>
               </div>}
               {detailsTab === 'certificate' ? (
                 <div className="student-course-learning__tab-content">{renderCourseCertificate()}</div>
               ) : detailsTab === 'notes' ? (
                 <div className="student-course-learning__tab-content">
-                  <StudentNotesSection
-                    course={course}
-                    lessons={lessons}
-                    activeEntry={activeEntry}
-                    videoPlayerRef={videoPlayerRef}
-                    onSeekToLessonTimestamp={handleSeekToLessonTimestamp}
-                    onLogout={onLogout}
-                    apiBaseUrl={API_BASE_URL}
-                    onRequestOpenEditorRef={requestOpenNoteEditorRef}
-                  />
+                  {courseNotes.length ? courseNotes.map((note) => (
+                    <article className="student-course-learning__note-card" key={note._learningKey}>
+                      <h3>{note.title}</h3>
+                      {note.content && <p>{note.content}</p>}
+                      {note.resources?.length > 0 && (
+                        <ul className="student-course-note__resources">
+                          {note.resources.map((resource, index) => (
+                            <li key={resource._id || `${resource.url}-${index}`}>
+                              <a href={resource.url} target="_blank" rel="noreferrer" download={resource.resourceType === 'raw' || resource.format === 'pdf' ? resource.title : undefined}>
+                                {resource.title || `Resource ${index + 1}`}
+                              </a>
+                              {resource.format && <small>{resource.format.toUpperCase()}</small>}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </article>
+                  )) : <p className="student-course-learning__tab-empty">No notes have been added to this course.</p>}
                 </div>
               ) : detailsTab === 'resources' ? (
-                <div className="student-course-learning__tab-content">
-                  {courseResources.length ? (
-                    <ul className="student-course-note__resources">
-                      {courseResources.map((resource, index) => (
-                        <li key={resource._id || `${resource.url}-${index}`}>
-                          <a href={resource.url} target="_blank" rel="noreferrer" download={resource.resourceType === 'raw' || resource.format === 'pdf' ? resource.title : undefined}>
-                            {resource.title || `Resource ${index + 1}`}
-                          </a>
-                          {resource.format && <small>{resource.format.toUpperCase()}</small>}
-                        </li>
-                      ))}
-                    </ul>
-                  ) : <p className="student-course-learning__tab-empty">No resources have been added to this course.</p>}
+                <div className="student-course-learning__tab-content student-course-learning__tab-content--resources">
+                  {renderCourseResources()}
                 </div>
               ) : showVideoPlayer ? (
                 <div className="student-course-learning__tab-content">
@@ -4422,6 +6216,11 @@ function StudentCourseLearning({
                         onLogout={onLogout}
                         showHeader={false}
                       />
+                    ) : courseContentStatus === 'loading' ? (
+                      <div className="student-quiz-loading" role="status" aria-busy="true">
+                        <span className="student-loader" aria-hidden="true" />
+                        <span>Loading quiz…</span>
+                      </div>
                     ) : <EmptyState icon="check" title="Quiz is not available" description="This quiz does not contain any questions." />
                   ) : activeContentItem?.type === 'assignment' ? (
                     <StudentAssignmentPanel
@@ -4433,14 +6232,15 @@ function StudentCourseLearning({
                       onSubmitted={addAssignmentSubmission}
                       onLearningDataChanged={onLearningDataChanged}
                       onLogout={onLogout}
+                      onContinueLearning={continueLearning}
                       showHeader
-                      canSubmit={['not-submitted', 'rejected'].includes(getAssignmentReviewStatus(activeContentItem))}
+                      canSubmit={getAssignmentReviewStatus(activeContentItem) !== 'passed'}
                     />
                   ) : activeContentItem?.type === 'note' ? (
                     <StudentNotePanel item={activeContentItem} />
-                  ) : activeEntry ? (
+                  ) : activeEntry?.lesson ? (
                     <section className="student-course-learning__lesson">
-                      <span className="student-eyebrow">{activeEntry.module.title}</span>
+                      <span className="student-eyebrow">{activeEntry.module?.title || ''}</span>
                     </section>
                   ) : <EmptyState icon="book" title="Select course content" description="Choose a video, quiz, assignment, or note from the course content list." />}
                 </div>
@@ -4448,7 +6248,11 @@ function StudentCourseLearning({
               {(isActiveAssignment || (isActiveQuiz && !hasActiveQuizAttempt)) && (
                 <div className={`student-course-learning__detail-nav student-course-learning__detail-nav--bottom${isActiveAssignment ? ' student-course-learning__detail-nav--assignment' : ''}`}>
                   <button type="button" disabled={activeContentIndex <= 0} onClick={() => moveContent(-1)}>← Previous</button>
-                  <button type="button" disabled={activeContentIndex < 0 || activeContentIndex >= allContentItems.length - 1} onClick={() => moveContent(1)}>Next →</button>
+                  <button
+                    type="button"
+                    disabled={activeContentIndex < 0 || activeContentIndex >= allContentItems.length - 1 || !isCourseItemAccessible(allContentItems[activeContentIndex + 1])}
+                    onClick={() => moveContent(1)}
+                  >Next →</button>
                 </div>
               )}
             </section>
@@ -4457,7 +6261,7 @@ function StudentCourseLearning({
       ) : showCourseCertificate ? (
         <div className="student-course-learning__layout">
           <aside className="student-course-learning__sidebar" aria-label="Course modules and lessons">
-            <header className="student-course-learning__sidebar-header"><h2>{course.title}</h2></header>
+            <header className="student-course-learning__sidebar-header"><h2>{course?.title || 'Course'}</h2></header>
             <section className="student-course-learning__sidebar-links" aria-label="Course materials">
               <button
                 className={detailsTab === 'certificate' ? 'is-selected' : ''}
@@ -4468,13 +6272,23 @@ function StudentCourseLearning({
                 <span className="student-course-learning__item-icon"><Icon name="award" size={15} /></span>
                 <strong>Certificate</strong>
               </button>
-              <button className={detailsTab === 'notes' ? 'is-selected' : ''} type="button" aria-pressed={detailsTab === 'notes'} onClick={() => setDetailsTab('notes')}>
+              <button
+                className={detailsTab === 'notes' ? 'is-selected' : ''}
+                type="button"
+                aria-pressed={detailsTab === 'notes'}
+                onClick={() => setDetailsTab('notes')}
+              >
                 <span className="student-course-learning__item-icon"><Icon name="pen" size={15} /></span>
                 <strong>Notes</strong>
               </button>
-              <button className={detailsTab === 'resources' ? 'is-selected' : ''} type="button" aria-pressed={detailsTab === 'resources'} onClick={() => setDetailsTab('resources')}>
-                <span className="student-course-learning__item-icon"><Icon name="link" size={15} /></span>
-                <strong>Resources</strong>
+              <button
+                className={detailsTab === 'resources' ? 'is-selected' : ''}
+                type="button"
+                aria-pressed={detailsTab === 'resources'}
+                onClick={() => setDetailsTab('resources')}
+              >
+                <span className="student-course-learning__item-icon"><Icon name="folderOpen" size={15} /></span>
+                <strong>Learning Resources</strong>
               </button>
             </section>
           </aside>
@@ -4484,18 +6298,30 @@ function StudentCourseLearning({
                 <div className="student-course-learning__active-heading"><h2>Course Certificate</h2></div>
                 <div className="student-course-learning__tab-content">{renderCourseCertificate()}</div>
               </>
+            ) : detailsTab === 'resources' ? (
+              <div className="student-course-learning__tab-content student-course-learning__tab-content--resources">
+                {renderCourseResources()}
+              </div>
             ) : detailsTab === 'notes' ? (
               <div className="student-course-learning__tab-content">
-                <StudentNotesSection
-                  course={course}
-                  lessons={lessons}
-                  activeEntry={activeEntry}
-                  videoPlayerRef={videoPlayerRef}
-                  onSeekToLessonTimestamp={handleSeekToLessonTimestamp}
-                  onLogout={onLogout}
-                  apiBaseUrl={API_BASE_URL}
-                  onRequestOpenEditorRef={requestOpenNoteEditorRef}
-                />
+                {courseNotes.length ? courseNotes.map((note) => (
+                  <article className="student-course-learning__note-card" key={note._learningKey}>
+                    <h3>{note.title}</h3>
+                    {note.content && <p>{note.content}</p>}
+                    {note.resources?.length > 0 && (
+                      <ul className="student-course-note__resources">
+                        {note.resources.map((resource, index) => (
+                          <li key={resource._id || `${resource.url}-${index}`}>
+                            <a href={resource.url} target="_blank" rel="noreferrer" download={resource.resourceType === 'raw' || resource.format === 'pdf' ? resource.title : undefined}>
+                              {resource.title || `Resource ${index + 1}`}
+                            </a>
+                            {resource.format && <small>{resource.format.toUpperCase()}</small>}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </article>
+                )) : <p className="student-course-learning__tab-empty">No notes have been added to this course.</p>}
               </div>
             ) : <EmptyState icon="book" title="Course content is not available yet" description="This enrolled course does not currently have any lessons or activities." />}
           </div>
@@ -4537,8 +6363,6 @@ async function referralsRequest(path, { onLogout, method = 'GET', body, signal }
   return result
 }
 
-
-
 function formatReferralDate(value) {
   const date = new Date(value)
   return Number.isNaN(date.getTime())
@@ -4546,112 +6370,108 @@ function formatReferralDate(value) {
     : new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
 }
 
-async function learningRequest(path, { onLogout, method = 'GET', body, signal } = {}) {
-  const savedAuth = sessionStorage.getItem('lms.auth')
-  const auth = savedAuth ? JSON.parse(savedAuth) : null
-  if (typeof auth?.token !== 'string') {
-    if (onLogout) onLogout()
-    throw new Error('Your session has ended. Please sign in again.')
-  }
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    method,
-    headers: {
-      Authorization: `Bearer ${auth.token}`,
-      ...(body ? { 'Content-Type': 'application/json' } : {}),
-    },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-    signal,
-  })
-  const result = await response.json()
-  if (isInvalidSessionResponse(response, result)) {
-    if (onLogout) onLogout()
-    throw new Error('Your session has ended. Please sign in again.')
-  }
-  if (!response.ok) {
-    throw new Error(result.message || 'Learning data could not be loaded.')
-  }
-  return result
+function formatReferralDay(value) {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime())
+    ? 'Date unavailable'
+    : new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(date)
 }
 
-function formatDuration(totalSeconds = 0) {
-  const secs = Math.max(0, Math.round(Number(totalSeconds) || 0))
-  if (secs < 60) return `${secs}s`
-  const minutes = Math.floor(secs / 60)
-  if (minutes < 60) return `${minutes}m`
-  const hours = Math.floor(minutes / 60)
-  const remainingMins = minutes % 60
-  return remainingMins > 0 ? `${hours}h ${remainingMins}m` : `${hours}h`
+function getReferralExpiryLabel(value) {
+  const expiresAt = new Date(value).getTime()
+  if (!Number.isFinite(expiresAt)) return 'Expiry unavailable'
+  const hoursRemaining = Math.ceil((expiresAt - Date.now()) / (60 * 60 * 1000))
+  if (hoursRemaining <= 0) return 'Expired'
+  return `Expires in ${hoursRemaining} ${hoursRemaining === 1 ? 'hour' : 'hours'}`
 }
 
-function formatMinutes(totalMinutes = 0) {
-  const mins = Math.max(0, Math.round(Number(totalMinutes) || 0))
-  if (mins < 60) return `${mins}m`
-  const hours = Math.floor(mins / 60)
-  const remainingMins = mins % 60
-  return remainingMins > 0 ? `${hours}h ${remainingMins}m` : `${hours}h`
+function isReferralCodeActive(code, now = Date.now()) {
+  const expiresAt = new Date(code?.expiresAt).getTime()
+  return code?.status === 'active' && Number.isFinite(expiresAt) && expiresAt > now
 }
 
+function getCachedStudentReferralData() {
+  const cacheKey = getStudentCertificateCacheKey()
+  const cached = cacheKey ? studentReferralCache.get(cacheKey) : null
+  if (!cached) return null
+  if (Date.now() - cached.savedAt >= studentLearningPageCacheTtlMs) {
+    studentReferralCache.delete(cacheKey)
+    return null
+  }
+  return cached.data
+}
+
+async function fetchStudentReferralData(onLogout) {
+  const cacheKey = getStudentCertificateCacheKey()
+  let request = cacheKey ? studentReferralRequests.get(cacheKey) : null
+  if (!request) {
+    request = referralsRequest('/referrals/me', { onLogout }).then((result) => {
+      if (!Array.isArray(result.codes) || !result.stats) {
+        throw new Error('The server returned invalid referral information.')
+      }
+      if (cacheKey) studentReferralCache.set(cacheKey, { data: result, savedAt: Date.now() })
+      return result
+    })
+    if (cacheKey) studentReferralRequests.set(cacheKey, request)
+  }
+  try {
+    return await request
+  } finally {
+    if (cacheKey && studentReferralRequests.get(cacheKey) === request) {
+      studentReferralRequests.delete(cacheKey)
+    }
+  }
+}
 
 function StudentReferrals({ onLogout }) {
-  const [referralData, setReferralData] = useState(null)
-  const [loading, setLoading] = useState(true)
+  const [initialReferralData] = useState(getCachedStudentReferralData)
+  const [referralData, setReferralData] = useState(initialReferralData)
+  const [loading, setLoading] = useState(!initialReferralData)
   const [generating, setGenerating] = useState(false)
   const [error, setError] = useState('')
   const [loadAttempt, setLoadAttempt] = useState(0)
   const [notice, setNotice] = useState('')
   const [copiedCode, setCopiedCode] = useState('')
-  const [selectedQuantity, setSelectedQuantity] = useState(1)
-  const [filterTab, setFilterTab] = useState('active') // 'active', 'all', 'used', 'expired'
+  const [showAllCodes, setShowAllCodes] = useState(false)
+  const [expiryCheckTime, setExpiryCheckTime] = useState(() => Date.now())
   const pendingRequestId = useRef('')
 
   useEffect(() => {
-    const controller = new AbortController()
-    setLoading(true)
+    let active = true
+    const cachedData = getCachedStudentReferralData()
+    if (cachedData) setReferralData(cachedData)
+    setLoading(!cachedData)
     setError('')
-    referralsRequest('/referrals/me', { onLogout, signal: controller.signal })
+    fetchStudentReferralData(onLogout)
       .then((result) => {
-        if (!Array.isArray(result.codes) || !result.stats) {
-          throw new Error('The server returned invalid referral information.')
-        }
-        setReferralData(result)
-        const remaining = result.stats.remainingGenerations !== undefined
-          ? result.stats.remainingGenerations
-          : (result.stats.remainingSlots !== undefined ? result.stats.remainingSlots : Math.max(0, 20 - (result.stats.totalGenerated || 0)))
-        setSelectedQuantity((prev) => Math.min(Math.max(1, prev), Math.max(1, remaining)))
+        if (active) setReferralData(result)
       })
       .catch((loadError) => {
-        if (loadError.name !== 'AbortError') {
+        if (active) {
           setError(loadError instanceof Error ? loadError.message : 'Referral information could not be loaded.')
         }
       })
       .finally(() => {
-        if (!controller.signal.aborted) setLoading(false)
+        if (active) setLoading(false)
       })
-    return () => controller.abort()
+    return () => { active = false }
   }, [onLogout, loadAttempt])
 
-  const stats = referralData?.stats || {
-    totalGenerated: 0,
-    maxLifetimeLimit: 20,
-    lifetimeLimit: 20,
-    active: 0,
-    remainingSlots: 20,
-    remainingGenerations: 20,
-    successfullyUsed: 0,
-    expired: 0,
-  }
+  useEffect(() => {
+    const nextExpiry = (referralData?.codes || [])
+      .filter((code) => code.status === 'active')
+      .map((code) => new Date(code.expiresAt).getTime())
+      .filter((expiresAt) => Number.isFinite(expiresAt) && expiresAt > Date.now())
+      .sort((left, right) => left - right)[0]
+    if (!nextExpiry) return undefined
+    const timeout = window.setTimeout(
+      () => setExpiryCheckTime(Date.now()),
+      Math.max(0, nextExpiry - Date.now()),
+    )
+    return () => window.clearTimeout(timeout)
+  }, [referralData, expiryCheckTime])
 
-  const allCodes = referralData?.codes || []
-  const totalGenerated = stats.totalGenerated !== undefined ? stats.totalGenerated : allCodes.length
-  const maxLimit = stats.maxLifetimeLimit || stats.lifetimeLimit || stats.maxActiveLimit || 20
-  const remainingSlots = stats.remainingSlots !== undefined
-    ? stats.remainingSlots
-    : (stats.remainingGenerations !== undefined ? stats.remainingGenerations : Math.max(0, maxLimit - totalGenerated))
-  const remainingGenerations = remainingSlots
-  const isAtLimit = remainingSlots <= 0 || totalGenerated >= maxLimit
-
-  async function generateReferralCodes() {
-    if (isAtLimit) return
+  async function generateReferralCode() {
     setGenerating(true)
     setError('')
     setNotice('')
@@ -4662,31 +6482,28 @@ function StudentReferrals({ onLogout }) {
         }
         pendingRequestId.current = window.crypto.randomUUID()
       }
-
-      const qty = Math.min(Math.max(1, Number(selectedQuantity) || 1), remainingGenerations)
-      const res = await referralsRequest('/referrals/generate', {
+      await referralsRequest('/referrals/generate', {
         onLogout,
         method: 'POST',
-        body: {
-          requestId: pendingRequestId.current,
-          quantity: qty,
-        },
+        body: { requestId: pendingRequestId.current },
       })
       pendingRequestId.current = ''
-      const countGenerated = res?.count || (res?.codes ? res.codes.length : 1)
-      setNotice(
-        countGenerated === 1
-          ? 'Your referral code has been generated.'
-          : `Successfully generated ${countGenerated} referral codes.`,
-      )
-      const result = await referralsRequest('/referrals/me', { onLogout })
+      setNotice('Your referral code has been generated.')
+      const result = await fetchStudentReferralData(onLogout)
       setReferralData(result)
-      const newRemaining = result.stats.remainingGenerations !== undefined
-        ? result.stats.remainingGenerations
-        : (result.stats.remainingSlots !== undefined ? result.stats.remainingSlots : Math.max(0, 20 - (result.stats.totalGenerated || 0)))
-      setSelectedQuantity(Math.min(1, Math.max(1, newRemaining)))
-      setFilterTab('active')
     } catch (generateError) {
+      if (generateError?.statusCode === 429) {
+        setReferralData((current) => {
+          if (!current) return current
+          const totalLimit = Number.isSafeInteger(current.stats?.totalLimit)
+            ? current.stats.totalLimit
+            : 20
+          return {
+            ...current,
+            stats: { ...current.stats, totalGenerated: totalLimit, totalLimit, remaining: 0 },
+          }
+        })
+      }
       setError(generateError instanceof Error ? generateError.message : 'A referral code could not be generated.')
     } finally {
       setGenerating(false)
@@ -4694,115 +6511,98 @@ function StudentReferrals({ onLogout }) {
   }
 
   async function copyReferralCode(code) {
+    if (!isReferralCodeActive(referralCodes.find((entry) => entry.code === code))) {
+      setError('This referral code is no longer active.')
+      return
+    }
     try {
       await navigator.clipboard.writeText(code)
       setCopiedCode(code)
-      setNotice(`Referral code ${code} copied to clipboard.`)
+      setNotice('Referral code copied.')
       setError('')
-      setTimeout(() => setCopiedCode(''), 3000)
     } catch {
       setError('The referral code could not be copied. Please copy it manually.')
     }
   }
 
-  const activeCodes = allCodes.filter((c) => c.status === 'active' && !c.friendRegistered)
-  const usedCodes = allCodes.filter((c) => c.friendRegistered || c.status === 'used')
-  const expiredCodes = allCodes.filter((c) => c.status === 'expired')
+  async function shareReferralCode(code) {
+    if (!isReferralCodeActive(referralCodes.find((entry) => entry.code === code))) {
+      setError('This referral code is no longer active.')
+      return
+    }
+    const url = new URL('/', window.location.origin)
+    url.searchParams.set('mode', 'register')
+    url.searchParams.set('referralCode', code)
+    const shareData = {
+      title: 'Join Morrow Learning',
+      text: `Use my referral code ${code} when you sign up.`,
+      url: url.toString(),
+    }
 
-  const displayedCodes = filterTab === 'active'
-    ? activeCodes
-    : filterTab === 'used'
-      ? usedCodes
-      : filterTab === 'expired'
-        ? expiredCodes
-        : allCodes
+    if (typeof navigator.share === 'function') {
+      try {
+        await navigator.share(shareData)
+        setNotice('Referral link shared.')
+        setError('')
+        return
+      } catch (shareError) {
+        if (shareError?.name === 'AbortError') return
+      }
+    }
 
+    try {
+      await navigator.clipboard.writeText(shareData.url)
+      setNotice('Referral link copied.')
+      setError('')
+    } catch {
+      setError('The referral link could not be shared. Please copy the code manually.')
+    }
+  }
+
+  const rawStats = referralData?.stats || {}
+  const referralCodes = referralData?.codes || []
+  const totalLimit = Number.isSafeInteger(rawStats.totalLimit) && rawStats.totalLimit >= 0
+    ? rawStats.totalLimit
+    : 20
+  const totalGenerated = Number.isSafeInteger(rawStats.totalGenerated) && rawStats.totalGenerated >= 0
+    ? rawStats.totalGenerated
+    : 0
+  const stats = {
+    ...rawStats,
+    totalGenerated,
+    totalLimit,
+    remaining: Number.isSafeInteger(rawStats.remaining) && rawStats.remaining >= 0
+      ? rawStats.remaining
+      : Math.max(0, totalLimit - totalGenerated),
+    successfullyUsed: Number.isSafeInteger(rawStats.successfullyUsed) && rawStats.successfullyUsed >= 0
+      ? rawStats.successfullyUsed
+      : 0,
+    active: referralData
+      ? referralCodes.filter((code) => isReferralCodeActive(code, expiryCheckTime)).length
+      : Number.isSafeInteger(rawStats.active) && rawStats.active >= 0
+        ? rawStats.active
+        : 0,
+    expired: referralData
+      ? referralCodes.filter((code) =>
+        code.status === 'expired' ||
+        (code.status === 'active' && !isReferralCodeActive(code, expiryCheckTime)),
+      ).length
+      : Number.isSafeInteger(rawStats.expired) && rawStats.expired >= 0
+        ? rawStats.expired
+        : 0,
+  }
   const summary = [
-    { label: 'Total Generated', value: `${totalGenerated} / ${maxLimit}`, tone: 'gold', icon: 'folder' },
-    { label: 'Remaining Generations', value: remainingGenerations, tone: 'mint', icon: 'spark' },
-    { label: 'Active Codes', value: activeCodes.length, tone: 'peach', icon: 'users' },
-    { label: 'Successfully Used', value: stats.successfullyUsed, tone: 'blue', icon: 'check' },
-    { label: 'Expired Codes', value: stats.expired, tone: 'lavender', icon: 'clock' },
+    { label: 'Total codes generated', value: `${stats.totalGenerated}/${stats.totalLimit}`, tone: 'gold' },
+    { label: 'Codes remaining', value: stats.remaining, tone: 'blue' },
+    { label: 'Successfully used', value: stats.successfullyUsed, tone: 'mint' },
+    { label: 'Active codes', value: stats.active, tone: 'peach' },
+    { label: 'Expired codes', value: stats.expired, tone: 'lavender' },
   ]
+  const activeReferralCode = referralCodes.find((code) => isReferralCodeActive(code, expiryCheckTime)) || null
+  const visibleReferralCodes = showAllCodes ? referralCodes : referralCodes.slice(0, 3)
 
   return (
     <div className="student-referrals">
-      <section className="student-panel student-referrals__intro">
-        <div className="student-referrals__intro-copy">
-          <span className="student-eyebrow">SHARE YOUR LEARNING JOURNEY</span>
-          <h1>My Referrals</h1>
-          <p>Invite friends to join aiHustle with a one-time referral code. You can generate up to 20 referral codes over the lifetime of your account. Each code expires independently 15 days after creation.</p>
-        </div>
-
-        <div className="student-referrals__generator-box">
-          <div className="student-referrals__slots-meter">
-            <div className="student-referrals__slots-meter-info">
-              <span>Total Generated: <strong>{totalGenerated} / {maxLimit}</strong></span>
-              <span>Remaining Generations: <strong>{remainingGenerations}</strong></span>
-            </div>
-            <div className="student-progress-bar-track">
-              <div
-                className="student-progress-bar-fill"
-                style={{ width: `${Math.min(100, (totalGenerated / maxLimit) * 100)}%` }}
-              />
-            </div>
-          </div>
-
-          <div className="student-referrals__generator-controls">
-            <div className="student-referrals__qty-wrap">
-              <label htmlFor="referral-qty-select">Quantity:</label>
-              <select
-                id="referral-qty-select"
-                value={selectedQuantity}
-                onChange={(e) => setSelectedQuantity(Number(e.target.value))}
-                disabled={loading || generating || isAtLimit}
-              >
-                {isAtLimit ? (
-                  <option value={0}>0 generations available</option>
-                ) : (
-                  Array.from({ length: Math.min(remainingGenerations, 20) }, (_, i) => i + 1).map((n) => (
-                    <option key={n} value={n}>
-                      {n} {n === 1 ? 'code' : 'codes'}
-                    </option>
-                  ))
-                )}
-              </select>
-            </div>
-
-            <button
-              className="student-button student-button--primary"
-              type="button"
-              onClick={generateReferralCodes}
-              disabled={loading || !referralData || generating || isAtLimit}
-            >
-              {generating
-                ? 'Generating…'
-                : isAtLimit
-                  ? 'Lifetime Limit Reached (20/20)'
-                  : `Generate ${selectedQuantity > 1 ? selectedQuantity + ' ' : ''}Referral Code${selectedQuantity > 1 ? 's' : ''}`}
-            </button>
-          </div>
-
-          {isAtLimit ? (
-            <div className="student-referrals__status-banner is-limit" role="status">
-              <Icon name="lock" size={16} />
-              <div>
-                <strong>You have reached your lifetime limit of 20 referral codes.</strong>
-                <small>Each student account can generate a maximum of 20 referral codes in total. Used and expired codes cannot be restored.</small>
-              </div>
-            </div>
-          ) : (
-            <div className="student-referrals__status-banner is-available" role="status">
-              <Icon name="spark" size={16} />
-              <div>
-                <span>{totalGenerated} of {maxLimit} lifetime referral codes generated. You can generate {remainingGenerations} more referral code{remainingGenerations === 1 ? '' : 's'}.</span>
-                <small>Each generated code expires independently 15 days after its creation timestamp.</small>
-              </div>
-            </div>
-          )}
-        </div>
-      </section>
-
       {error && (
         <p className="student-courses__message is-error" role="alert">
           {error}
@@ -4819,187 +6619,170 @@ function StudentReferrals({ onLogout }) {
       )}
       {notice && <p className="student-courses__message" role="status">{notice}</p>}
 
+      <section className="student-referrals__hero">
+        <div className="student-referrals__code-panel">
+          <div className="student-referrals__code-label">
+            <Icon name="gift" size={21} />
+            <span>YOUR REFERRAL CODE</span>
+          </div>
+          <div className="student-referrals__code-value">
+            {loading && !referralData
+              ? <span className="student-page-skeleton" style={{ width: '150px', height: '32px' }} />
+              : activeReferralCode
+                ? <strong>{activeReferralCode.code}</strong>
+                : <span>No active code yet</span>}
+            {activeReferralCode && (
+              <button
+                className="student-referrals__copy-current"
+                type="button"
+                aria-label={`Copy referral code ${activeReferralCode.code}`}
+                onClick={() => copyReferralCode(activeReferralCode.code)}
+              >
+                <Icon name="copy" size={18} />
+              </button>
+            )}
+          </div>
+          {activeReferralCode && (
+            <p className="student-referrals__code-expiry">
+              <span aria-hidden="true">✓</span>
+              Code generated on {formatReferralDay(activeReferralCode.createdAt)} · {getReferralExpiryLabel(activeReferralCode.expiresAt)}
+            </p>
+          )}
+          <div className="student-referrals__hero-actions">
+            {activeReferralCode ? (
+              <button
+                className="student-referrals__share"
+                type="button"
+                onClick={() => shareReferralCode(activeReferralCode.code)}
+              >
+                <Icon name="share" size={16} /> Share Code
+              </button>
+            ) : (
+              <button
+                className="student-referrals__share"
+                type="button"
+                onClick={generateReferralCode}
+                disabled={loading || !referralData || generating || stats.totalGenerated >= stats.totalLimit}
+              >
+                {generating ? 'Generating…' : 'Generate Referral Code'}
+              </button>
+            )}
+            {activeReferralCode && (
+              <button
+                className="student-referrals__generate"
+                type="button"
+                onClick={generateReferralCode}
+                disabled={loading || !referralData || generating || stats.totalGenerated >= stats.totalLimit}
+              >
+                {generating ? 'Generating…' : 'Generate another'}
+              </button>
+            )}
+          </div>
+          {stats.totalGenerated >= stats.totalLimit && (
+            <p className="student-referrals__limit" role="status">
+              You’ve reached your overall limit of 20 referral codes.
+            </p>
+          )}
+        </div>
+        <div className="student-referrals__hero-divider" aria-hidden="true" />
+        <div className="student-referrals__invite">
+          <div>
+            <h1>Invite Friends, Earn More!</h1>
+            <p>Share your referral code with friends. When they sign up, you’ll earn rewards and unlock more benefits.</p>
+          </div>
+          <svg className="student-referrals__gift-illustration" viewBox="0 0 180 145" fill="none" aria-hidden="true">
+            <circle cx="92" cy="68" r="52" fill="#F2EECF" />
+            <path d="M25 121c17-17 42-24 67-19 27-6 50 1 67 19" fill="#D9E8D9" />
+            <path d="M49 66h86v59H49z" fill="#FFFDF7" stroke="#D6CDB8" strokeWidth="2" />
+            <path d="M42 54h100v18H42z" fill="#F3D994" stroke="#D6CDB8" strokeWidth="2" />
+            <path d="M84 54v71h17V54z" fill="#6BA58E" />
+            <path d="M91 53c-23-1-31-13-24-20 8-7 22 3 24 20Zm2 0c1-21 17-28 24-19 7 9-8 19-24 19Z" fill="#4F967E" />
+            <path d="M91 53c-23-1-31-13-24-20 8-7 22 3 24 20Zm2 0c1-21 17-28 24-19 7 9-8 19-24 19Z" stroke="#397C68" strokeWidth="2" />
+            <path d="m151 35 9-8m-3 20 12-2m-26-23 2-11" stroke="#E2B74D" strokeWidth="3" strokeLinecap="round" />
+          </svg>
+        </div>
+      </section>
+
       <section className="student-referrals__summary" aria-label="Referral summary">
         {summary.map((item) => (
           <article className="student-stat" key={item.label}>
-            <span className={`student-stat__icon is-${item.tone}`}><Icon name={item.icon || 'users'} size={18} /></span>
+            <span className={`student-stat__icon is-${item.tone}`}><Icon name="users" size={18} /></span>
             <span className="student-stat__label">{item.label}</span>
-            <strong className="student-stat__value">{referralData ? item.value : '—'}</strong>
+            <strong className="student-stat__value">
+              {referralData
+                ? item.value
+                : loading
+                  ? <span className="student-page-skeleton" style={{ width: '48px', height: '16px' }} />
+                  : '—'}
+            </strong>
           </article>
         ))}
       </section>
 
       <section className="student-panel student-referrals__history" aria-labelledby="student-referral-history-title">
-        <div className="student-section-heading">
-          <div>
-            <span className="student-eyebrow">YOUR CODE ACTIVITY</span>
-            <h2 id="student-referral-history-title">Referral History</h2>
+        <header className="student-referrals__history-heading">
+          <h2 id="student-referral-history-title"><Icon name="clock" size={21} /> Referral History</h2>
+          {referralCodes.length > 3 && (
+            <button
+              className="student-referrals__view-all"
+              type="button"
+              onClick={() => setShowAllCodes((showAll) => !showAll)}
+            >
+              {showAllCodes ? 'Show Less ↑' : 'View All →'}
+            </button>
+          )}
+        </header>
+        {loading && !referralData ? (
+          <div className="student-referrals__loading" role="status" aria-label="Loading your referral history">
+            <span className="student-page-skeleton" />
+            <span className="student-page-skeleton" />
+            <span className="student-page-skeleton" />
           </div>
-          <span className="student-data-note">Each code expires independently exactly 15 days after creation.</span>
-        </div>
-
-        <div className="student-referrals__tabs" role="tablist" aria-label="Filter referral codes">
-          <button
-            type="button"
-            className={`student-referrals__tab ${filterTab === 'active' ? 'is-active' : ''}`}
-            onClick={() => setFilterTab('active')}
-          >
-            Active Codes ({activeCodes.length})
-          </button>
-          <button
-            type="button"
-            className={`student-referrals__tab ${filterTab === 'all' ? 'is-active' : ''}`}
-            onClick={() => setFilterTab('all')}
-          >
-            All Codes ({allCodes.length})
-          </button>
-          <button
-            type="button"
-            className={`student-referrals__tab ${filterTab === 'used' ? 'is-active' : ''}`}
-            onClick={() => setFilterTab('used')}
-          >
-            Used ({usedCodes.length})
-          </button>
-          <button
-            type="button"
-            className={`student-referrals__tab ${filterTab === 'expired' ? 'is-active' : ''}`}
-            onClick={() => setFilterTab('expired')}
-          >
-            Expired ({expiredCodes.length})
-          </button>
-        </div>
-
-        {filterTab === 'expired' && expiredCodes.length > 0 && (
-          <div className="student-referrals__expired-notice">
-            <Icon name="clock" size={16} />
-            <span>
-              Expired codes are preserved in your historical records. Under the referral policy, all generated codes count toward your 20 lifetime limit. Expired codes can no longer be used for registration.
-            </span>
-          </div>
-        )}
-
-        {loading ? (
-          <p role="status">Loading your referral history…</p>
-        ) : displayedCodes.length ? (
-          <div className="student-referrals__list">
-            {displayedCodes.map((code) => {
-              const isExpired = code.status === 'expired'
-              const isUsed = code.status === 'used' || code.friendRegistered
-              const isActive = code.status === 'active' && !code.friendRegistered
-              const statusLabel = isUsed ? 'Used' : (isExpired ? 'Expired' : 'Active')
-              return (
-                <article className={`student-referral-card is-${code.status}`} key={code.code}>
-                  <div className="student-referral-card__top">
-                    <strong className="student-referral-card__code">{code.code}</strong>
-                    <span className={`student-referral-card__status is-${code.status}`}>
-                      {statusLabel}
-                    </span>
-                    {isActive && (
-                      <button
-                        className="student-button student-button--quiet student-button--sm"
-                        type="button"
-                        onClick={() => copyReferralCode(code.code)}
-                      >
-                        {copiedCode === code.code ? '✓ Copied' : 'Copy'}
-                      </button>
-                    )}
-                  </div>
-
-                  {isUsed && (code.referralMessage || code.referredStudentName) && (
-                    <div className="student-referral-card__attribution-banner">
-                      <Icon name="check" size={15} />
-                      <span>{code.referralMessage || `${code.referredStudentName} joined aiHustle using your referral code.`}</span>
-                    </div>
-                  )}
-
-                  <dl>
-                    <div><dt>Generated</dt><dd>{formatReferralDate(code.createdAt)}</dd></div>
-                    <div>
-                      <dt>{isExpired ? 'Expired On' : 'Expires On'}</dt>
-                      <dd className={isExpired ? 'is-expired-text' : 'is-active-text'}>
-                        {formatReferralDate(code.expiresAt)}
-                      </dd>
-                    </div>
-                    {isUsed ? (
-                      <>
-                        <div>
-                          <dt>Referred Student</dt>
-                          <dd><strong>{code.referredStudentName || 'Registered Student'}</strong></dd>
-                        </div>
-                        {code.referredStudentRegistrationDate && (
-                          <div>
-                            <dt>Registration Date</dt>
-                            <dd>{formatReferralDate(code.referredStudentRegistrationDate)}</dd>
-                          </div>
-                        )}
-                        {code.usedAt && (
-                          <div>
-                            <dt>Used On</dt>
-                            <dd>{formatReferralDate(code.usedAt)}</dd>
-                          </div>
-                        )}
-                      </>
-                    ) : (
-                      <div><dt>Redeemed</dt><dd>Not yet</dd></div>
-                    )}
-                    {code.registrationStatus && (
-                      <div>
-                        <dt>Registration status</dt>
-                        <dd>
-                          <span className={`student-referral-reg-status is-${code.registrationStatus}`}>
-                            {code.registrationStatus === 'account_deleted'
-                              ? 'Account Deleted'
-                              : code.registrationStatus === 'approved'
-                                ? 'Qualified'
-                                : code.registrationStatus === 'awaiting_approval'
-                                  ? 'Pending Verification'
-                                  : code.registrationStatus.replaceAll('_', ' ')}
-                          </span>
-                        </dd>
-                      </div>
-                    )}
-                    {code.rewardStatus && (
-                      <div>
-                        <dt>Reward status</dt>
-                        <dd>
-                          <span className={`student-referral-reward-status is-${code.rewardStatus}`}>
-                            {code.rewardStatus === 'cancelled'
-                              ? 'Cancelled'
-                              : code.rewardStatus === 'earned'
-                                ? 'Earned'
-                                : code.rewardStatus === 'pending'
-                                  ? 'Pending'
-                                  : code.rewardStatus}
-                          </span>
-                        </dd>
-                      </div>
-                    )}
-                  </dl>
-                </article>
-              )
-            })}
+        ) : referralCodes.length ? (
+          <div className="student-referrals__table-wrap">
+            <table className="student-referrals__table">
+              <thead>
+                <tr>
+                  <th scope="col">Code</th>
+                  <th scope="col">Generated On</th>
+                  <th scope="col">Expires On</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleReferralCodes.map((code) => (
+                  <tr key={code.code}>
+                    <td><strong className="student-referrals__history-code">{code.code}</strong></td>
+                    <td>{formatReferralDate(code.createdAt)}</td>
+                    <td>{formatReferralDate(code.expiresAt)}</td>
+                    <td>
+                      <span className={`student-referral-card__status is-${code.status === 'active' && !isReferralCodeActive(code, expiryCheckTime) ? 'expired' : code.status}`}>
+                        {code.status === 'active' && !isReferralCodeActive(code, expiryCheckTime) ? 'expired' : code.status}
+                      </span>
+                    </td>
+                    <td>
+                      {isReferralCodeActive(code, expiryCheckTime) ? (
+                        <button
+                          className="student-referrals__copy-row"
+                          type="button"
+                          aria-label={`Copy referral code ${code.code}`}
+                          onClick={() => copyReferralCode(code.code)}
+                        >
+                          <Icon name="copy" size={15} /> {copiedCode === code.code ? 'Copied' : 'Copy'}
+                        </button>
+                      ) : <span className="student-referrals__no-action">—</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         ) : !error ? (
           <EmptyState
-            icon={filterTab === 'expired' ? 'clock' : filterTab === 'used' ? 'check' : 'users'}
-            title={
-              filterTab === 'active'
-                ? 'No active referral codes'
-                : filterTab === 'expired'
-                  ? 'No expired referral codes'
-                  : filterTab === 'used'
-                    ? 'No used referral codes yet'
-                    : 'No referral codes yet'
-            }
-            description={
-              filterTab === 'active'
-                ? (remainingSlots > 0 ? `You have ${remainingSlots} slot${remainingSlots === 1 ? '' : 's'} available. Select a quantity above and click Generate!` : 'You currently have no active codes.')
-                : filterTab === 'expired'
-                  ? 'When a referral code reaches its 15-day expiration without being used, it will appear here.'
-                  : filterTab === 'used'
-                    ? 'When friends register with your referral codes, they will appear here.'
-                    : 'Generate a code to invite friends to join aiHustle.'
-            }
+            icon="users"
+            title="No referral codes yet"
+            description="Generate a code to invite a friend. Your used and expired codes will stay in this history."
           />
         ) : null}
       </section>
@@ -5007,829 +6790,285 @@ function StudentReferrals({ onLogout }) {
   )
 }
 
-
-function StudentCertificateModal({ certificate, onClose }) {
-  if (!certificate) return null
-
-  const issueDateFormatted = certificate.issueDate
-    ? new Date(certificate.issueDate).toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' })
-    : new Date().toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' })
-  const completionDateFormatted = certificate.completionDate
-    ? new Date(certificate.completionDate).toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' })
-    : issueDateFormatted
-
-  return (
-    <div className="student-cert-modal-backdrop" onClick={onClose} role="dialog" aria-modal="true">
-      <div className="student-cert-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="student-cert-modal__toolbar no-print">
-          <div className="student-cert-modal__info">
-            <strong>Verified Certificate of Completion</strong>
-            <span>ID: {certificate.certificateId}</span>
-          </div>
-          <div className="student-cert-modal__toolbar-actions">
-            <button
-              type="button"
-              className="student-button student-button--primary"
-              onClick={() => window.print()}
-            >
-              <Icon name="printer" size={15} />
-              <span>Print / Save as PDF</span>
-            </button>
-            <button
-              type="button"
-              className="student-cert-modal__close-btn"
-              onClick={onClose}
-              aria-label="Close certificate"
-            >
-              <Icon name="xCircle" size={18} />
-            </button>
-          </div>
-        </div>
-
-        <div className="student-cert-document" id="printable-certificate">
-          <div className="student-cert-document__border">
-            <div className="student-cert-document__inner">
-              <header className="student-cert-document__header">
-                <div className="student-cert-document__brand">aiHustle LMS</div>
-                <span className="student-cert-document__eyebrow">VERIFIED CERTIFICATE OF ACHIEVEMENT</span>
-                <h1 className="student-cert-document__title">Certificate of Completion</h1>
-              </header>
-
-              <div className="student-cert-document__body">
-                <p className="student-cert-document__presentation">This certificate is proudly awarded to</p>
-                <h2 className="student-cert-document__recipient">{certificate.studentName}</h2>
-                <p className="student-cert-document__narrative">
-                  for demonstrating exceptional commitment, completing all video curriculum lessons, and successfully passing all knowledge checkpoints and milestone assessments for
-                </p>
-                <h3 className="student-cert-document__course-name">{certificate.courseTitle}</h3>
-                <p className="student-cert-document__category">{certificate.courseCategory || 'Professional Skill Path'}</p>
-              </div>
-
-              <footer className="student-cert-document__footer">
-                <div className="student-cert-document__col">
-                  <span className="student-cert-document__val">{completionDateFormatted}</span>
-                  <span className="student-cert-document__lbl">Completion Date</span>
-                </div>
-                <div className="student-cert-document__seal">
-                  <Icon name="award" size={32} />
-                  <span>OFFICIAL CREDENTIAL</span>
-                </div>
-                <div className="student-cert-document__col">
-                  <span className="student-cert-document__val">{certificate.certificateId}</span>
-                  <span className="student-cert-document__lbl">Certificate ID</span>
-                </div>
-              </footer>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function StudentUnenrollConfirmModal({ courseTitle, onConfirm, onCancel, loading, error }) {
-  return (
-    <div className="student-cert-modal-backdrop" onClick={() => !loading && onCancel()} role="alertdialog" aria-modal="true">
-      <div className="student-unenroll-dialog" onClick={(e) => e.stopPropagation()}>
-        <div className="student-unenroll-dialog__header">
-          <span className="student-unenroll-dialog__icon"><Icon name="alertCircle" size={24} /></span>
-          <h3>Unenroll from course?</h3>
-        </div>
-        <p className="student-unenroll-dialog__message">
-          Are you sure you want to unenroll from <strong>{courseTitle}</strong>? Your active enrollment will be deactivated and removed from your active courses.
-        </p>
-        {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
-        <div className="student-unenroll-dialog__actions">
-          <button
-            type="button"
-            className="student-button student-button--subtle"
-            onClick={onCancel}
-            disabled={loading}
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            className="student-button student-button--danger"
-            onClick={onConfirm}
-            disabled={loading}
-          >
-            {loading ? 'Unenrolling…' : 'Confirm Unenroll'}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
 function StudentCourseDetailsPage({ user, onLogout, onLearningDataChanged }) {
-  const { courseId: rawCourseId } = useParams()
-  const courseId = (rawCourseId || '').trim().replace(/\/details\/?$/, '').trim()
-  const navigate = useNavigate()
-  const [data, setData] = useState(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
-  const [enrolling, setEnrolling] = useState(false)
-  const [enrollSuccessMessage, setEnrollSuccessMessage] = useState('')
-  const [showUnenrollModal, setShowUnenrollModal] = useState(false)
-  const [unenrolling, setUnenrolling] = useState(false)
-  const [unenrollError, setUnenrollError] = useState('')
-  const [showCertificateModal, setShowCertificateModal] = useState(false)
-  const [expandedModules, setExpandedModules] = useState(() => new Set(['0', '1', '2']))
-
-  const isCollegeStudent = user?.studentType === 'college' || Boolean(user?.collegeId)
-
-  const loadDetails = useCallback((signal) => {
-    if (!courseId) {
-      setLoading(false)
-      setError('A valid course must be selected.')
-      return
+  const { courseId } = useParams()
+  const [initialCourseDetails] = useState(() => {
+    const cachedCourse = getCachedStudentPagePublishedCourses()
+      ?.find((item) => String(item._id) === courseId) || null
+    const cachedEnrollment = getCachedStudentPageEnrollments()
+      ?.find((entry) => (
+        String(entry.courseId?._id || entry.courseId) === courseId && entry.status !== 'cancelled'
+      ))
+    return {
+      course: cachedCourse,
+      enrollment: cachedCourse && cachedEnrollment
+        ? { ...cachedEnrollment, courseId: cachedCourse }
+        : null,
     }
-    setLoading(true)
-    setError('')
-    fetchCourseDetails(courseId, onLogout, signal)
-      .then((res) => {
-        setData(res)
-        if (res.curriculum?.length) {
-          setExpandedModules(new Set(res.curriculum.map((_, i) => String(i))))
-        }
-      })
-      .catch(async (err) => {
-        if (err.name === 'AbortError') return
-
-        // Fallback: Check if the course is already available in student enrollments or published catalog
-        try {
-          const [enrollments, published] = await Promise.all([
-            fetchMyEnrollments(onLogout, signal).catch(() => []),
-            fetchPublishedCourses(onLogout, signal).catch(() => []),
-          ])
-
-          const matchingEnrollment = (enrollments || []).find((e) => {
-            const cid = e.courseId && typeof e.courseId === 'object' ? String(e.courseId._id) : String(e.courseId || '')
-            return cid === courseId || String(e._id) === courseId
-          })
-          const enrolledCourse = matchingEnrollment?.courseId && typeof matchingEnrollment.courseId === 'object'
-            ? matchingEnrollment.courseId
-            : null
-          const matchingPublished = (published || []).find((c) => String(c._id) === courseId)
-          const fallbackCourse = enrolledCourse || matchingPublished
-
-          if (fallbackCourse) {
-            const fallbackCounts = getCourseCounts(fallbackCourse)
-            const fallbackProgress = matchingEnrollment ? getCourseProgress(matchingEnrollment) : null
-            const isCompleted = Boolean(fallbackProgress?.isCompleted || matchingEnrollment?.status === 'completed')
-
-            const fallbackCurriculum = (fallbackCourse.modules || []).map((mod, mIdx) => {
-              const items = (mod.contentItems || []).length
-                ? mod.contentItems
-                : (mod.lessons || []).map((l) => ({ ...l, type: 'video-lesson' }))
-              return {
-                moduleId: String(mod._id || `mod-${mIdx}`),
-                title: mod.title || `Module ${mIdx + 1}`,
-                description: mod.description || '',
-                itemCount: items.length,
-                items: items.map((item) => ({
-                  id: String(item._id),
-                  type: item.type || 'video-lesson',
-                  title: item.title || 'Lesson',
-                  description: item.description || '',
-                  durationSeconds: Number(item.durationSeconds) || 0,
-                  points: Number(item.points) || 0,
-                  isCompleted: false,
-                  isFailed: false,
-                  isSubmitted: false,
-                })),
-              }
-            })
-
-            setData({
-              isEnrolled: Boolean(matchingEnrollment),
-              enrollment: matchingEnrollment ? {
-                _id: String(matchingEnrollment._id),
-                status: matchingEnrollment.status,
-                enrolledAt: matchingEnrollment.createdAt,
-                completedAt: matchingEnrollment.completedAt,
-                isCompleted,
-                progressPercentage: fallbackProgress?.percentage || 0,
-              } : null,
-              course: {
-                _id: String(fallbackCourse._id),
-                title: fallbackCourse.title || 'Course Details',
-                description: fallbackCourse.description || '',
-                detailedDescription: fallbackCourse.detailedDescription || fallbackCourse.description || '',
-                category: fallbackCourse.category || 'General',
-                difficulty: fallbackCourse.difficulty || 'beginner',
-                thumbnailUrl: fallbackCourse.thumbnailUrl || '',
-                learningObjectives: fallbackCourse.learningObjectives || [],
-                prerequisites: fallbackCourse.prerequisites || [],
-                targetAudience: fallbackCourse.targetAudience || 'Beginners, professionals, and students.',
-                estimatedDurationMinutes: Number(fallbackCourse.estimatedDurationMinutes) || 0,
-                instructor: fallbackCourse.instructor || { name: 'aiHustle Certified Instructor' },
-                status: fallbackCourse.status || 'published',
-              },
-              counts: {
-                modules: fallbackCourse.modules?.length || 0,
-                lessons: fallbackCounts.lessons || 0,
-                quizzes: fallbackCourse.quizzes?.length || 0,
-                assignments: fallbackCourse.assignments?.length || 0,
-                assessments: fallbackCourse.assignments?.length || 0,
-                durationMinutes: fallbackCourse.estimatedDurationMinutes || 0,
-              },
-              curriculum: fallbackCurriculum,
-              progress: matchingEnrollment ? {
-                progressPercentage: fallbackProgress?.percentage || 0,
-                totalRequiredActivities: fallbackProgress?.totalRequired || 0,
-                completedActivities: fallbackProgress?.completed || 0,
-                isCompleted,
-                videoStats: { total: fallbackCounts.lessons, completed: fallbackProgress?.completed || 0 },
-                quizStats: { total: 0, completed: 0 },
-                assessmentStats: { total: 0, completed: 0 },
-                nextActivity: fallbackProgress?.nextActivity || null,
-              } : null,
-              certificate: null,
-              canUnenroll: Boolean(matchingEnrollment && !isCompleted),
-            })
-            if (fallbackCurriculum.length) {
-              setExpandedModules(new Set(fallbackCurriculum.map((_, i) => String(i))))
-            }
-            return
-          }
-        } catch {
-          // If fallback also fails, set error
-        }
-
-        setError(err instanceof Error ? err.message : 'Course details could not be loaded.')
-      })
-      .finally(() => {
-        setLoading(false)
-      })
-  }, [courseId, onLogout])
+  })
+  const [course, setCourse] = useState(initialCourseDetails.course)
+  const [loading, setLoading] = useState(!initialCourseDetails.course)
+  const [enrolling, setEnrolling] = useState(false)
+  const [isEnrolled, setIsEnrolled] = useState(Boolean(initialCourseDetails.enrollment))
+  const [courseEnrollment, setCourseEnrollment] = useState(initialCourseDetails.enrollment)
+  const [error, setError] = useState('')
+  const isCollegeStudent = user?.studentType === 'college' || Boolean(user?.collegeId)
+  const courseCounts = course ? getCourseCounts(course) : { modules: 0, lessons: 0 }
 
   useEffect(() => {
-    const controller = new AbortController()
-    loadDetails(controller.signal)
-    return () => controller.abort()
-  }, [loadDetails])
+    let active = true
+    const cachedCourse = getCachedStudentPagePublishedCourses()
+      ?.find((item) => String(item._id) === courseId) || null
+    const cachedEnrollment = getCachedStudentPageEnrollments()
+      ?.find((entry) => (
+        String(entry.courseId?._id || entry.courseId) === courseId && entry.status !== 'cancelled'
+      ))
+    setCourse(cachedCourse)
+    setIsEnrolled(Boolean(cachedCourse && cachedEnrollment))
+    setCourseEnrollment(cachedCourse && cachedEnrollment
+      ? { ...cachedEnrollment, courseId: cachedCourse }
+      : null)
+    setLoading(!cachedCourse)
+    setError('')
+    Promise.all([
+      fetchStudentPagePublishedCourses(onLogout),
+      fetchStudentPageEnrollments(onLogout),
+    ])
+      .then(([publishedCourses, enrollments]) => {
+        if (!active) return
+        const selectedCourse = publishedCourses.find((item) => String(item._id) === courseId)
+        if (!selectedCourse) {
+          setCourse(null)
+          setIsEnrolled(false)
+          setCourseEnrollment(null)
+          throw new Error('This course is not currently published or available.')
+        }
+        const selectedEnrollment = enrollments.find((entry) => (
+          String(entry.courseId?._id || entry.courseId) === courseId && entry.status !== 'cancelled'
+        ))
+        setIsEnrolled(Boolean(selectedEnrollment))
+        setCourseEnrollment(selectedEnrollment ? { ...selectedEnrollment, courseId: selectedCourse } : null)
+        setCourse(selectedCourse)
+      })
+      .catch((loadError) => {
+        if (active) {
+          setError(loadError instanceof Error ? loadError.message : 'Course details could not be loaded.')
+        }
+      })
+      .finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
+  }, [courseId, onLogout])
 
-  async function handleEnroll() {
+  async function enroll() {
     setEnrolling(true)
     setError('')
-    setEnrollSuccessMessage('')
     try {
-      const res = await enrollInCourse(courseId, onLogout)
-      setEnrollSuccessMessage(res.message || 'You have successfully enrolled in this course!')
-      if (typeof onLearningDataChanged === 'function') {
-        onLearningDataChanged()
+      const savedAuth = sessionStorage.getItem('lms.auth')
+      const auth = savedAuth ? JSON.parse(savedAuth) : null
+      if (typeof auth?.token !== 'string') {
+        onLogout()
+        return
       }
-      loadDetails()
-    } catch (enrollErr) {
-      setError(enrollErr instanceof Error ? enrollErr.message : 'Unable to enroll in course.')
+      const response = await fetchWithAuth(`${API_BASE_URL}/enrollments`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${auth.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ courseId }),
+      }, API_BASE_URL, auth.token)
+      const result = await response.json()
+      if (isInvalidSessionResponse(response, result)) {
+        onLogout()
+        return
+      }
+      if (!response.ok) throw new Error(result.message || 'You could not be enrolled in this course.')
+      if (!result.enrollment?._id) throw new Error('The server did not confirm your enrollment.')
+      const confirmedEnrollment = { ...result.enrollment, courseId: course }
+      onLearningDataChanged()
+      seedStudentCourseLearning(confirmedEnrollment)
+      setCourseEnrollment(confirmedEnrollment)
+      setIsEnrolled(true)
+    } catch (enrollError) {
+      setError(enrollError instanceof Error ? enrollError.message : 'You could not be enrolled in this course.')
     } finally {
       setEnrolling(false)
     }
   }
 
-  async function handleUnenroll() {
-    setUnenrolling(true)
-    setUnenrollError('')
-    try {
-      await unenrollFromCourse(courseId, onLogout)
-      setShowUnenrollModal(false)
-      if (typeof onLearningDataChanged === 'function') {
-        onLearningDataChanged()
-      }
-      loadDetails()
-    } catch (unenrollErr) {
-      setUnenrollError(unenrollErr instanceof Error ? unenrollErr.message : 'Unable to unenroll from course.')
-    } finally {
-      setUnenrolling(false)
-    }
-  }
-
-  function toggleModule(mIndex) {
-    const key = String(mIndex)
-    setExpandedModules((prev) => {
-      const next = new Set(prev)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    })
-  }
-
-  const isEnrolled = Boolean(data?.isEnrolled)
-  const isCompleted = Boolean(data?.enrollment?.isCompleted || data?.progress?.isCompleted || data?.enrollment?.status === 'completed')
-  const course = data?.course
-  const counts = data?.counts || { modules: 0, lessons: 0, quizzes: 0, assignments: 0, assessments: 0, durationMinutes: 0 }
-  const curriculum = data?.curriculum || []
-  const progress = data?.progress
-  const certificate = data?.certificate
-  const canUnenroll = Boolean(data?.canUnenroll && !isCompleted)
-
-  const difficultyLabels = {
-    beginner: 'Beginner',
-    intermediate: 'Intermediate',
-    advanced: 'Advanced',
-    'all-levels': 'All levels',
-  }
-
   return (
-    <div className="student-panel student-course-details-page">
-      {/* Breadcrumb Navigation */}
-      <nav className="student-course-details__breadcrumb" aria-label="Breadcrumb">
-        <Link to="/student/courses" className="student-course-details__breadcrumb-link">
-          <Icon name="book" size={14} />
-          <span>My Courses</span>
-        </Link>
-        <span className="student-course-details__breadcrumb-sep">/</span>
-        <span className="student-course-details__breadcrumb-current">
-          {course?.title || 'Course Details'}
-        </span>
-      </nav>
-
-      {/* Notifications / Alerts */}
-      {enrollSuccessMessage && (
-        <div className="student-course-details__success-banner" role="status">
-          <Icon name="check" size={16} />
-          <span>{enrollSuccessMessage}</span>
-        </div>
-      )}
-
-      {loading ? (
-        <div className="student-activities-loading" role="status">
-          <p>Loading course details…</p>
-        </div>
-      ) : error ? (
-        <div className="student-activities-empty-box" role="alert">
-          <div className="student-activities-empty-box__icon is-danger">
-            <Icon name="alertCircle" size={28} />
-          </div>
-          <h3>Course Details Unavailable</h3>
-          <p>{error}</p>
-          <div className="student-activities-empty-box__action" style={{ display: 'flex', gap: '12px' }}>
-            <button
-              type="button"
-              className="student-button student-button--primary"
-              onClick={() => loadDetails()}
-            >
-              <span>Retry</span>
-            </button>
-            <Link to="/student/courses" className="student-button student-button--subtle">
-              <span>Back to My Courses</span>
-            </Link>
-          </div>
-        </div>
-      ) : !course ? (
-        <EmptyState
-          icon="book"
-          title="Course Not Found"
-          description="The requested course does not exist or has been removed from the catalog."
-        />
-      ) : (
-        <>
-          {/* Hero Overview Card */}
-          <section className="student-course-details__hero">
-            <div className="student-course-details__hero-left">
-              <div className="student-course-details__meta-badges">
-                <span className="student-course-details__badge is-category">
-                  {course.category || 'General'}
-                </span>
-                <span className="student-course-details__badge is-difficulty">
-                  {difficultyLabels[course.difficulty] || 'Beginner'}
-                </span>
-                {isCompleted ? (
-                  <span className="student-course-details__badge is-completed">
-                    Completed · 100%
-                  </span>
-                ) : isEnrolled ? (
-                  <span className="student-course-details__badge is-enrolled">
-                    In Progress · {progress?.progressPercentage || 0}%
-                  </span>
-                ) : (
-                  <span className="student-course-details__badge is-available">
-                    Available for Enrollment
-                  </span>
-                )}
+    <StudentRoutePage title={course?.title || 'Course details'}>
+      {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
+      {loading ? <p role="status">Loading course details…</p> : course && (
+        <div className="student-course-details">
+          <Link className="student-section-link" to="/student/dashboard">← Back to dashboard</Link>
+          <section className="student-course-details__intro">
+            <header className="student-course-details__header">
+              {course.thumbnailUrl
+                ? <img
+                  className="student-course-details__thumbnail"
+                  src={course.thumbnailUrl}
+                  alt={`${course.title} course thumbnail`}
+                />
+                : <div className="student-course-details__thumbnail student-course-details__thumbnail--empty" aria-label="No course thumbnail">
+                  <Icon name="book" size={34} />
+                </div>}
+              <div className="student-course-details__identity">
+                <p className="student-course-details__category">
+                  {course.category || 'Other'} <span>·</span> {course.difficulty?.replaceAll('-', ' ') || 'Beginner'}
+                </p>
+                <h1>{course.title}</h1>
+                <span className="student-course-details__published">{isEnrolled ? 'Enrolled' : 'Published'}</span>
               </div>
-
-              <h1 className="student-course-details__title">{course.title}</h1>
-
-              <p className="student-course-details__summary">
-                {course.description || course.detailedDescription || 'Learn in-demand skills through comprehensive lessons, guided practice checkpoints, and practical milestones.'}
+              <div className="student-course-details__enroll">
+                {isEnrolled
+                  ? <Link
+                    className="student-enrolled-course__continue"
+                    to={`/student/course/${encodeURIComponent(courseId)}/learn`}
+                    onClick={() => seedStudentCourseLearning(courseEnrollment)}
+                  >
+                    Get Started
+                  </Link>
+                  : isCollegeStudent
+                  ? <p>Enrollment for this course is managed by your college administrator.</p>
+                  : <button type="button" className="student-enrolled-course__continue" disabled={enrolling} onClick={enroll}>
+                    {enrolling ? 'Enrolling…' : 'Enroll Now'}
+                  </button>}
+              </div>
+            </header>
+            {course.description && <p className="student-course-details__description">{course.description}</p>}
+            {course.detailedDescription && course.detailedDescription !== course.description && (
+              <p className="student-course-details__description student-course-details__description--detailed">
+                {course.detailedDescription}
               </p>
-
-              {/* Key Facts Chips */}
-              <div className="student-course-details__facts-bar">
-                <div className="student-course-details__fact-item">
-                  <Icon name="clock" size={14} />
-                  <span>{formatCourseDuration(counts.durationMinutes)}</span>
-                </div>
-                <div className="student-course-details__fact-item">
-                  <Icon name="folder" size={14} />
-                  <span>{counts.modules} {counts.modules === 1 ? 'module' : 'modules'}</span>
-                </div>
-                <div className="student-course-details__fact-item">
-                  <Icon name="play" size={14} />
-                  <span>{counts.lessons} {counts.lessons === 1 ? 'lesson' : 'lessons'}</span>
-                </div>
-                <div className="student-course-details__fact-item">
-                  <Icon name="clipboardCheck" size={14} />
-                  <span>{counts.quizzes} {counts.quizzes === 1 ? 'quiz' : 'quizzes'}</span>
-                </div>
-                <div className="student-course-details__fact-item">
-                  <Icon name="check" size={14} />
-                  <span>{counts.assignments} {counts.assignments === 1 ? 'assignment' : 'assignments'}</span>
-                </div>
-              </div>
-
-              {/* Instructor Information */}
-              <div className="student-course-details__instructor">
-                <span className="student-course-details__instructor-avatar">
-                  <Icon name="user" size={15} />
-                </span>
-                <div className="student-course-details__instructor-text">
-                  <span className="student-course-details__instructor-label">Course Instructor</span>
-                  <strong>{course.instructor?.name || 'aiHustle Senior Faculty'}</strong>
-                </div>
-              </div>
-            </div>
-
-            {/* Hero Right Card: Banner & Enrollment Action Box */}
-            <div className="student-course-details__hero-right">
-              <div className="student-course-details__banner-box">
-                {course.thumbnailUrl ? (
-                  <img
-                    src={course.thumbnailUrl}
-                    alt={`${course.title} banner`}
-                    className="student-course-details__banner-img"
-                  />
-                ) : (
-                  <div className="student-course-details__banner-fallback">
-                    <Icon name="book" size={42} />
-                  </div>
-                )}
-              </div>
-
-              {/* Dynamic Action Box based on Enrollment State */}
-              <div className="student-course-details__action-box">
-                {!isEnrolled ? (
-                  /* STATE A: NOT ENROLLED */
-                  <div className="student-course-details__state-box">
-                    <div className="student-course-details__price-line">
-                      <strong>Free Access</strong>
-                      <span>Full course &amp; certificate</span>
-                    </div>
-
-                    {isCollegeStudent ? (
-                      <div className="student-course-details__college-note">
-                        <Icon name="alertCircle" size={15} />
-                        <p>Enrollment for this course is coordinated by your college administrator.</p>
-                      </div>
-                    ) : (
-                      <button
-                        type="button"
-                        className="student-button student-button--primary student-course-details__cta-btn"
-                        onClick={handleEnroll}
-                        disabled={enrolling}
-                      >
-                        <span>{enrolling ? 'Enrolling in course…' : 'Enroll Now →'}</span>
-                      </button>
-                    )}
-
-                    <ul className="student-course-details__perks">
-                      <li><Icon name="check" size={13} /> Immediate access to all video lessons</li>
-                      <li><Icon name="check" size={13} /> Practice quizzes &amp; milestone assessments</li>
-                      <li><Icon name="check" size={13} /> Official Certificate upon 100% completion</li>
-                    </ul>
-                  </div>
-                ) : !isCompleted ? (
-                  /* STATE B: ENROLLED & INCOMPLETE */
-                  <div className="student-course-details__state-box">
-                    <div className="student-course-details__progress-block">
-                      <div className="student-course-details__progress-header">
-                        <span>Learning Progress</span>
-                        <strong>{progress?.progressPercentage || 0}%</strong>
-                      </div>
-                      <div className="student-progress-track">
-                        <span style={{ width: `${Math.min(100, Math.max(0, progress?.progressPercentage || 0))}%` }} />
-                      </div>
-                      <span className="student-course-details__progress-sub">
-                        {progress?.completedActivities || 0} of {progress?.totalRequiredActivities || 0} required activities completed
-                      </span>
-                    </div>
-
-                    <Link
-                      to={`/student/course/${encodeURIComponent(courseId)}/learn`}
-                      className="student-button student-button--primary student-course-details__cta-btn"
-                    >
-                      <span>{(progress?.progressPercentage || 0) > 0 ? 'Continue Learning →' : 'Start Learning →'}</span>
-                    </Link>
-
-                    {/* Secondary Action: Unenroll */}
-                    {canUnenroll && (
-                      <button
-                        type="button"
-                        className="student-course-details__unenroll-btn"
-                        onClick={() => setShowUnenrollModal(true)}
-                      >
-                        Unenroll from course
-                      </button>
-                    )}
-                  </div>
-                ) : (
-                  /* STATE C: ENROLLED & COMPLETED */
-                  <div className="student-course-details__state-box is-completed">
-                    <div className="student-course-details__completed-badge">
-                      <Icon name="award" size={18} />
-                      <strong>Course Completed!</strong>
-                    </div>
-                    <p className="student-course-details__completed-copy">
-                      You have met all curriculum requirements and earned your official credential.
-                    </p>
-
-                    <Link
-                      to={`/student/course/${encodeURIComponent(courseId)}/learn`}
-                      className="student-button student-button--primary student-course-details__cta-btn"
-                    >
-                      <span>Review Course →</span>
-                    </Link>
-
-                    <button
-                      type="button"
-                      className="student-button student-button--secondary student-course-details__cert-action-btn"
-                      onClick={() => setShowCertificateModal(true)}
-                    >
-                      <Icon name="award" size={14} />
-                      <span>View Certificate</span>
-                    </button>
-                    {/* Unenroll option is COMPLETELY HIDDEN in State C */}
-                  </div>
-                )}
-              </div>
-            </div>
+            )}
+            {!course.description && !course.detailedDescription && (
+              <p className="student-course-details__description">No course description added yet.</p>
+            )}
           </section>
-
-          {/* Certificate Section (Only when Completed) */}
-          {isCompleted && certificate && (
-            <section className="student-course-details__certificate-panel" aria-labelledby="certificate-section-title">
-              <div className="student-course-details__certificate-header">
-                <span className="student-course-details__certificate-icon">
-                  <Icon name="award" size={24} />
-                </span>
-                <div>
-                  <span className="student-eyebrow">OFFICIAL ACCREDITATION</span>
-                  <h2 id="certificate-section-title">Certificate of Completion</h2>
-                  <p>Verified credential for mastering all lessons and passing all required checkpoints.</p>
-                </div>
-              </div>
-
-              <div className="student-cert-mini-card">
-                <div className="student-cert-mini-card__left">
-                  <div className="student-cert-mini-card__brand">aiHustle LMS</div>
-                  <h3 className="student-cert-mini-card__title">{course.title}</h3>
-                  <div className="student-cert-mini-card__meta">
-                    <span>Awarded to: <strong>{certificate.studentName || user?.fullName || user?.username}</strong></span>
-                    <span>Completed: <strong>{new Date(certificate.completionDate || data.enrollment?.completedAt || Date.now()).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</strong></span>
-                    <span>Verification ID: <code>{certificate.certificateId}</code></span>
-                  </div>
-                </div>
-
-                <div className="student-cert-mini-card__actions">
-                  <button
-                    type="button"
-                    className="student-button student-button--primary"
-                    onClick={() => setShowCertificateModal(true)}
-                  >
-                    <Icon name="award" size={15} />
-                    <span>View Certificate</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="student-button student-button--secondary"
-                    onClick={() => {
-                      setShowCertificateModal(true)
-                      setTimeout(() => window.print(), 350)
-                    }}
-                  >
-                    <Icon name="download" size={15} />
-                    <span>Download Certificate</span>
-                  </button>
-                </div>
-              </div>
-            </section>
-          )}
-
-          {/* Course Details Grid: Description, Outcomes, Audience */}
-          <div className="student-course-details__main-grid">
-            <div className="student-course-details__content-col">
-              {/* Detailed Description */}
-              <section className="student-course-details__section">
-                <h2>About this course</h2>
-                <div className="student-course-details__rich-text">
-                  <p>{course.detailedDescription || course.description}</p>
-                </div>
-              </section>
-
-              {/* Learning Outcomes */}
+          <section className="student-course-details__facts" aria-label="Course overview">
+            <div><span>Difficulty</span><strong>{course.difficulty?.replaceAll('-', ' ') || 'Beginner'}</strong></div>
+            <div><span>Course duration</span><strong>{formatCourseDuration(course.estimatedDurationMinutes)}</strong></div>
+            <div><span>Modules</span><strong>{courseCounts.modules}</strong></div>
+            <div><span>Lessons</span><strong>{courseCounts.lessons}</strong></div>
+          </section>
+          {(course.learningObjectives?.length > 0 || course.prerequisites?.length > 0) && (
+            <div className="student-course-details__information">
               {course.learningObjectives?.length > 0 && (
                 <section className="student-course-details__section">
                   <h2>What you’ll learn</h2>
-                  <ul className="student-course-details__outcomes-list">
-                    {course.learningObjectives.map((obj, i) => (
-                      <li key={i} className="student-course-details__outcome-item">
-                        <span className="student-course-details__outcome-check"><Icon name="check" size={14} /></span>
-                        <span>{obj}</span>
-                      </li>
-                    ))}
-                  </ul>
+                  <ul>{course.learningObjectives.map((objective, index) => <li key={`${objective}-${index}`}>{objective}</li>)}</ul>
                 </section>
               )}
-
-              {/* Course Curriculum */}
-              <section className="student-course-details__section" aria-labelledby="curriculum-heading">
-                <div className="student-section-heading">
-                  <div>
-                    <h2 id="curriculum-heading">Course Curriculum</h2>
-                    <span className="student-course-details__curriculum-summary">
-                      {counts.modules} modules · {counts.lessons} lessons · {counts.quizzes} quizzes · {counts.assignments} assignments
+              {course.prerequisites?.length > 0 && (
+                <section className="student-course-details__section">
+                  <h2>Prerequisites</h2>
+                  <ul>{course.prerequisites.map((prerequisite, index) => <li key={`${prerequisite}-${index}`}>{prerequisite}</li>)}</ul>
+                </section>
+              )}
+            </div>
+          )}
+          <section className="student-course-details__section">
+            <h2>Course modules</h2>
+            {course.modules?.length ? course.modules.map((module, moduleIndex) => {
+              const moduleKey = String(module._id || `${module.title}-${moduleIndex}`)
+              const items = getModuleLearningItems(module, moduleIndex)
+              return (
+                <details className="student-course-details__module" key={moduleKey} open>
+                  <summary className="student-course-details__module-summary">
+                    <span className="student-course-details__module-heading">
+                      <small>MODULE {moduleIndex + 1}</small>
+                      <strong>{module.title}</strong>
                     </span>
-                  </div>
-                </div>
-
-                <div className="student-course-details__curriculum-accordion">
-                  {curriculum.length === 0 ? (
-                    <EmptyState
-                      icon="book"
-                      title="Curriculum pending"
-                      description="Lessons and learning activities are currently being prepared for this course."
-                    />
-                  ) : (
-                    curriculum.map((mod, mIndex) => {
-                      const isExpanded = expandedModules.has(String(mIndex))
-                      return (
-                        <div className="student-curriculum-module" key={mod.moduleId || mIndex}>
-                          <button
-                            type="button"
-                            className="student-curriculum-module__header"
-                            onClick={() => toggleModule(mIndex)}
-                            aria-expanded={isExpanded}
-                          >
-                            <div className="student-curriculum-module__title-wrap">
-                              <span className="student-curriculum-module__index">Module {mIndex + 1}</span>
-                              <h3 className="student-curriculum-module__title">{mod.title}</h3>
-                            </div>
-                            <div className="student-curriculum-module__meta-wrap">
-                              <span>{mod.itemCount} {mod.itemCount === 1 ? 'item' : 'items'}</span>
-                              <span className="student-curriculum-module__toggle-icon">
-                                <Icon name={isExpanded ? 'chevronUp' : 'chevronDown'} size={16} />
-                              </span>
-                            </div>
-                          </button>
-
-                          {isExpanded && (
-                            <div className="student-curriculum-module__body">
-                              {mod.description && (
-                                <p className="student-curriculum-module__description">{mod.description}</p>
-                              )}
-                              <ul className="student-curriculum-module__items-list">
-                                {mod.items.map((item, itemIndex) => {
-                                  const isLesson = item.type === 'video-lesson'
-                                  const isQuiz = item.type === 'quiz'
-
-                                  return (
-                                    <li className="student-curriculum-item" key={item.id || itemIndex}>
-                                      <div className="student-curriculum-item__left">
-                                        <span className={`student-curriculum-item__icon is-${item.type}`}>
-                                          <Icon
-                                            name={isLesson ? 'play' : isQuiz ? 'clipboardCheck' : 'check'}
-                                            size={14}
-                                          />
-                                        </span>
-                                        <div>
-                                          <strong className="student-curriculum-item__title">{item.title}</strong>
-                                          <div className="student-curriculum-item__details">
-                                            <span className="student-curriculum-item__type-label">
-                                              {isLesson ? 'Video Lesson' : isQuiz ? 'Quiz Checkpoint' : 'Milestone Assessment'}
-                                            </span>
-                                            {item.durationSeconds > 0 && (
-                                              <span>· {formatCourseDuration(Math.round(item.durationSeconds / 60))}</span>
-                                            )}
-                                            {item.points > 0 && (
-                                              <span>· {item.points} pts</span>
-                                            )}
-                                          </div>
-                                        </div>
-                                      </div>
-
-                                      <div className="student-curriculum-item__right">
-                                        {isEnrolled ? (
-                                          item.isCompleted ? (
-                                            <span className="student-activity-status-badge is-mint">
-                                              {isQuiz ? 'Passed' : 'Completed'}
-                                            </span>
-                                          ) : item.isFailed ? (
-                                            <span className="student-activity-status-badge is-peach">
-                                              Failed
-                                            </span>
-                                          ) : item.isSubmitted ? (
-                                            <span className="student-activity-status-badge is-teal">
-                                              Submitted
-                                            </span>
-                                          ) : (
-                                            <span className="student-activity-status-badge is-neutral">
-                                              Pending
-                                            </span>
-                                          )
-                                        ) : (
-                                          <span className="student-curriculum-item__preview-tag">
-                                            Preview
-                                          </span>
-                                        )}
-                                      </div>
-                                    </li>
-                                  )
-                                })}
-                              </ul>
-                            </div>
-                          )}
-                        </div>
-                      )
-                    })
+                    <span className="student-course-details__module-count">
+                      {items.length} {items.length === 1 ? 'item' : 'items'}
+                      <span aria-hidden="true">⌄</span>
+                    </span>
+                  </summary>
+                  {module.description && (
+                    <p className="student-course-details__module-description">{module.description}</p>
                   )}
-                </div>
-              </section>
-            </div>
-
-            {/* Sidebar Column: Prerequisites & Audience */}
-            <div className="student-course-details__sidebar-col">
-              <div className="student-course-details__card">
-                <h3>Prerequisites</h3>
-                {course.prerequisites?.length > 0 ? (
-                  <ul className="student-course-details__check-list">
-                    {course.prerequisites.map((req, i) => (
-                      <li key={i}>{req}</li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="student-course-details__muted-text">
-                    No prior technical knowledge required. Suitable for beginners and self-paced learners.
-                  </p>
-                )}
-              </div>
-
-              <div className="student-course-details__card">
-                <h3>Target Audience</h3>
-                <p className="student-course-details__muted-text">
-                  {course.targetAudience || 'Curious minds, students, and professionals aiming to build practical, in-demand skills.'}
-                </p>
-              </div>
-
-              <div className="student-course-details__card">
-                <h3>Skill Level &amp; Effort</h3>
-                <div className="student-course-details__info-row">
-                  <span>Level:</span>
-                  <strong>{difficultyLabels[course.difficulty] || 'All Levels'}</strong>
-                </div>
-                <div className="student-course-details__info-row">
-                  <span>Estimated Time:</span>
-                  <strong>{formatCourseDuration(counts.durationMinutes)}</strong>
-                </div>
-                <div className="student-course-details__info-row">
-                  <span>Language:</span>
-                  <strong>English</strong>
-                </div>
-                <div className="student-course-details__info-row">
-                  <span>Certificate:</span>
-                  <strong>Official Verified Certificate</strong>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Certificate Modal */}
-          {showCertificateModal && (
-            <StudentCertificateModal
-              certificate={certificate}
-              onClose={() => setShowCertificateModal(false)}
-            />
-          )}
-
-          {/* Unenroll Confirmation Modal */}
-          {showUnenrollModal && (
-            <StudentUnenrollConfirmModal
-              courseTitle={course.title}
-              onConfirm={handleUnenroll}
-              onCancel={() => setShowUnenrollModal(false)}
-              loading={unenrolling}
-              error={unenrollError}
-            />
-          )}
-        </>
+                  {items.length ? (
+                    <ul className="student-course-details__module-items">
+                      {items.map((item) => {
+                        const durationMinutes = Math.ceil((Number(item.durationSeconds) || 0) / 60)
+                        const itemDescription = item.type === 'video-lesson'
+                          ? `Video Lesson${durationMinutes ? ` · ${durationMinutes} min` : ''}`
+                          : item.type === 'quiz'
+                            ? 'Quiz Checkpoint'
+                            : item.type === 'assignment'
+                              ? `Module Assessment${Number(item.points) ? ` · ${Number(item.points)} pts` : ''}`
+                              : 'Course Resource'
+                        const itemIcon = item.type === 'video-lesson'
+                          ? 'play'
+                          : item.type === 'note' ? 'folderOpen' : 'clipboardCheck'
+                        return (
+                          <li className="student-course-details__module-item" key={item._learningKey}>
+                            <span className={`student-course-details__item-icon is-${item.type}`}>
+                              <Icon name={itemIcon} size={16} />
+                            </span>
+                            <span className="student-course-details__item-copy">
+                              <strong>{item.title}</strong>
+                              <small>{itemDescription}</small>
+                            </span>
+                            <span className="student-course-details__item-status">Pending</span>
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  ) : <p className="student-course-details__module-empty">No content has been added to this module.</p>}
+                </details>
+              )
+            }) : <EmptyState icon="book" title="Course content is not available yet" description="This course does not currently have any modules or lessons." />}
+          </section>
+        </div>
       )}
-    </div>
+    </StudentRoutePage>
   )
 }
 
+class CourseLearningErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props)
+    this.state = { hasError: false, error: null }
+  }
 
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error }
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error('CourseLearningErrorBoundary caught an error:', error, errorInfo)
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="student-course-learning-error" role="alert">
+          <span className="student-state-card__icon"><Icon name="circleX" size={26} /></span>
+          <h2>Something went wrong displaying this course</h2>
+          <p>{this.state.error?.message || 'An unexpected rendering error occurred. Please try reloading.'}</p>
+          <div className="student-course-learning-error__actions">
+            <button
+              type="button"
+              className="student-button"
+              onClick={() => {
+                this.setState({ hasError: false, error: null })
+                window.location.reload()
+              }}
+            >
+              Reload Page
+            </button>
+            <Link to="/student/courses" className="student-button student-button--quiet">
+              Return to My Courses
+            </Link>
+          </div>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
 
 function StudentCourseLearningPage({
   onLogout,
@@ -5838,59 +7077,214 @@ function StudentCourseLearningPage({
   contentSearch,
 }) {
   const { courseId } = useParams()
-  const [enrollment, setEnrollment] = useState(null)
-  const [loading, setLoading] = useState(true)
+  const [initialEnrollment] = useState(() => getInitialStudentCourseLearningEnrollment(courseId))
+  const [enrollment, setEnrollment] = useState(initialEnrollment)
+  const [loading, setLoading] = useState(!initialEnrollment)
+  const [courseContentStatus, setCourseContentStatus] = useState(() => (
+    hasFreshStudentPageCourseContent(courseId) ? 'ready' : 'loading'
+  ))
   const [error, setError] = useState('')
+  const courseContentRequestSequence = useRef(0)
   const location = useLocation()
-  const requestedLessonId = new URLSearchParams(location.search).get('lesson')
+  const searchParams = new URLSearchParams(location.search)
+  const requestedLessonId = searchParams.get('lesson')
+  const requestedActivityId = searchParams.get('activity')
+  const requestedActivityType = searchParams.get('activityType')
 
   useEffect(() => {
-    onCourseTitleChange(enrollment?.courseId?.title || '')
+    const title = enrollment?.courseId?.title
+    if (typeof title === 'string' && title.trim()) {
+      onCourseTitleChange(title)
+    }
   }, [enrollment?.courseId?.title, onCourseTitleChange])
 
   useEffect(() => {
-    const controller = new AbortController()
-    setLoading(true)
+    let active = true
+    if (!courseId || courseId === 'undefined' || courseId === 'null') {
+      setEnrollment(null)
+      setError('Course ID is missing or invalid.')
+      setLoading(false)
+      setCourseContentStatus('error')
+      return undefined
+    }
+
+    const requestSequence = ++courseContentRequestSequence.current
+    const initialCourseContent = getCachedStudentPageCourseContent(courseId)
+    const initialCourseEnrollment = getInitialStudentCourseLearningEnrollment(courseId)
+    setEnrollment(initialCourseEnrollment)
+    setLoading(!initialCourseEnrollment)
+    setCourseContentStatus(initialCourseContent && hasFreshStudentPageCourseContent(courseId) ? 'ready' : 'loading')
     setError('')
-    fetchStudentCourseContent(courseId, onLogout, controller.signal)
-      .then(({ enrollment: courseEnrollment, assignmentSubmissions, quizAttempts }) => {
+
+    fetchStudentPageCourseContent(courseId, onLogout)
+      .then((content) => {
+        if (!active || requestSequence !== courseContentRequestSequence.current) return
+        const { enrollment: courseEnrollment, assignmentSubmissions = [], quizAttempts = [] } = content || {}
+        if (!courseEnrollment || !courseEnrollment.courseId || typeof courseEnrollment.courseId !== 'object') {
+          setError('Course details are unavailable for this course.')
+          setCourseContentStatus('error')
+          return
+        }
+        const cacheKey = getStudentCourseContentCacheKey(courseId)
+        if (cacheKey) studentCourseLearningSeeds.delete(cacheKey)
         setEnrollment({
           ...courseEnrollment,
           assignmentSubmissions,
           quizAttempts,
         })
+        setCourseContentStatus('ready')
+        setError('')
       })
       .catch((loadError) => {
-        if (loadError.name !== 'AbortError') {
+        if (active && requestSequence === courseContentRequestSequence.current) {
           setError(loadError instanceof Error ? loadError.message : 'Your course could not be loaded.')
+          setCourseContentStatus('error')
         }
       })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false) })
-    return () => controller.abort()
+      .finally(() => {
+        if (active && requestSequence === courseContentRequestSequence.current) setLoading(false)
+      })
+    return () => {
+      active = false
+      if (requestSequence === courseContentRequestSequence.current) {
+        courseContentRequestSequence.current += 1
+      }
+    }
   }, [courseId, onLogout])
+
+  useEffect(() => {
+    let active = true
+    if (!courseId || courseId === 'undefined' || courseId === 'null') return undefined
+
+    async function refreshProgress() {
+      const requestSequence = ++courseContentRequestSequence.current
+      const cacheKey = getStudentCourseContentCacheKey(courseId)
+      if (cacheKey) studentCourseContentCache.delete(cacheKey)
+      setCourseContentStatus('loading')
+      try {
+        const content = await fetchStudentCourseContent(courseId, onLogout)
+        if (!active || requestSequence !== courseContentRequestSequence.current) return
+        const { enrollment: courseEnrollment, assignmentSubmissions = [], quizAttempts = [] } = content || {}
+        if (!courseEnrollment || !courseEnrollment.courseId || typeof courseEnrollment.courseId !== 'object') {
+          throw new Error('Course details are unavailable for this course.')
+        }
+        if (cacheKey) studentCourseContentCache.set(cacheKey, { content, savedAt: Date.now() })
+        setEnrollment({ ...courseEnrollment, assignmentSubmissions, quizAttempts })
+        setCourseContentStatus('ready')
+        setError('')
+      } catch (loadError) {
+        if (active && requestSequence === courseContentRequestSequence.current) {
+          setError(loadError instanceof Error ? loadError.message : 'Your course could not be loaded.')
+          setCourseContentStatus('error')
+        }
+      }
+    }
+    window.addEventListener(STUDENT_LEARNING_PROGRESS_UPDATED_EVENT, refreshProgress)
+    return () => {
+      active = false
+      courseContentRequestSequence.current += 1
+      window.removeEventListener(STUDENT_LEARNING_PROGRESS_UPDATED_EVENT, refreshProgress)
+    }
+  }, [courseId, onLogout])
+
+  async function retryCourseContent() {
+    const requestSequence = ++courseContentRequestSequence.current
+    setError('')
+    setLoading(true)
+    setCourseContentStatus('loading')
+    try {
+      const content = await fetchStudentPageCourseContent(courseId, onLogout)
+      if (requestSequence !== courseContentRequestSequence.current) return
+      const { enrollment: courseEnrollment, assignmentSubmissions = [], quizAttempts = [] } = content || {}
+      if (!courseEnrollment || !courseEnrollment.courseId || typeof courseEnrollment.courseId !== 'object') {
+        throw new Error('Course details are unavailable for this course.')
+      }
+      setEnrollment({ ...courseEnrollment, assignmentSubmissions, quizAttempts })
+      setCourseContentStatus('ready')
+    } catch (loadError) {
+      if (requestSequence === courseContentRequestSequence.current) {
+        setError(loadError instanceof Error ? loadError.message : 'Your course could not be loaded.')
+        setCourseContentStatus('error')
+      }
+    } finally {
+      if (requestSequence === courseContentRequestSequence.current) setLoading(false)
+    }
+  }
 
   return (
     <StudentRoutePage title={enrollment?.courseId?.title || 'Course learning'} className="student-course-learning-page">
-      {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
-      {loading ? <p role="status">Loading your course…</p> : enrollment && (
-        <StudentCourseLearning
-          enrollment={enrollment}
-          onEnrollmentUpdated={(updates) => setEnrollment((current) => current ? {
-            ...current,
-            ...updates,
-            courseId: current.courseId,
-          } : current)}
-          onLearningDataChanged={onLearningDataChanged}
-          onLogout={onLogout}
-          requestedLessonId={requestedLessonId}
-          contentSearch={contentSearch}
-        />
-      )}
+      {error && enrollment && <p className="student-courses__message is-error" role="alert">{error}</p>}
+      {loading && !enrollment ? (
+        <div className="student-course-learning-loading" role="status" aria-live="polite">
+          <span className="student-loader" />
+          <h2>Loading your course…</h2>
+          <p>Preparing lessons, quizzes, assignments, and study materials.</p>
+        </div>
+      ) : enrollment?.courseId && typeof enrollment.courseId === 'object' ? (
+        <CourseLearningErrorBoundary>
+          <StudentCourseLearning
+            enrollment={enrollment}
+            onEnrollmentUpdated={(updates) => setEnrollment((current) => current ? {
+              ...current,
+              ...updates,
+              courseId: current.courseId,
+            } : current)}
+            onLearningDataChanged={onLearningDataChanged}
+            onLogout={onLogout}
+            requestedLessonId={requestedLessonId}
+            requestedActivityId={requestedActivityId}
+            requestedActivityType={requestedActivityType}
+            contentSearch={contentSearch}
+            courseContentStatus={courseContentStatus}
+          />
+        </CourseLearningErrorBoundary>
+      ) : error ? (
+        <div className="student-course-learning-error" role="alert">
+          <span className="student-state-card__icon"><Icon name="circleX" size={26} /></span>
+          <h2>{error}</h2>
+          <p>Please check your enrollment status or try reloading the page.</p>
+          <div className="student-course-learning-error__actions">
+            <button
+              type="button"
+              className="student-button"
+              onClick={() => void retryCourseContent()}
+            >
+              Retry
+            </button>
+            <Link to="/student/courses" className="student-button student-button--quiet">
+              Go to My Courses
+            </Link>
+          </div>
+        </div>
+      ) : (!enrollment || !enrollment.courseId || typeof enrollment.courseId !== 'object') ? (
+        <div className="student-course-learning-error" role="alert">
+          <span className="student-state-card__icon"><Icon name="book" size={26} /></span>
+          <h2>Course content unavailable</h2>
+          <p>The requested course content could not be found or you may not be enrolled yet.</p>
+          <div className="student-course-learning-error__actions">
+            <Link to="/student/courses" className="student-button">
+              Browse My Courses
+            </Link>
+            <Link to="/student/dashboard" className="student-button student-button--quiet">
+              Back to Dashboard
+            </Link>
+          </div>
+        </div>
+      ) : <div className="student-course-learning-error" role="alert">
+        <span className="student-state-card__icon"><Icon name="book" size={26} /></span>
+        <h2>Course content unavailable</h2>
+        <p>The requested course content could not be found or you may not be enrolled yet.</p>
+        <div className="student-course-learning-error__actions">
+          <Link to="/student/courses" className="student-button">Browse My Courses</Link>
+          <Link to="/student/dashboard" className="student-button student-button--quiet">Back to Dashboard</Link>
+        </div>
+      </div>}
     </StudentRoutePage>
   )
 }
 
 function StudentCourses({ user, onLogout }) {
+  const [progressRefresh, setProgressRefresh] = useState(0)
   const [initialEnrollments] = useState(getCachedStudentPageEnrollments)
   const [enrollments, setEnrollments] = useState(initialEnrollments || [])
   const [error, setError] = useState('')
@@ -5900,9 +7294,27 @@ function StudentCourses({ user, onLogout }) {
   const enrollmentFilter = ['enrolled', 'completed', 'active'].includes(requestedFilter) ? requestedFilter : ''
 
   useEffect(() => {
+    const refreshProgress = () => {
+      invalidateStudentLearningPageCaches()
+      setProgressRefresh((refresh) => refresh + 1)
+    }
+    window.addEventListener(STUDENT_LEARNING_PROGRESS_UPDATED_EVENT, refreshProgress)
+    return () => window.removeEventListener(STUDENT_LEARNING_PROGRESS_UPDATED_EVENT, refreshProgress)
+  }, [])
+
+  useEffect(() => {
     let active = true
+    const cachedEnrollments = getCachedStudentPageEnrollments()
+    if (cachedEnrollments) setEnrollments(cachedEnrollments)
+    setLoading(cachedEnrollments === null)
+    setError('')
     fetchStudentPageEnrollments(onLogout)
-      .then((loadedEnrollments) => { if (active) setEnrollments(loadedEnrollments) })
+      .then((loadedEnrollments) => {
+        if (!active) return
+        const cacheKey = getStudentPageCacheKey()
+        if (cacheKey) studentEnrollmentCache.set(cacheKey, { enrollments: loadedEnrollments, savedAt: Date.now() })
+        setEnrollments(loadedEnrollments)
+      })
       .catch((loadError) => {
         if (active) {
           setError(loadError instanceof Error ? loadError.message : 'Unable to load your enrolled courses.')
@@ -5910,17 +7322,12 @@ function StudentCourses({ user, onLogout }) {
       })
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
-  }, [onLogout, user?.id])
+  }, [onLogout, progressRefresh, user?.id])
 
   const filteredEnrollments = enrollmentFilter
-    ? enrollments.filter((entry) => {
-      const { percentage } = getCourseProgress(entry)
-      const isComplete = entry.status === 'completed' || percentage >= 100
-      if (enrollmentFilter === 'enrolled') return true
-      if (enrollmentFilter === 'completed') return isComplete
-      if (enrollmentFilter === 'active') return !isComplete
-      return true
-    })
+    ? enrollments.filter((entry) => enrollmentFilter === 'enrolled'
+      ? ['active', 'completed'].includes(entry.status)
+      : entry.status === enrollmentFilter)
     : enrollments
   const pageTitle = enrollmentFilter === 'completed'
     ? 'Completed Courses'
@@ -5929,9 +7336,9 @@ function StudentCourses({ user, onLogout }) {
       : 'My Courses'
 
   return (
-    <StudentRoutePage title={pageTitle} showHeading>
+    <StudentRoutePage title={pageTitle} showHeading className="student-courses-page">
       {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
-      {loading ? <EnrollmentCourseSkeletons /> : (!error || initialEnrollments !== null) && (
+      {loading ? <EnrollmentCourseSkeletons /> : !error && (
         <EnrollmentCourseCards
           enrollments={filteredEnrollments}
           emptyTitle={enrollmentFilter === 'completed'
@@ -5946,753 +7353,279 @@ function StudentCourses({ user, onLogout }) {
   )
 }
 
-
-
-function formatActivityDueDate(dateStr, isOverdue) {
-  if (!dateStr) return { text: 'No due date', isOverdue: false }
-  try {
-    const d = new Date(dateStr)
-    if (Number.isNaN(d.getTime())) return { text: 'No due date', isOverdue: false }
-    const formatted = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
-    return {
-      text: isOverdue ? `Overdue · Due ${formatted}` : `Due ${formatted}`,
-      isOverdue,
-    }
-  } catch {
-    return { text: 'No due date', isOverdue: false }
-  }
-}
-
-function getActivityStatusDetails(activity) {
-  const isQuiz = activity.type === 'quiz'
-  if (isQuiz) {
-    if (activity.status === 'completed') return { text: 'Completed', tone: 'mint' }
-    if (activity.status === 'failed') return { text: 'Failed', tone: 'peach' }
-    if (activity.status === 'in_progress') return { text: 'In Progress', tone: 'blue' }
-    return { text: 'Pending', tone: 'neutral' }
-  }
-  if (activity.status === 'graded') return { text: 'Graded', tone: 'mint' }
-  if (activity.status === 'submitted') return { text: 'Submitted', tone: 'teal' }
-  if (activity.status === 'overdue' || activity.isOverdue) return { text: 'Overdue', tone: 'peach' }
-  return { text: 'Pending', tone: 'neutral' }
-}
-
-function getActivityActionLabel(activity) {
-  const isQuiz = activity.type === 'quiz'
-  if (isQuiz) {
-    if (activity.status === 'completed') return 'Review Quiz'
-    if (activity.status === 'failed') return 'Retry Quiz'
-    if (activity.status === 'in_progress') return 'Continue Quiz'
-    return 'Start Quiz'
-  }
-  if (activity.status === 'graded') return 'View Submission'
-  if (activity.status === 'submitted') return 'View Submission'
-  if (activity.status === 'overdue' || activity.isOverdue) return 'Submit Assignment'
-  return 'Submit Assignment'
-}
-
-function StudentQuizzesAndAssignments({ user, onLogout }) {
-  const [data, setData] = useState({
-    summary: { total: 0, completed: 0, remaining: 0, overdue: 0 },
-    quizStats: { total: 0, completed: 0, remaining: 0, percentage: 0 },
-    assignmentStats: { total: 0, completed: 0, remaining: 0, percentage: 0 },
-    activities: [],
-  })
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
-  const [activeFilter, setActiveFilter] = useState('all')
-  const [searchQuery, setSearchQuery] = useState('')
-  const [refreshKey, setRefreshKey] = useState(0)
-
-  useEffect(() => {
-    const controller = new AbortController()
-    setLoading(true)
-    setError('')
-    fetchStudentActivities(onLogout, controller.signal)
-      .then((res) => {
-        if (!controller.signal.aborted) {
-          setData({
-            summary: res.summary || { total: 0, completed: 0, remaining: 0, overdue: 0 },
-            quizStats: res.quizStats || { total: 0, completed: 0, remaining: 0, percentage: 0 },
-            assignmentStats: res.assignmentStats || { total: 0, completed: 0, remaining: 0, percentage: 0 },
-            activities: Array.isArray(res.activities) ? res.activities : [],
-          })
-        }
-      })
-      .catch((err) => {
-        if (err.name !== 'AbortError') {
-          setError(err instanceof Error ? err.message : 'Unable to load quizzes and assignments.')
-        }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false)
-      })
-    return () => controller.abort()
-  }, [onLogout, user?.id, refreshKey])
-
-  const activities = data.activities || []
-
-  const filteredActivities = useMemo(() => {
-    return activities.filter((item) => {
-      if (activeFilter === 'quizzes' && item.type !== 'quiz') return false
-      if (activeFilter === 'assignments' && item.type !== 'assignment') return false
-      if (activeFilter === 'completed') {
-        const isComplete = item.type === 'quiz'
-          ? item.status === 'completed'
-          : (item.status === 'submitted' || item.status === 'graded')
-        if (!isComplete) return false
-      }
-      if (activeFilter === 'remaining') {
-        const isComplete = item.type === 'quiz'
-          ? item.status === 'completed'
-          : (item.status === 'submitted' || item.status === 'graded')
-        if (isComplete) return false
-      }
-      if (activeFilter === 'overdue') {
-        if (!item.isOverdue && item.status !== 'overdue') return false
-      }
-
-      if (searchQuery.trim()) {
-        const q = searchQuery.trim().toLowerCase()
-        const matchesTitle = item.title?.toLowerCase().includes(q)
-        const matchesCourse = item.courseName?.toLowerCase().includes(q)
-        const matchesModule = item.moduleTitle?.toLowerCase().includes(q)
-        if (!matchesTitle && !matchesCourse && !matchesModule) return false
-      }
-
-      return true
-    })
-  }, [activities, activeFilter, searchQuery])
-
-  const tabs = [
-    { id: 'all', label: 'All Activities', count: data.summary.total },
-    { id: 'quizzes', label: 'Quizzes', count: data.quizStats.total },
-    { id: 'assignments', label: 'Assignments', count: data.assignmentStats.total },
-    { id: 'completed', label: 'Completed', count: data.summary.completed },
-    { id: 'remaining', label: 'Remaining', count: data.summary.remaining },
-    { id: 'overdue', label: 'Overdue', count: data.summary.overdue },
-  ]
-
-  return (
-    <section className="student-panel student-activities-page" aria-labelledby="student-activities-heading">
-      <div className="student-section-heading student-activities-page__header">
-        <div>
-          <span className="student-eyebrow">CENTRALIZED ACTIVITY TRACKER</span>
-          <h2 id="student-activities-heading">Quizzes &amp; Assignments</h2>
-          <p className="student-activities-subtitle">
-            Track quizzes, milestone assignments, submission statuses, and deadlines across all your enrolled courses.
-          </p>
-        </div>
-        <button
-          type="button"
-          className="student-activities-refresh-btn"
-          onClick={() => setRefreshKey((k) => k + 1)}
-          disabled={loading}
-          aria-label="Refresh activities"
-        >
-          <Icon name="spark" size={15} />
-          <span>{loading ? 'Refreshing…' : 'Refresh'}</span>
-        </button>
-      </div>
-
-      {error && (
-        <div className="student-activities-error-banner" role="alert">
-          <Icon name="alertCircle" size={18} />
-          <div className="student-activities-error-banner__content">
-            <strong>Unable to load activities</strong>
-            <p>{error}</p>
-          </div>
-          <button
-            type="button"
-            className="student-activities-retry-btn"
-            onClick={() => setRefreshKey((k) => k + 1)}
-          >
-            Retry
-          </button>
-        </div>
-      )}
-
-      {loading && !activities.length ? (
-        <div className="student-activities-loading" role="status">
-          <p>Loading your quizzes and assignments…</p>
-        </div>
-      ) : !error && (
-        <>
-          {/* Top 4 Summary Cards */}
-          <div className="student-activities-summary-grid">
-            <article className="student-activity-stat-card is-gold">
-              <div className="student-activity-stat-card__header">
-                <span className="student-activity-stat-card__icon is-gold"><Icon name="clipboardCheck" size={18} /></span>
-                <span className="student-activity-stat-card__eyebrow">TOTAL ACTIVITIES</span>
-              </div>
-              <strong className="student-activity-stat-card__value">{data.summary.total}</strong>
-              <span className="student-activity-stat-card__caption">Quizzes &amp; assignments assigned</span>
-            </article>
-
-            <article className="student-activity-stat-card is-mint">
-              <div className="student-activity-stat-card__header">
-                <span className="student-activity-stat-card__icon is-mint"><Icon name="award" size={18} /></span>
-                <span className="student-activity-stat-card__eyebrow">COMPLETED</span>
-              </div>
-              <strong className="student-activity-stat-card__value">{data.summary.completed}</strong>
-              <span className="student-activity-stat-card__caption">Passed quizzes &amp; submissions</span>
-            </article>
-
-            <article className="student-activity-stat-card is-blue">
-              <div className="student-activity-stat-card__header">
-                <span className="student-activity-stat-card__icon is-blue"><Icon name="clock" size={18} /></span>
-                <span className="student-activity-stat-card__eyebrow">REMAINING</span>
-              </div>
-              <strong className="student-activity-stat-card__value">{data.summary.remaining}</strong>
-              <span className="student-activity-stat-card__caption">Pending or in progress work</span>
-            </article>
-
-            <article className="student-activity-stat-card is-peach">
-              <div className="student-activity-stat-card__header">
-                <span className="student-activity-stat-card__icon is-peach"><Icon name="alertCircle" size={18} /></span>
-                <span className="student-activity-stat-card__eyebrow">OVERDUE</span>
-              </div>
-              <strong className="student-activity-stat-card__value">{data.summary.overdue}</strong>
-              <span className="student-activity-stat-card__caption">Past scheduled deadline</span>
-            </article>
-          </div>
-
-          {/* Separate Activity Statistics */}
-          <div className="student-activities-split">
-            <article className="student-activities-section-card">
-              <div className="student-activities-section-card__top">
-                <div>
-                  <span className="student-activity-type-pill is-quiz">QUIZZES</span>
-                  <h3 className="student-activities-section-card__title">Knowledge Checkpoints</h3>
-                </div>
-                <span className="student-activities-section-card__badge">{data.quizStats.percentage}% Completed</span>
-              </div>
-              <div className="student-progress-track student-activities-section-card__progress">
-                <span style={{ width: `${Math.min(100, Math.max(0, data.quizStats.percentage))}%` }} />
-              </div>
-              <div className="student-activities-stats-row">
-                <div className="student-activities-stat-cell">
-                  <span className="student-activities-stat-cell__label">Total Quizzes</span>
-                  <strong className="student-activities-stat-cell__val">{data.quizStats.total}</strong>
-                </div>
-                <div className="student-activities-stat-cell">
-                  <span className="student-activities-stat-cell__label">Passed</span>
-                  <strong className="student-activities-stat-cell__val is-mint">{data.quizStats.completed}</strong>
-                </div>
-                <div className="student-activities-stat-cell">
-                  <span className="student-activities-stat-cell__label">Remaining</span>
-                  <strong className="student-activities-stat-cell__val">{data.quizStats.remaining}</strong>
-                </div>
-                <div className="student-activities-stat-cell">
-                  <span className="student-activities-stat-cell__label">Pass Rate</span>
-                  <strong className="student-activities-stat-cell__val">{data.quizStats.percentage}%</strong>
-                </div>
-              </div>
-            </article>
-
-            <article className="student-activities-section-card">
-              <div className="student-activities-section-card__top">
-                <div>
-                  <span className="student-activity-type-pill is-assignment">ASSIGNMENTS</span>
-                  <h3 className="student-activities-section-card__title">Practical Milestones</h3>
-                </div>
-                <span className="student-activities-section-card__badge">{data.assignmentStats.percentage}% Completed</span>
-              </div>
-              <div className="student-progress-track student-activities-section-card__progress">
-                <span style={{ width: `${Math.min(100, Math.max(0, data.assignmentStats.percentage))}%` }} />
-              </div>
-              <div className="student-activities-stats-row">
-                <div className="student-activities-stat-cell">
-                  <span className="student-activities-stat-cell__label">Total Assignments</span>
-                  <strong className="student-activities-stat-cell__val">{data.assignmentStats.total}</strong>
-                </div>
-                <div className="student-activities-stat-cell">
-                  <span className="student-activities-stat-cell__label">Submitted / Graded</span>
-                  <strong className="student-activities-stat-cell__val is-mint">{data.assignmentStats.completed}</strong>
-                </div>
-                <div className="student-activities-stat-cell">
-                  <span className="student-activities-stat-cell__label">Remaining</span>
-                  <strong className="student-activities-stat-cell__val">{data.assignmentStats.remaining}</strong>
-                </div>
-                <div className="student-activities-stat-cell">
-                  <span className="student-activities-stat-cell__label">Submission Rate</span>
-                  <strong className="student-activities-stat-cell__val">{data.assignmentStats.percentage}%</strong>
-                </div>
-              </div>
-            </article>
-          </div>
-
-          {/* Filters & Search Toolbar */}
-          <div className="student-activities-toolbar">
-            <div className="student-activities-tabs" role="tablist" aria-label="Activity filter tabs">
-              {tabs.map((tab) => (
-                <button
-                  key={tab.id}
-                  type="button"
-                  role="tab"
-                  aria-selected={activeFilter === tab.id}
-                  className={`student-activities-tab ${activeFilter === tab.id ? 'is-active' : ''}`}
-                  onClick={() => setActiveFilter(tab.id)}
-                >
-                  <span>{tab.label}</span>
-                  <span className="student-activities-tab__badge">{tab.count}</span>
-                </button>
-              ))}
-            </div>
-
-            <div className="student-activities-search">
-              <span className="student-activities-search__icon"><Icon name="search" size={16} /></span>
-              <input
-                type="search"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search by activity, course, or module..."
-                aria-label="Search quizzes and assignments"
-                className="student-activities-search__input"
-              />
-              {searchQuery && (
-                <button
-                  type="button"
-                  onClick={() => setSearchQuery('')}
-                  className="student-activities-search__clear"
-                  aria-label="Clear search"
-                >
-                  <Icon name="xCircle" size={15} />
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Activity Cards List or Empty States */}
-          {activities.length === 0 ? (
-            <div className="student-activities-empty-box">
-              <EmptyState
-                icon="clipboardCheck"
-                title="No quizzes or assignments yet"
-                description="Your enrolled courses do not have quizzes or assignments assigned yet. As you advance through your lessons, activities will automatically appear here."
-              />
-              <div className="student-activities-empty-box__action">
-                <Link to="/student/courses" className="student-button">
-                  <span>Browse My Courses</span>
-                  <Icon name="arrow" size={14} />
-                </Link>
-              </div>
-            </div>
-          ) : filteredActivities.length === 0 ? (
-            <div className="student-activities-empty-box">
-              <EmptyState
-                icon="search"
-                title="No matching activities found"
-                description="No quizzes or assignments match your current filter or search criteria."
-              />
-              <div className="student-activities-empty-box__action">
-                <button
-                  type="button"
-                  className="student-button student-button--subtle"
-                  onClick={() => { setActiveFilter('all'); setSearchQuery('') }}
-                >
-                  <span>Reset filters</span>
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="student-activities-list">
-              {filteredActivities.map((item) => {
-                const isQuiz = item.type === 'quiz'
-                const statusDetails = getActivityStatusDetails(item)
-                const actionLabel = getActivityActionLabel(item)
-                const dueInfo = formatActivityDueDate(item.dueDate, item.isOverdue || item.status === 'overdue')
-
-                return (
-                  <article
-                    className={`student-activity-card is-${statusDetails.tone}`}
-                    key={`${item.enrollmentId}:${item.id}`}
-                  >
-                    <div className="student-activity-card__main">
-                      <div className="student-activity-card__header-line">
-                        <span className={`student-activity-type-pill is-${item.type}`}>
-                          {isQuiz ? 'Quiz' : 'Assignment'}
-                        </span>
-                        <Link
-                          to={`/student/course/${encodeURIComponent(item.courseId)}`}
-                          className="student-activity-card__course-tag"
-                          title={`Go to ${item.courseName}`}
-                        >
-                          <Icon name="book" size={13} />
-                          <span>{item.courseName}</span>
-                        </Link>
-                        {item.moduleTitle && (
-                          <span className="student-activity-card__module-tag">
-                            {item.moduleTitle}
-                          </span>
-                        )}
-                        <span className={`student-activity-status-badge is-${statusDetails.tone}`}>
-                          {statusDetails.text}
-                        </span>
-                      </div>
-
-                      <h4 className="student-activity-card__title">{item.title}</h4>
-
-                      {item.description && (
-                        <p className="student-activity-card__desc">{item.description}</p>
-                      )}
-
-                      <div className="student-activity-card__meta-bar">
-                        <span className={`student-activity-meta-item ${dueInfo.isOverdue ? 'is-overdue' : ''}`}>
-                          <Icon name="clock" size={13} />
-                          <span>{dueInfo.text}</span>
-                        </span>
-
-                        {item.score && (
-                          <span className="student-activity-meta-item is-score">
-                            <Icon name="award" size={13} />
-                            <span>Score: {item.score}</span>
-                          </span>
-                        )}
-
-                        {!item.score && (item.points || item.totalPoints) && (
-                          <span className="student-activity-meta-item">
-                            <Icon name="chart" size={13} />
-                            <span>{item.points || item.totalPoints} pts</span>
-                          </span>
-                        )}
-
-                        {isQuiz && (
-                          <span className="student-activity-meta-item">
-                            <span>Attempts: {item.attemptsCount || 0} / {item.maxAttempts || 3}</span>
-                          </span>
-                        )}
-
-                        {isQuiz && item.passingPercentage && (
-                          <span className="student-activity-meta-item">
-                            <span>Pass requirement: {item.passingPercentage}%</span>
-                          </span>
-                        )}
-
-                        {!isQuiz && item.latestSubmission?.submittedAt && (
-                          <span className="student-activity-meta-item">
-                            <span>Submitted {new Date(item.latestSubmission.submittedAt).toLocaleDateString()}</span>
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="student-activity-card__action">
-                      <Link
-                        to={item.navigationUrl}
-                        className={`student-activity-action-btn ${statusDetails.tone === 'mint' ? 'is-secondary' : 'is-primary'}`}
-                      >
-                        <span>{actionLabel}</span>
-                        <Icon name="arrow" size={13} />
-                      </Link>
-                    </div>
-                  </article>
-                )
-              })}
-            </div>
-          )}
-        </>
-      )}
-    </section>
-  )
-}
-
-function StudentAchievements({ user, onLogout }) {
+function StudentAchievements({ onLogout }) {
   const [enrollments, setEnrollments] = useState([])
-  const [certificatesByCourse, setCertificatesByCourse] = useState(new Map())
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [actionCertificateId, setActionCertificateId] = useState('')
-  const [actionType, setActionType] = useState('')
-  const [preview, setPreview] = useState(null)
-  const previewUrlRef = useRef('')
 
   useEffect(() => {
     const controller = new AbortController()
-    setLoading(true)
-    setError('')
-
-    Promise.all([
-      fetchMyEnrollments(onLogout, controller.signal),
-      fetchStudentCertificates(onLogout, controller.signal).catch(() => []),
-    ])
-      .then(([enrollmentsData, certsData]) => {
-        if (controller.signal.aborted) return
-        setEnrollments(Array.isArray(enrollmentsData) ? enrollmentsData : [])
-        const certMap = new Map()
-        if (Array.isArray(certsData)) {
-          for (const item of certsData) {
-            if (item?.certificate && item?.courseId) {
-              certMap.set(String(item.courseId), item.certificate)
-            }
-          }
-        }
-        setCertificatesByCourse(certMap)
-      })
+    fetchMyEnrollments(onLogout, controller.signal)
+      .then(setEnrollments)
       .catch((loadError) => {
-        if (!controller.signal.aborted && loadError.name !== 'AbortError') {
-          setError(loadError instanceof Error ? loadError.message : 'Achievements could not be loaded.')
-        }
+        if (loadError.name !== 'AbortError') setError(loadError instanceof Error ? loadError.message : 'Achievements could not be loaded.')
       })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false)
-      })
-
+      .finally(() => { if (!controller.signal.aborted) setLoading(false) })
     return () => controller.abort()
   }, [onLogout])
-
-  useEffect(() => {
-    return () => {
-      if (previewUrlRef.current) {
-        URL.revokeObjectURL(previewUrlRef.current)
-        previewUrlRef.current = ''
-      }
-    }
-  }, [])
-
-  useEffect(() => {
-    if (!preview) return
-    const handleKeyDown = (e) => {
-      if (e.key === 'Escape') closePreview()
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [preview])
-
-  function closePreview() {
-    setPreview(null)
-    if (previewUrlRef.current) {
-      URL.revokeObjectURL(previewUrlRef.current)
-      previewUrlRef.current = ''
-    }
-  }
-
-  async function getStudentAuthToken() {
-    let auth
-    try {
-      auth = JSON.parse(sessionStorage.getItem('lms.auth') || 'null')
-    } catch {
-      onLogout()
-      throw new Error('Your saved student session is invalid. Please sign in again.')
-    }
-    if (typeof auth?.token !== 'string') {
-      onLogout()
-      throw new Error('Your session has ended. Please sign in again.')
-    }
-    return auth.token
-  }
-
-  async function handlePreviewCertificate(certificate, courseTitle) {
-    const certKey = certificate?.id || certificate?._id || certificate?.certificateId
-    if (!certKey) return
-    setActionCertificateId(certKey)
-    setActionType('preview')
-    setError('')
-    try {
-      const token = await getStudentAuthToken()
-      const response = await fetchWithAuth(
-        `${API_BASE_URL}/certificates/${encodeURIComponent(certKey)}/pdf`,
-        { headers: { Authorization: `Bearer ${token}` } },
-        API_BASE_URL,
-        token,
-      )
-      const result = response.ok ? null : await response.json().catch(() => ({}))
-      if (isInvalidSessionResponse(response, result)) {
-        onLogout()
-        throw new Error('Your session has ended. Please sign in again.')
-      }
-      if (!response.ok) {
-        throw new Error(result?.message || 'The certificate PDF could not be opened.')
-      }
-
-      const blob = await response.blob()
-      const objectUrl = URL.createObjectURL(blob)
-      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current)
-      previewUrlRef.current = objectUrl
-      setPreview({
-        ...certificate,
-        id: certKey,
-        courseName: certificate.courseName || courseTitle || 'Course Certificate',
-      })
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'The certificate PDF could not be opened.')
-    } finally {
-      setActionCertificateId('')
-      setActionType('')
-    }
-  }
-
-  async function handleDownloadCertificate(certificate, courseTitle) {
-    const certKey = certificate?.id || certificate?._id || certificate?.certificateId
-    if (!certKey) return
-    setActionCertificateId(certKey)
-    setActionType('download')
-    setError('')
-    try {
-      const token = await getStudentAuthToken()
-      const response = await fetchWithAuth(
-        `${API_BASE_URL}/certificates/${encodeURIComponent(certKey)}/pdf?download=true`,
-        { headers: { Authorization: `Bearer ${token}` } },
-        API_BASE_URL,
-        token,
-      )
-      const result = response.ok ? null : await response.json().catch(() => ({}))
-      if (isInvalidSessionResponse(response, result)) {
-        onLogout()
-        throw new Error('Your session has ended. Please sign in again.')
-      }
-      if (!response.ok) {
-        throw new Error(result?.message || 'The certificate PDF could not be downloaded.')
-      }
-
-      const blob = await response.blob()
-      const objectUrl = URL.createObjectURL(blob)
-      const title = certificate.courseName || courseTitle || certificate.name || 'Course'
-      const slug = title
-        .replace(/[^a-zA-Z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '')
-      const filename = slug ? `aiHustle-${slug}-Certificate.pdf` : `aiHustle-certificate-${certificate.certificateId || certKey}.pdf`
-
-      const link = document.createElement('a')
-      link.href = objectUrl
-      link.download = filename
-      document.body.append(link)
-      link.click()
-      link.remove()
-      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'The certificate PDF could not be downloaded.')
-    } finally {
-      setActionCertificateId('')
-      setActionType('')
-    }
-  }
 
   const completed = enrollments.filter((entry) => entry.status === 'completed')
 
   return (
     <StudentRoutePage eyebrow="YOUR ACHIEVEMENTS" title="My Achievements">
       {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
-      {loading ? (
-        <p role="status">Loading your achievements…</p>
-      ) : (
-        completed.length ? (
-          <div className="student-achievements-list">
-            {completed.map((entry) => {
-              const courseId = String(entry.courseId?._id || entry.courseId || '')
-              const courseTitle = entry.courseId?.title || 'Completed course'
-              const certificate = certificatesByCourse.get(courseId) || entry.certificate || null
-              const certKey = certificate?.id || certificate?._id || certificate?.certificateId
-              const isPreviewing = Boolean(certKey && actionCertificateId === certKey && actionType === 'preview')
-              const isDownloading = Boolean(certKey && actionCertificateId === certKey && actionType === 'download')
-              const isBusy = Boolean(certKey && actionCertificateId === certKey)
-              const formattedDate = entry.completedAt || entry.updatedAt
-                ? new Date(entry.completedAt || entry.updatedAt).toLocaleDateString()
-                : 'Date unavailable'
-
-              return (
-                <article className="student-achievement-item" key={entry._id}>
-                  <span className="student-stat__icon is-mint">
-                    <Icon name="award" size={19} />
-                  </span>
-                  <div className="student-achievement-info">
-                    <strong>{courseTitle}</strong>
-                    <small>Course completion milestone</small>
-                  </div>
-                  <div className="student-achievement-actions">
-                    {certificate ? (
-                      <>
-                        <button
-                          type="button"
-                          className="student-achievement-btn student-achievement-btn--preview student-achievement-btn--primary"
-                          disabled={isBusy}
-                          onClick={() => handlePreviewCertificate(certificate, courseTitle)}
-                          title="Preview Certificate"
-                        >
-                          <Icon name="eye" size={13} />
-                          <span>{isPreviewing ? 'Opening…' : 'Preview Certificate'}</span>
-                        </button>
-                        <button
-                          type="button"
-                          className="student-achievement-btn student-achievement-btn--download student-achievement-btn--secondary"
-                          disabled={isBusy}
-                          onClick={() => handleDownloadCertificate(certificate, courseTitle)}
-                          title="Download Certificate"
-                        >
-                          <Icon name="download" size={13} />
-                          <span>{isDownloading ? 'Downloading…' : 'Download Certificate'}</span>
-                        </button>
-                      </>
-                    ) : (
-                      <span className="student-achievement-unavailable">Certificate unavailable</span>
-                    )}
-                  </div>
-                  <span className="student-achievement-date">{formattedDate}</span>
-                </article>
-              )
-            })}
-          </div>
-        ) : (
-          <EmptyState
-            icon="award"
-            title="No achievements yet"
-            description="Completed course milestones and earned certificates will appear here as you finish your courses."
-          />
-        )
-      )}
-
-      {/* Preview Certificate Modal */}
-      {preview && previewUrlRef.current && (
-        <div
-          className="student-certificate-preview"
-          role="dialog"
-          aria-modal="true"
-          aria-label={`Certificate preview for ${preview.courseName}`}
-          onClick={(e) => { if (e.target === e.currentTarget) closePreview() }}
-        >
-          <div className="student-certificate-preview__panel">
-            <header>
-              <div className="student-certificate-preview__title-group">
-                <strong>{preview.courseName}</strong>
-                {preview.certificateId && <small>Certificate ID: {preview.certificateId}</small>}
-              </div>
-              <div className="student-certificate-preview__header-actions">
-                <button
-                  type="button"
-                  className="student-certificate-preview__download-btn"
-                  disabled={actionCertificateId === (preview.id || preview.certificateId) && actionType === 'download'}
-                  onClick={() => handleDownloadCertificate(preview, preview.courseName)}
-                  title="Download Certificate PDF"
-                >
-                  <Icon name="download" size={14} />
-                  <span>
-                    {actionCertificateId === (preview.id || preview.certificateId) && actionType === 'download'
-                      ? 'Downloading…'
-                      : 'Download Certificate'}
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  className="student-certificate-preview__close-btn"
-                  onClick={closePreview}
-                  aria-label="Close certificate preview"
-                >
-                  ×
-                </button>
-              </div>
-            </header>
-            <iframe
-              title={`Certificate for ${preview.courseName}`}
-              src={`${previewUrlRef.current}#view=Fit`}
-            />
-          </div>
-        </div>
+      {loading ? <p role="status">Loading your achievements…</p> : !error && (
+        completed.length
+          ? <div className="student-achievements-list">{completed.map((entry) => (
+            <article className="student-achievement-item" key={entry._id}>
+              <span className="student-stat__icon is-mint"><Icon name="award" size={19} /></span>
+              <div><strong>{entry.courseId?.title || 'Completed course'}</strong><small>Course completion milestone</small></div>
+              <span>{entry.updatedAt ? new Date(entry.updatedAt).toLocaleDateString() : 'Date unavailable'}</span>
+            </article>
+          ))}</div>
+          : <EmptyState icon="award" title="No achievements yet" description="Completed-course milestones will appear here when recorded in your enrollment history. Certificates and badges are not yet tracked by the platform." />
       )}
     </StudentRoutePage>
   )
 }
 
+function StudentLearningActivity({ onLogout, user }) {
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [learningStreak, setLearningStreak] = useState(0)
 
+  useEffect(() => {
+    const controller = new AbortController()
+    fetchStudentLearningSummary(onLogout, controller.signal)
+      .then((summary) => setLearningStreak(summary.learningStreak))
+      .catch((loadError) => {
+        if (loadError.name !== 'AbortError') setError(loadError instanceof Error ? loadError.message : 'Learning activity could not be loaded.')
+      })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false) })
+    return () => controller.abort()
+  }, [onLogout])
+
+  return (
+    <StudentRoutePage eyebrow="YOUR LEARNING ACTIVITY" title="Learning Streak">
+      {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
+      {loading ? <p role="status">Loading your learning activity…</p> : !error && (
+        <StudentLearningActivityPanel
+          onLogout={onLogout}
+          studentId={user?.id}
+          learningStreak={learningStreak}
+          streakLoading={false}
+          showHeading={false}
+        />
+      )}
+    </StudentRoutePage>
+  )
+}
+
+function StudentLearningActivityPanel({
+  onLogout,
+  studentId,
+  learningStreak,
+  streakLoading,
+  showHeading = true,
+}) {
+  const [calendar] = useState(() => getLearningActivityDateRanges())
+  const [days, setDays] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [selectedWeek, setSelectedWeek] = useState('current')
+  const goalOptions = [30, 60, 90, 120]
+  const goalStorageKey = `lms.learning-goal:${studentId || 'student'}`
+  const [goalMinutes, setGoalMinutes] = useState(() => {
+    const savedGoal = Number(localStorage.getItem(goalStorageKey))
+    return goalOptions.includes(savedGoal) ? savedGoal : 60
+  })
+
+  useEffect(() => {
+    const controller = new AbortController()
+    fetchStudentLearningActivity(onLogout, calendar.start, calendar.end, controller.signal)
+      .then((loadedDays) => {
+        if (!controller.signal.aborted) {
+          setDays(loadedDays)
+          setError('')
+        }
+      })
+      .catch((loadError) => {
+        if (!controller.signal.aborted) {
+          setError(loadError instanceof Error ? loadError.message : 'Learning activity could not be loaded.')
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false)
+      })
+    return () => controller.abort()
+  }, [calendar, onLogout])
+
+  useEffect(() => {
+    localStorage.setItem(goalStorageKey, String(goalMinutes))
+  }, [goalMinutes, goalStorageKey])
+
+  const activityByDate = new Map(days.map((day) => [day.date, day]))
+  const weekDates = selectedWeek === 'current' ? calendar.currentWeek : calendar.previousWeek
+  const weekData = weekDates.map((date) => activityByDate.get(date))
+  const activityLoaded = !loading && !error
+  const todayActivity = activityByDate.get(calendar.today)
+  const totalWeekSeconds = activityLoaded
+    ? weekData.reduce((total, day) => total + (day?.seconds || 0), 0)
+    : null
+  const averageDaySeconds = totalWeekSeconds === null ? null : totalWeekSeconds / 7
+  const mostActiveDay = activityLoaded
+    ? weekData.reduce((mostActive, day) => (
+      day && (!mostActive || day.seconds > mostActive.seconds) ? day : mostActive
+    ), null)
+    : null
+  const maxDaySeconds = Math.max(3600, ...weekData.map((day) => day?.seconds || 0))
+  const todaySeconds = activityLoaded ? todayActivity?.seconds || 0 : null
+  const goalProgress = todaySeconds === null
+    ? 0
+    : Math.min(100, Math.round((todaySeconds / (goalMinutes * 60)) * 100))
+  const remainingGoalMinutes = todaySeconds === null
+    ? null
+    : Math.ceil(Math.max(0, goalMinutes * 60 - todaySeconds) / 60)
+
+  return (
+    <section
+      className="student-learning-activity"
+      aria-labelledby={showHeading ? 'student-learning-activity-title' : undefined}
+      aria-label={showHeading ? undefined : 'Your learning activity'}
+      aria-busy={loading}
+    >
+      {showHeading && (
+        <header className="student-learning-activity__heading">
+          <span className="student-eyebrow">YOUR LEARNING ACTIVITY</span>
+          <h2 id="student-learning-activity-title">Your Learning Activity</h2>
+          <p>Track your daily learning habits and weekly progress.</p>
+        </header>
+      )}
+      {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
+      <div className="student-learning-activity__grid">
+        <article className="student-learning-activity__card student-learning-activity__daily">
+          <div className="student-learning-activity__card-heading">
+            <div>
+              <span className="student-eyebrow">TODAY’S HABIT</span>
+              <h3>Daily Learning Summary</h3>
+            </div>
+            <label className="student-learning-activity__goal-select">
+              <span>Goal:</span>
+              <select value={goalMinutes} onChange={(event) => setGoalMinutes(Number(event.target.value))}>
+                {goalOptions.map((minutes) => (
+                  <option value={minutes} key={minutes}>{minutes} mins</option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="student-learning-activity__daily-main">
+            <div className="student-learning-activity__time">
+              <strong>{todaySeconds === null ? '—' : formatLearningActivityDuration(todaySeconds)}</strong>
+              <span>Total learning time today</span>
+            </div>
+            <div
+              className="student-learning-activity__goal-ring"
+              role="img"
+              aria-label={todaySeconds === null
+                ? 'Daily learning goal progress unavailable'
+                : `${goalProgress}% of daily learning goal`}
+              style={{ background: `conic-gradient(#4e8d78 ${goalProgress}%, #e7e5dc ${goalProgress}% 100%)` }}
+            >
+              <span><strong>{todaySeconds === null ? '—' : `${goalProgress}%`}</strong><small>GOAL</small></span>
+            </div>
+          </div>
+          <div className="student-learning-activity__goal-copy">
+            <span>{todaySeconds === null ? 'Daily goal progress unavailable' : `${Math.floor(todaySeconds / 60)} of ${goalMinutes} min daily goal`}</span>
+            <strong>{remainingGoalMinutes === null ? '—' : `${remainingGoalMinutes} min to go`}</strong>
+          </div>
+          <div
+            className="student-learning-activity__goal-track"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={goalMinutes}
+            aria-valuenow={todaySeconds === null ? 0 : Math.min(goalMinutes, Math.floor(todaySeconds / 60))}
+            aria-label="Daily learning goal"
+          >
+            <span style={{ width: `${goalProgress}%` }} />
+          </div>
+          <div className="student-learning-activity__daily-counts">
+            <div>
+              <span className="student-learning-activity__count-icon"><Icon name="check" size={17} /></span>
+              <strong>{todaySeconds === null ? '—' : todayActivity?.lessonsCompleted || 0}</strong>
+              <small>Lessons completed today</small>
+            </div>
+            <div>
+              <span className="student-learning-activity__count-icon is-video"><Icon name="play" size={17} /></span>
+              <strong>{todaySeconds === null ? '—' : todayActivity?.videosWatched || 0}</strong>
+              <small>Videos watched today</small>
+            </div>
+          </div>
+        </article>
+
+        <article className="student-learning-activity__card student-learning-activity__weekly">
+          <div className="student-learning-activity__card-heading">
+            <div>
+              <span className="student-eyebrow">7-DAY ACTIVITY</span>
+              <h3>Weekly Learning Activity</h3>
+            </div>
+            <div className="student-learning-activity__week-switch" role="group" aria-label="Choose activity week">
+              <button
+                className={selectedWeek === 'current' ? 'is-selected' : ''}
+                type="button"
+                aria-pressed={selectedWeek === 'current'}
+                onClick={() => setSelectedWeek('current')}
+              >
+                This Week
+              </button>
+              <button
+                className={selectedWeek === 'previous' ? 'is-selected' : ''}
+                type="button"
+                aria-pressed={selectedWeek === 'previous'}
+                onClick={() => setSelectedWeek('previous')}
+              >
+                Previous Week
+              </button>
+            </div>
+          </div>
+          <div className="student-learning-activity__chart" role="group" aria-label={`${selectedWeek === 'current' ? 'This week' : 'Previous week'} daily learning time`}>
+            {weekDates.map((date, index) => {
+              const day = weekData[index]
+              const seconds = day?.seconds || 0
+              const fillHeight = seconds ? Math.max(4, Math.min(100, (seconds / maxDaySeconds) * 100)) : 0
+              const weekday = new Date(`${date}T12:00:00`).toLocaleDateString('en-US', { weekday: 'short' })
+              return (
+                <div className="student-learning-activity__day" key={date} role="img" aria-label={`${weekday}: ${activityLoaded ? formatLearningActivityDuration(seconds) : 'unavailable'}`}>
+                  <div className="student-learning-activity__bar"><span style={{ height: `${fillHeight}%` }} /></div>
+                  <small>{weekday}</small>
+                </div>
+              )
+            })}
+          </div>
+          <div className="student-learning-activity__week-stats">
+            <div><small>{selectedWeek === 'current' ? 'Total this week' : 'Total last week'}</small><strong>{totalWeekSeconds === null ? '—' : formatLearningActivityMinutes(totalWeekSeconds)}</strong></div>
+            <div><small>Daily average</small><strong>{averageDaySeconds === null ? '—' : `${formatLearningActivityMinutes(averageDaySeconds)} / day`}</strong></div>
+            <div><small>Most active day</small><strong>{mostActiveDay?.seconds ? new Date(`${mostActiveDay.date}T12:00:00`).toLocaleDateString('en-US', { weekday: 'short' }) : '—'}</strong></div>
+          </div>
+        </article>
+      </div>
+      <div className="student-learning-activity__streak">
+        <span><Icon name="spark" size={17} /> {streakLoading ? '—' : learningStreak} {learningStreak === 1 ? 'Day' : 'Days'} Streak</span>
+      </div>
+    </section>
+  )
+}
+
+function formatLearningActivityDuration(seconds) {
+  const totalSeconds = Math.max(0, Math.floor(seconds))
+  if (totalSeconds < 60) return `${totalSeconds}s`
+  const minutes = Math.floor(totalSeconds / 60)
+  const remainder = totalSeconds % 60
+  return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`
+}
+
+function formatLearningActivityMinutes(seconds) {
+  return `${Math.floor(Math.max(0, seconds) / 60)}m`
+}
 
 function StudentSearch({ onLogout, navigateTo }) {
   const [query, setQuery] = useState('')
@@ -6721,10 +7654,10 @@ function StudentSearch({ onLogout, navigateTo }) {
           onLogout()
           throw new Error('Your session has ended. Please sign in again.')
         }
-        const response = await fetch(`${API_BASE_URL}/enrollments/me`, {
+        const response = await fetchWithAuth(`${API_BASE_URL}/enrollments/me`, {
           headers: { Authorization: `Bearer ${auth.token}` },
           signal: controller.signal,
-        })
+        }, API_BASE_URL, auth.token)
         const result = await response.json()
         if (isInvalidSessionResponse(response, result)) {
           onLogout()
@@ -6845,8 +7778,6 @@ function StudentSearch({ onLogout, navigateTo }) {
   )
 }
 
-
-
 function StudentPurchases() {
   return (
     <StudentRoutePage eyebrow="YOUR ACCOUNT ACTIVITY" title="My Purchases">
@@ -6863,607 +7794,20 @@ function StudentUpdates() {
   )
 }
 
-function StudentProfile({ user, onLogout }) {
-  const [enrollments, setEnrollments] = useState([])
-  const [isLoading, setIsLoading] = useState(true)
-  const [error, setError] = useState('')
-
-  useEffect(() => {
-    const controller = new AbortController()
-
-    async function loadEnrollments() {
-      try {
-        const savedAuth = sessionStorage.getItem('lms.auth')
-        const auth = savedAuth ? JSON.parse(savedAuth) : null
-        if (typeof auth?.token !== 'string') {
-          onLogout()
-          return
-        }
-        const response = await fetch(`${API_BASE_URL}/enrollments/me`, {
-          headers: { Authorization: `Bearer ${auth.token}` },
-          signal: controller.signal,
-        })
-        const result = await response.json()
-        if (isInvalidSessionResponse(response, result)) {
-          onLogout()
-          return
-        }
-        if (!response.ok) throw new Error(result.message || 'Learning overview could not be loaded.')
-        if (!Array.isArray(result.enrollments)) {
-          throw new Error('The server returned invalid enrollment data.')
-        }
-        setEnrollments(result.enrollments)
-      } catch (loadError) {
-        if (loadError.name !== 'AbortError') {
-          setError(loadError instanceof Error ? loadError.message : 'Learning overview could not be loaded.')
-        }
-      } finally {
-        if (!controller.signal.aborted) setIsLoading(false)
-      }
-    }
-
-    loadEnrollments()
-    return () => controller.abort()
-  }, [onLogout])
-
-  const accountType = user?.studentType === 'college'
-    ? 'College Student'
-    : user?.studentType === 'independent'
-      ? 'Independent Student'
-      : 'Not available'
-  const completedCount = enrollments.filter((entry) => entry.status === 'completed').length
-  const inProgressCount = enrollments.filter((entry) => entry.status === 'active').length
-  const emailVerification = typeof user?.emailVerified === 'boolean'
-    ? user.emailVerified ? 'Verified' : 'Not verified'
-    : 'Not recorded by the platform'
-
-  return (
-    <div className="student-profile-layout">
-      <div className="student-profile-overview">
-      <StudentRoutePage title="Account Information" showHeading>
-        <div className="student-profile-actions">
-          <Link className="student-profile-settings-link" to="/student/settings">Manage account settings <Icon name="arrow" size={15} /></Link>
-          <Link className="student-profile-settings-link" to="/student/help">Help Center <Icon name="arrow" size={15} /></Link>
-        </div>
-        <dl className="student-profile-details">
-          <div><dt>Full name</dt><dd>{user?.fullName || 'Not available'}</dd></div>
-          <div><dt>Username</dt><dd>{user?.username || 'Not available'}</dd></div>
-          <div><dt>Email</dt><dd>{user?.email || 'Not available'}</dd></div>
-          <div><dt>Email verification</dt><dd>{emailVerification}</dd></div>
-          <div><dt>Account type</dt><dd>{accountType}</dd></div>
-        </dl>
-      </StudentRoutePage>
-
-      <StudentRoutePage title="Learning Overview" showHeading>
-        {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
-        {isLoading ? (
-          <p role="status">Loading your learning overview…</p>
-        ) : !error ? (
-          <>
-            <section className="student-stats" aria-label="Learning overview statistics">
-              {[
-                ['Enrolled Courses', enrollments.length, 'book', 'peach', 'Open your enrolled courses', '/student/courses?filter=enrolled'],
-                ['Completed Courses', completedCount, 'award', 'mint', 'View completed courses', '/student/courses?filter=completed'],
-                ['In Progress', inProgressCount, 'chart', 'gold', 'View courses in progress', '/student/courses?filter=active'],
-                ['Learning Streak', 0, 'spark', 'blue', 'View learning activity details', '/student/learning-activity'],
-              ].map(([label, count, icon, tone, note, to]) => (
-                <Link className={`student-stat is-${tone} student-profile-stat-link`} key={label} to={to}>
-                  <span className={`student-stat__icon is-${tone}`}><Icon name={icon} size={19} /></span>
-                  <span className="student-stat__label">{label}</span>
-                  <strong className="student-stat__value">{count}{label === 'Learning Streak' ? ' days' : ''}</strong>
-                  <small>{note}</small>
-                </Link>
-              ))}
-            </section>
-          </>
-        ) : null}
-      </StudentRoutePage>
-      </div>
-
-      <div className="student-profile-sections">
-        <StudentRoutePage title="My Purchases" to="/student/purchases" showHeading>
-          <EmptyState icon="book" title="Purchase history unavailable" description="The LMS does not currently provide purchase records, payment status, or invoices." />
-        </StudentRoutePage>
-        <StudentRoutePage title="Updates" to="/student/updates" showHeading>
-          <EmptyState icon="bell" title="Open your updates" description="View platform announcements and course updates when they are available." />
-        </StudentRoutePage>
-        <StudentRoutePage title="My Achievements" to="/student/achievements" showHeading>
-          <EmptyState icon="award" title="View your achievements" description="Completed-course milestones and earned achievements appear here." />
-        </StudentRoutePage>
-      </div>
-    </div>
-  )
-}
-
-function LearningActivitySection({
-  overview,
-  todaySummary,
-  weeklyData,
-  weekOffset,
-  onWeekChange,
-  onGoalChange,
-  loading,
-  error,
-}) {
-  const [selectedGoal, setSelectedGoal] = useState(60)
-  const [savingGoal, setSavingGoal] = useState(false)
-  const [goalFeedback, setGoalFeedback] = useState('')
-
-  useEffect(() => {
-    if (todaySummary?.dailyLearningGoalMinutes) {
-      setSelectedGoal(todaySummary.dailyLearningGoalMinutes)
-    } else if (overview?.dailyLearningGoalMinutes) {
-      setSelectedGoal(overview.dailyLearningGoalMinutes)
-    }
-  }, [todaySummary?.dailyLearningGoalMinutes, overview?.dailyLearningGoalMinutes])
-
-  const handleGoalSelect = async (newGoal) => {
-    setSelectedGoal(newGoal)
-    setSavingGoal(true)
-    setGoalFeedback('')
-    try {
-      if (onGoalChange) {
-        await onGoalChange(newGoal)
-        setGoalFeedback(`Goal updated to ${newGoal} min/day`)
-        setTimeout(() => setGoalFeedback(''), 3000)
-      }
-    } catch (err) {
-      setGoalFeedback(err instanceof Error ? err.message : 'Failed to update goal')
-    } finally {
-      setSavingGoal(false)
-    }
-  }
-
-  if (loading && !overview && !todaySummary) {
-    return (
-      <section className="student-learning-section" aria-busy="true">
-        <div className="student-section-heading">
-          <div>
-            <span className="student-eyebrow"><span /> YOUR LEARNING ACTIVITY</span>
-            <h2>Your Learning Activity</h2>
-            <p className="student-section-subtitle">Loading your real-time learning metrics…</p>
-          </div>
-        </div>
-        <div className="student-learning-skeleton">
-          <div className="student-skeleton-card" />
-          <div className="student-skeleton-card" />
-        </div>
-      </section>
-    )
-  }
-
-  const safeToday = todaySummary || {
-    totalDurationSeconds: 0,
-    totalMinutes: 0,
-    lessonsCompleted: 0,
-    videosWatched: 0,
-    dailyLearningGoalMinutes: selectedGoal,
-    goalProgressPercentage: 0,
-    today: '',
-  }
-
-  const safeWeekly = weeklyData || {
-    days: [],
-    totalWeeklyMinutes: 0,
-    averageDailyMinutes: 0,
-    mostActiveDay: null,
-    mostActiveDayMinutes: 0,
-  }
-
-  const safeOverview = overview || {
-    totalHours: 0,
-    totalMinutes: 0,
-    totalCompletedLessons: 0,
-    totalEnrolledCourses: 0,
-    totalCompletedCourses: 0,
-    pendingLessonsCount: 0,
-    overallProgressPercentage: 0,
-    currentStreak: 0,
-    longestStreak: 0,
-    courses: [],
-  }
-
-  const maxWeeklyMinutes = Math.max(
-    selectedGoal,
-    ...(safeWeekly.days?.map((d) => d.durationMinutes || 0) || [0]),
-    30,
-  )
-
-  return (
-    <section className="student-learning-section" aria-labelledby="learning-activity-heading">
-      <div className="student-section-heading">
-        <div>
-          <span className="student-eyebrow"><span /> YOUR LEARNING ACTIVITY</span>
-          <h2 id="learning-activity-heading">Your Learning Activity</h2>
-          <p className="student-section-subtitle">Track your daily learning habits and weekly progress.</p>
-        </div>
-      </div>
-
-      {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
-      {goalFeedback && <p className="student-courses__message" role="status">{goalFeedback}</p>}
-
-      {/* Top 2-Column Grid: Daily Summary + Weekly Activity Chart */}
-      <div className="student-learning-grid">
-        {/* Card 1: Daily Learning Summary */}
-        <article className="student-panel student-learning-card student-daily-summary-card">
-          <div className="student-learning-card__header">
-            <div>
-              <span className="student-learning-card__tag">TODAY’S HABIT</span>
-              <h3>Daily Learning Summary</h3>
-            </div>
-            <div className="student-goal-selector">
-              <label htmlFor="daily-learning-goal-select">Goal:</label>
-              <select
-                id="daily-learning-goal-select"
-                value={selectedGoal}
-                onChange={(e) => handleGoalSelect(Number(e.target.value))}
-                disabled={savingGoal}
-              >
-                <option value={15}>15 mins</option>
-                <option value={30}>30 mins</option>
-                <option value={45}>45 mins</option>
-                <option value={60}>60 mins</option>
-                <option value={90}>90 mins</option>
-                <option value={120}>120 mins</option>
-              </select>
-            </div>
-          </div>
-
-          <div className="student-daily-stats-row">
-            <div className="student-daily-stat-primary">
-              <strong className="student-daily-stat__number">
-                {formatDuration(safeToday.totalDurationSeconds)}
-              </strong>
-              <span className="student-daily-stat__label">Total learning time today</span>
-            </div>
-
-            {/* Circular Goal Gauge */}
-            <div className="student-daily-goal-gauge">
-              <svg className="student-gauge-svg" viewBox="0 0 100 100">
-                <circle className="student-gauge-bg" cx="50" cy="50" r="40" />
-                <circle
-                  className="student-gauge-fill"
-                  cx="50"
-                  cy="50"
-                  r="40"
-                  strokeDasharray={251.2}
-                  strokeDashoffset={251.2 - (251.2 * Math.min(100, safeToday.goalProgressPercentage)) / 100}
-                />
-              </svg>
-              <div className="student-gauge-center">
-                <strong>{safeToday.goalProgressPercentage}%</strong>
-                <span>GOAL</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Goal Progress Bar */}
-          <div className="student-goal-progress-bar-wrap">
-            <div className="student-goal-progress-info">
-              <span>{safeToday.totalMinutes} of {selectedGoal} min daily goal</span>
-              <span className="student-goal-badge">
-                {safeToday.goalProgressPercentage >= 100
-                  ? '🎉 Daily Goal Achieved!'
-                  : `${Math.max(0, selectedGoal - safeToday.totalMinutes)} min to go`}
-              </span>
-            </div>
-            <div className="student-progress-bar-track">
-              <div
-                className="student-progress-bar-fill"
-                style={{ width: `${Math.min(100, safeToday.goalProgressPercentage)}%` }}
-              />
-            </div>
-          </div>
-
-          {/* Today sub-metrics */}
-          <div className="student-daily-mini-grid">
-            <div className="student-daily-mini-item">
-              <div className="student-daily-mini-icon is-mint">
-                <Icon name="check" size={16} />
-              </div>
-              <div>
-                <strong>{safeToday.lessonsCompleted}</strong>
-                <span>Lessons completed today</span>
-              </div>
-            </div>
-            <div className="student-daily-mini-item">
-              <div className="student-daily-mini-icon is-blue">
-                <Icon name="play" size={14} />
-              </div>
-              <div>
-                <strong>{safeToday.videosWatched}</strong>
-                <span>Videos watched today</span>
-              </div>
-            </div>
-          </div>
-        </article>
-
-        {/* Card 2: Weekly Learning Activity Chart */}
-        <article className="student-panel student-learning-card student-weekly-chart-card">
-          <div className="student-learning-card__header">
-            <div>
-              <span className="student-learning-card__tag">7-DAY ACTIVITY</span>
-              <h3>Weekly Learning Activity</h3>
-            </div>
-            <div className="student-week-toggle" role="tablist" aria-label="Select week">
-              <button
-                type="button"
-                className={`student-week-btn ${weekOffset === 0 ? 'is-active' : ''}`}
-                onClick={() => onWeekChange(0)}
-              >
-                This Week
-              </button>
-              <button
-                type="button"
-                className={`student-week-btn ${weekOffset === -1 ? 'is-active' : ''}`}
-                onClick={() => onWeekChange(-1)}
-              >
-                Previous Week
-              </button>
-            </div>
-          </div>
-
-          {/* 7-day Bar Chart */}
-          <div className="student-bar-chart-container">
-            <div className="student-bar-chart">
-              {safeWeekly.days?.map((day) => {
-                const isToday = day.date === safeToday.today
-                const heightPercent = maxWeeklyMinutes > 0
-                  ? Math.max(day.durationMinutes > 0 ? 10 : 3, Math.round((day.durationMinutes / maxWeeklyMinutes) * 100))
-                  : 3
-                return (
-                  <div
-                    key={day.date}
-                    className={`student-chart-col ${isToday ? 'is-today' : ''}`}
-                    tabIndex={0}
-                    aria-label={`${day.label}: ${formatDuration(day.durationSeconds)}, ${day.lessonsCompleted} lessons`}
-                  >
-                    <div className="student-chart-tooltip" role="tooltip">
-                      <strong>{day.label} {isToday ? '(Today)' : ''}</strong>
-                      <span>{formatDuration(day.durationSeconds)}</span>
-                      <span>{day.lessonsCompleted} lesson{day.lessonsCompleted === 1 ? '' : 's'} completed</span>
-                    </div>
-                    <div className="student-chart-bar-wrap">
-                      <div
-                        className="student-chart-bar-fill"
-                        style={{ height: `${heightPercent}%` }}
-                      />
-                    </div>
-                    <span className="student-chart-col__label">{day.dayName}</span>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-
-          {/* Weekly Summary Metrics Pills */}
-          <div className="student-weekly-pills">
-            <div className="student-weekly-pill">
-              <span>Total this week</span>
-              <strong>{formatMinutes(safeWeekly.totalWeeklyMinutes)}</strong>
-            </div>
-            <div className="student-weekly-pill">
-              <span>Daily average</span>
-              <strong>{formatMinutes(safeWeekly.averageDailyMinutes)} / day</strong>
-            </div>
-            <div className="student-weekly-pill">
-              <span>Most active day</span>
-              <strong>
-                {safeWeekly.mostActiveDay
-                  ? `${safeWeekly.mostActiveDay} (${formatMinutes(safeWeekly.mostActiveDayMinutes)})`
-                  : '—'}
-              </strong>
-            </div>
-          </div>
-        </article>
-      </div>
-
-      {/* Card 3: Overall Learning Progress */}
-      <article className="student-panel student-learning-card student-overall-progress-card">
-        <div className="student-learning-card__header">
-          <div>
-            <span className="student-learning-card__tag">ALL-TIME METRICS</span>
-            <h3>Overall Learning Progress</h3>
-          </div>
-          <div className="student-streak-badge">
-            <span className="student-streak-fire"><Icon name="flame" size={20} /></span>
-            <div>
-              <strong>{safeOverview.currentStreak} Day{safeOverview.currentStreak === 1 ? '' : 's'} Streak</strong>
-              <small>Personal best: {safeOverview.longestStreak} days</small>
-            </div>
-          </div>
-        </div>
-
-        {/* 4 Stat Tiles */}
-        <div className="student-overall-tiles">
-          <div className="student-overall-tile">
-            <span className="student-overall-tile__icon is-gold"><Icon name="clock" size={18} /></span>
-            <span className="student-overall-tile__label">Learning Hours</span>
-            <strong>{safeOverview.totalHours} hrs</strong>
-            <small>{safeOverview.totalMinutes} total minutes</small>
-          </div>
-          <div className="student-overall-tile">
-            <span className="student-overall-tile__icon is-mint"><Icon name="check" size={18} /></span>
-            <span className="student-overall-tile__label">Completed Lessons</span>
-            <strong>{safeOverview.totalCompletedLessons}</strong>
-            <small>Across all enrolled courses</small>
-          </div>
-          <div className="student-overall-tile">
-            <span className="student-overall-tile__icon is-blue"><Icon name="book" size={18} /></span>
-            <span className="student-overall-tile__label">Enrolled Courses</span>
-            <strong>{safeOverview.totalEnrolledCourses}</strong>
-            <small>{safeOverview.totalCompletedCourses} courses completed</small>
-          </div>
-          <div className="student-overall-tile">
-            <span className="student-overall-tile__icon is-peach"><Icon name="chart" size={18} /></span>
-            <span className="student-overall-tile__label">Overall Completion</span>
-            <strong>{safeOverview.overallProgressPercentage}%</strong>
-            <small>Curriculum mastery</small>
-          </div>
-        </div>
-
-        {/* Course-wise Progress Section */}
-        <div className="student-course-progress-list">
-          <h4>Course-Wise Progress</h4>
-          {safeOverview.courses && safeOverview.courses.length > 0 ? (
-            <div className="student-course-progress-cards">
-              {safeOverview.courses.map((course) => (
-                <div className="student-course-progress-item" key={course.courseId}>
-                  <div className="student-course-progress-info">
-                    <div className="student-course-progress-title-row">
-                      <h5>{course.title}</h5>
-                      <span className={`student-course-status-pill is-${course.status}`}>
-                        {course.status === 'completed'
-                          ? 'Completed'
-                          : course.status === 'in_progress'
-                            ? 'In Progress'
-                            : 'Not Started'}
-                      </span>
-                    </div>
-                    <p className="student-course-progress-meta">
-                      {course.completedLessons} of {course.totalLessons} lessons completed ({course.progressPercentage}%)
-                    </p>
-                    <div className="student-progress-bar-track">
-                      <div
-                        className="student-progress-bar-fill"
-                        style={{ width: `${course.progressPercentage}%` }}
-                      />
-                    </div>
-                  </div>
-                  <div className="student-course-progress-action">
-                    <Link
-                      to={
-                        course.nextLessonId
-                          ? `/student/courses?course=${course.courseId}&lesson=${course.nextLessonId}`
-                          : `/student/courses?course=${course.courseId}`
-                      }
-                      className="student-button student-button--primary student-button--sm"
-                    >
-                      {course.status === 'completed' ? 'Review Course' : 'Continue Learning →'}
-                    </Link>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="student-empty-learning-journey">
-              <div className="student-empty-journey-icon">
-                <Icon name="rocket" size={32} />
-              </div>
-              <h5>Your learning journey starts here!</h5>
-              <p>Enroll in a course to track your daily progress, build learning streaks, and master new skills.</p>
-              <Link to="/student/courses" className="student-button student-button--primary">
-                Explore Courses
-              </Link>
-            </div>
-          )}
-        </div>
-      </article>
-    </section>
-  )
-}
-
-function StudentLearningActivity({ onLogout }) {
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
-  const [overview, setOverview] = useState(null)
-  const [todaySummary, setTodaySummary] = useState(null)
-  const [weeklyData, setWeeklyData] = useState(null)
-  const [weekOffset, setWeekOffset] = useState(0)
-
-  const loadData = useCallback(async (offset = weekOffset) => {
-    setLoading(true)
-    setError('')
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
-    try {
-      const [ovRes, tdRes, wkRes] = await Promise.all([
-        learningRequest(`/learning/overview?timezone=${encodeURIComponent(tz)}`, { onLogout }),
-        learningRequest(`/learning/summary/today?timezone=${encodeURIComponent(tz)}`, { onLogout }),
-        learningRequest(`/learning/activity/weekly?weekOffset=${offset}&timezone=${encodeURIComponent(tz)}`, { onLogout }),
-      ])
-      setOverview(ovRes)
-      setTodaySummary(tdRes)
-      setWeeklyData(wkRes)
-    } catch (loadError) {
-      if (loadError.message !== 'Your session has ended. Please sign in again.') {
-        setError(loadError instanceof Error ? loadError.message : 'Learning activity could not be loaded.')
-      }
-    } finally {
-      setLoading(false)
-    }
-  }, [onLogout, weekOffset])
-
-  useEffect(() => {
-    loadData(weekOffset)
-  }, [weekOffset, loadData])
-
-  const handleGoalChange = async (minutes) => {
-    const res = await learningRequest('/learning/goal', {
-      onLogout,
-      method: 'PUT',
-      body: { dailyLearningGoalMinutes: minutes },
-    })
-    if (res?.dailyLearningGoalMinutes) {
-      setTodaySummary((prev) => prev ? {
-        ...prev,
-        dailyLearningGoalMinutes: res.dailyLearningGoalMinutes,
-        goalProgressPercentage: Math.min(100, Math.round((prev.totalMinutes / res.dailyLearningGoalMinutes) * 100)),
-      } : prev)
-      setOverview((prev) => prev ? {
-        ...prev,
-        dailyLearningGoalMinutes: res.dailyLearningGoalMinutes,
-      } : prev)
-    }
-  }
-
-  return (
-    <StudentRoutePage eyebrow="YOUR LEARNING ACTIVITY" title="Learning Streak">
-      <LearningActivitySection
-        overview={overview}
-        todaySummary={todaySummary}
-        weeklyData={weeklyData}
-        weekOffset={weekOffset}
-        onWeekChange={setWeekOffset}
-        onGoalChange={handleGoalChange}
-        loading={loading}
-        error={error}
-      />
-    </StudentRoutePage>
-  )
-}
-
-
-
-
-
 function StudentDashboard({
   user,
-  loading = false,
-  error = '',
+  loading,
+  error,
   onRetry,
   onLogout,
-  isDark = false,
+  isDark,
   onToggleTheme,
-  themePreference = 'light',
+  themePreference,
   onSetTheme,
   onAccountUpdated,
 }) {
   const [sidebarOpen, setSidebarOpen] = useState(false)
-
-  const handleToggleTheme = () => {
-    if (typeof onToggleTheme === 'function') {
-      onToggleTheme()
-    } else if (typeof onSetTheme === 'function') {
-      onSetTheme(isDark ? 'light' : 'dark')
-    } else {
-      const nextTheme = isDark ? 'light' : 'dark'
-      document.documentElement.dataset.theme = nextTheme
-      try {
-        localStorage.setItem('lms.theme', nextTheme)
-      } catch (_) {}
-    }
-  }
-  const [selectedCategory, setSelectedCategory] = useState('')
+  const sidebarTimerRef = useRef(null)
   const [profileMenuOpen, setProfileMenuOpen] = useState(false)
   const profileMenuRef = useRef(null)
   const [publishedCourseCategories, setPublishedCourseCategories] = useState([])
@@ -7474,52 +7818,33 @@ function StudentDashboard({
   const [learningSummary, setLearningSummary] = useState(emptyLearningSummary)
   const [learningSummaryLoading, setLearningSummaryLoading] = useState(true)
   const [learningSummaryError, setLearningSummaryError] = useState('')
-  const [dashboardRefreshKey, setDashboardRefreshKey] = useState(0)
-
-  const [learningOverview, setLearningOverview] = useState(null)
-  const [todaySummary, setTodaySummary] = useState(null)
-  const [weeklyData, setWeeklyData] = useState(null)
-  const [weekOffset, setWeekOffset] = useState(0)
-  const [learningLoading, setLearningLoading] = useState(true)
-  const [learningError, setLearningError] = useState('')
-
+  const [learningSummaryRefresh, setLearningSummaryRefresh] = useState(0)
   const location = useLocation()
   const navigate = useNavigate()
-  const navigateTo = navigate
-  const isCourseLearning = /^\/student\/course\/[^/]+\/learn$/.test(location.pathname) || (location.pathname.startsWith('/student/course/') && location.pathname.endsWith('/learn'))
-  const isCourseLearningPage = isCourseLearning
-  const isResultsPage = location.pathname.startsWith('/student/results')
-  const isHelpPage = location.pathname.startsWith('/student/help')
   const visibleNavigation = user?.studentType === 'independent'
     ? navigation
     : navigation.filter((item) => item.path !== '/student/referrals')
   const currentPage = visibleNavigation.find((item) => item.path === location.pathname)
+  const isCourseLearningPage = /^\/student\/course\/[^/]+\/learn$/.test(location.pathname)
+  const isResultsPage = location.pathname === '/student/results'
+  const isHelpPage = location.pathname.startsWith('/student/help')
   const secondaryPage = secondaryPages[location.pathname]
-  const pageTitle = isCourseLearning
-    ? (courseLearningTitle || 'Course learning')
-    : currentPage?.label || (isHelpPage ? 'Help Center' : secondaryPage?.label || 'Dashboard')
-  const pageIcon = isCourseLearning
-    ? 'book'
-    : currentPage
-      ? {
-        Dashboard: 'layoutDashboard',
-        'My Courses': 'bookOpen',
-        Assignments: 'clipboardCheck',
-        'Grades & Results': 'chartNoAxesCombined',
-        'Learning Resources': 'folderOpen',
-        Messages: 'messageCircle',
-        Certificates: 'award',
-        'My Referrals': 'users',
-        'My Profile': 'userRound',
-        Settings: 'settings',
-        'Help Center': 'circleHelp',
-      }[currentPage.label] || 'grid'
-      : isHelpPage ? 'circleHelp' : secondaryPage?.icon || 'layoutDashboard'
+  const pageTitle = currentPage?.label || (isHelpPage ? 'Help Center' : secondaryPage?.label || 'Dashboard')
+  const pageIcon = currentPage
+    ? {
+      Dashboard: 'layoutDashboard',
+      'My Courses': 'bookOpen',
+      Assignments: 'clipboardCheck',
+      'Grades & Results': 'chartNoAxesCombined',
+      'Learning Resources': 'folderOpen',
+      Certificates: 'award',
+      'My Referrals': 'users',
+      'My Profile': 'userRound',
+      Settings: 'settings',
+      'Help Center': 'circleHelp',
+    }[currentPage.label]
+    : isHelpPage ? 'circleHelp' : secondaryPage?.icon || 'layoutDashboard'
   const firstName = user?.fullName?.trim().split(/\s+/)[0] || 'Student'
-  const initials = user?.fullName
-    ? user.fullName.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase()
-    : 'S'
-  const completionPercentage = learningSummary.completionPercentage || 0
   const exploreCategories = [
     ...categories,
     ...publishedCourseCategories
@@ -7528,6 +7853,10 @@ function StudentDashboard({
       )))
       .map((label) => ({ label, icon: 'book' })),
   ]
+  const initials = user?.fullName
+    ? user.fullName.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase()
+    : 'S'
+  const completionPercentage = learningSummary.completionPercentage
 
   useEffect(() => {
     if (!profileMenuOpen) return undefined
@@ -7548,457 +7877,434 @@ function StudentDashboard({
   }, [profileMenuOpen])
 
   useEffect(() => {
+    const refreshProgress = () => {
+      invalidateStudentLearningPageCaches()
+      setLearningSummaryRefresh((refresh) => refresh + 1)
+    }
+    window.addEventListener(STUDENT_LEARNING_PROGRESS_UPDATED_EVENT, refreshProgress)
+    return () => window.removeEventListener(STUDENT_LEARNING_PROGRESS_UPDATED_EVENT, refreshProgress)
+  }, [])
+
+  useEffect(() => {
     setProfileMenuOpen(false)
   }, [location.pathname])
 
-  const refreshLearningSummary = useCallback(() => {
-    if (typeof invalidateStudentLearningPageCaches === 'function') {
-      try { invalidateStudentLearningPageCaches() } catch (_) {}
-    }
+  useEffect(() => {
+    if (loading) return undefined
+    const controller = new AbortController()
     setLearningSummaryLoading(true)
-    fetchStudentLearningSummary(onLogout)
+    fetchStudentLearningSummary(onLogout, controller.signal)
       .then((summary) => {
-        setLearningSummary(summary)
-        setLearningSummaryError('')
+        if (!controller.signal.aborted) {
+          setLearningSummary(summary)
+          setLearningSummaryError('')
+        }
       })
       .catch((summaryError) => {
-        setLearningSummary(emptyLearningSummary)
-        setLearningSummaryError(summaryError instanceof Error ? summaryError.message : 'Learning statistics could not be loaded.')
+        if (!controller.signal.aborted) {
+          setLearningSummary(emptyLearningSummary)
+          setLearningSummaryError(summaryError instanceof Error
+            ? summaryError.message
+            : 'Learning statistics could not be loaded.')
+        }
       })
       .finally(() => {
-        setLearningSummaryLoading(false)
+        if (!controller.signal.aborted) setLearningSummaryLoading(false)
       })
-    setDashboardRefreshKey((current) => current + 1)
-  }, [onLogout])
-
-  const loadLearningMetrics = useCallback(async (offset = weekOffset) => {
-    setLearningLoading(true)
-    setLearningError('')
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
-    try {
-      const [ovRes, tdRes, wkRes] = await Promise.all([
-        learningRequest(`/learning/overview?timezone=${encodeURIComponent(tz)}`, { onLogout }),
-        learningRequest(`/learning/summary/today?timezone=${encodeURIComponent(tz)}`, { onLogout }),
-        learningRequest(`/learning/activity/weekly?weekOffset=${offset}&timezone=${encodeURIComponent(tz)}`, { onLogout }),
-      ])
-      setLearningOverview(ovRes)
-      setTodaySummary(tdRes)
-      setWeeklyData(wkRes)
-    } catch (err) {
-      if (err?.message !== 'Your session has ended. Please sign in again.') {
-        setLearningError(err instanceof Error ? err.message : 'Learning activity could not be loaded.')
-      }
-    } finally {
-      setLearningLoading(false)
-    }
-  }, [onLogout, weekOffset])
-
-  const handleGoalChange = useCallback(async (minutes) => {
-    try {
-      const res = await learningRequest('/learning/goal', {
-        onLogout,
-        method: 'PUT',
-        body: { dailyLearningGoalMinutes: minutes },
-      })
-      if (res?.dailyLearningGoalMinutes) {
-        setTodaySummary((prev) => (prev ? { ...prev, dailyLearningGoalMinutes: res.dailyLearningGoalMinutes } : prev))
-        setLearningOverview((prev) => (prev ? { ...prev, dailyLearningGoalMinutes: res.dailyLearningGoalMinutes } : prev))
-      }
-    } catch {
-      // preserve
-    }
-  }, [onLogout])
+    return () => controller.abort()
+  }, [loading, user?.id, onLogout, learningSummaryRefresh])
 
   useEffect(() => {
-    refreshLearningSummary()
-  }, [refreshLearningSummary])
-
-  useEffect(() => {
-    loadLearningMetrics(weekOffset)
-  }, [loadLearningMetrics, weekOffset, dashboardRefreshKey])
-
-  useEffect(() => {
-    setSidebarOpen(false)
     window.scrollTo(0, 0)
     document.querySelector('.student-main')?.scrollTo(0, 0)
   }, [location.pathname])
 
   useEffect(() => {
-    if (!isCourseLearning) {
+    if (!isCourseLearningPage) {
       setCourseLearningTitle('')
       setCourseContentSearch('')
       setCourseBookmarked(false)
     }
-  }, [isCourseLearning])
+  }, [isCourseLearningPage])
 
   useEffect(() => {
-    if (!sidebarOpen) return undefined
+    if (!sidebarOpen) {
+      if (sidebarTimerRef.current) {
+        clearTimeout(sidebarTimerRef.current)
+        sidebarTimerRef.current = null
+      }
+      return undefined
+    }
+
     function closeOnEscape(event) {
       if (event.key === 'Escape') setSidebarOpen(false)
     }
+
+    // Auto-collapse sidebar after 6 seconds of inactivity
+    sidebarTimerRef.current = setTimeout(() => {
+      setSidebarOpen(false)
+    }, 6000)
+
     window.addEventListener('keydown', closeOnEscape)
-    return () => window.removeEventListener('keydown', closeOnEscape)
+    return () => {
+      window.removeEventListener('keydown', closeOnEscape)
+      if (sidebarTimerRef.current) {
+        clearTimeout(sidebarTimerRef.current)
+        sidebarTimerRef.current = null
+      }
+    }
   }, [sidebarOpen])
 
+  function handleSidebarInteraction() {
+    if (!sidebarOpen) return
+    if (sidebarTimerRef.current) {
+      clearTimeout(sidebarTimerRef.current)
+    }
+    sidebarTimerRef.current = setTimeout(() => {
+      setSidebarOpen(false)
+    }, 6000)
+  }
+
+  function navigateTo(path) {
+    navigate(path)
+  }
+
+  function handleMyProfileClick(event) {
+    if (event) {
+      event.preventDefault()
+      event.stopPropagation()
+    }
+    setProfileMenuOpen(false)
+    navigate('/student/profile')
+  }
+
+  function handleLogoutClick(event) {
+    if (event) {
+      event.preventDefault()
+      event.stopPropagation()
+    }
+    setProfileMenuOpen(false)
+    onLogout()
+  }
+
+  function refreshLearningSummary() {
+    invalidateStudentLearningPageCaches()
+    setLearningSummaryRefresh((refresh) => refresh + 1)
+    window.dispatchEvent(new Event(STUDENT_LEARNING_PROGRESS_UPDATED_EVENT))
+  }
+
   return (
-    <div
-      className={`student-dashboard${isDark ? ' is-dark' : ''}${sidebarOpen ? ' is-sidebar-open' : ''}${isCourseLearning ? ' is-course-learning' : ''}${isResultsPage ? ' is-results-page' : ''}`}
-      data-theme={isDark ? 'dark' : 'light'}
-    >
+    <div className={`student-dashboard${sidebarOpen ? ' is-sidebar-open' : ''}${isCourseLearningPage ? ' is-course-learning' : ''}${isResultsPage ? ' is-results-page' : ''}`}>
       <aside
         id="student-navigation"
         className={`student-sidebar${sidebarOpen ? ' is-open' : ''}`}
-        aria-label="Student primary navigation"
+        aria-label="Student navigation"
+        aria-hidden={!sidebarOpen}
+        inert={!sidebarOpen}
+        onClick={handleSidebarInteraction}
+        onPointerDown={handleSidebarInteraction}
+        onKeyDown={handleSidebarInteraction}
       >
-        <div className="student-sidebar__brand">
-          <div className="student-brand-mark">
-            <span className="student-brand-dot" />
-            aiHustle
-          </div>
-          <span className="student-brand-tag">Student</span>
-        </div>
-
-        <nav className="student-sidebar__nav student-nav" aria-label="Student navigation links">
-          {visibleNavigation.map((item) => {
-            const active = item.path === location.pathname
-              || (item.path === '/student/courses' && location.pathname.startsWith('/student/course/'))
-              || (item.path === '/student/help' && location.pathname.startsWith('/student/help'))
-            return (
-              <Link
-                key={item.path}
-                className={`student-sidebar__link student-nav__item${active ? ' is-active' : ''}`}
-                to={item.path}
-                onClick={() => setSidebarOpen(false)}
-              >
-                <span className="student-nav__icon"><Icon name={item.icon} size={18} /></span>
-                <span>{item.label}</span>
-                {item.label === 'Messages' && <span className="student-sidebar__soon">Soon</span>}
-              </Link>
-            )
-          })}
+        <Link className="student-sidebar__brand" to="/student/dashboard" aria-label="aiHustle home">
+          <span className="student-sidebar__mark" aria-hidden="true">
+            <img src="/logo.png" alt="" />
+          </span>
+          <span className="student-sidebar__tagline">LEARN. BUILD. LEAD.</span>
+        </Link>
+        <p className="student-sidebar__label">LEARNING SPACE</p>
+        <nav className="student-sidebar__nav">
+          {visibleNavigation.map((item) => (
+            <Link
+              key={item.label}
+              to={item.path}
+              className={`student-sidebar__link${item.path === location.pathname ? ' is-active' : ''}`}
+              aria-current={item.path === location.pathname ? 'page' : undefined}
+              onClick={handleSidebarInteraction}
+            >
+              <Icon name={item.icon} size={18} />
+              <span>{item.label}</span>
+            </Link>
+          ))}
         </nav>
-
-        <div className="student-sidebar__bottom student-sidebar__footer">
-          <div className="student-sidebar__profile student-user-card">
-            <span className="student-avatar student-user-avatar">{initials}</span>
-            <div className="student-sidebar__identity student-user-meta">
-              <strong>{user?.fullName || 'Student'}</strong>
-              <small>{user?.studentType === 'college' ? (user?.collegeName || 'College Student') : 'Independent'}</small>
-            </div>
-          </div>
-          <button className="student-sidebar__logout" type="button" onClick={onLogout}>
-            <Icon name="logout" size={17} />
-            <span>Sign Out</span>
-          </button>
-        </div>
       </aside>
-
-      <div className={`student-backdrop${sidebarOpen ? ' is-open' : ''}`} onClick={() => setSidebarOpen(false)} />
 
       <main className="student-main" id="student-overview">
         <header className="student-topbar">
-          <div className="student-topbar__left">
-            {(!isCourseLearning || sidebarOpen) && (
-              <button
-                className="student-icon-button student-menu-toggle"
-                type="button"
-                aria-label={sidebarOpen ? 'Close navigation' : 'Open navigation'}
-                aria-expanded={sidebarOpen}
-                aria-controls="student-navigation"
-                onClick={() => setSidebarOpen((current) => !current)}
-              >
-                <Icon name="menu" size={20} />
-              </button>
-            )}
-            <div className={`student-breadcrumb student-page-heading${isCourseLearning ? ' student-course-learning-topbar__identity' : ''}`}>
-              {isCourseLearning ? (
-                <>
-                  <Link to="/student/courses">← Back to My Courses</Link>
-                  <span aria-hidden="true" />
-                  <strong>{courseLearningTitle || 'Course learning'}</strong>
-                </>
-              ) : isResultsPage ? null : (
-                <>
-                  <Icon name={pageIcon} size={19} />
-                  <strong>{pageTitle}</strong>
-                </>
-              )}
-            </div>
-          </div>
-          <div className="student-topbar__right">
+          <button
+            className="student-icon-button student-menu-toggle"
+            type="button"
+            aria-label={sidebarOpen ? 'Close navigation' : 'Open navigation'}
+            aria-expanded={sidebarOpen}
+            aria-controls="student-navigation"
+            onClick={() => setSidebarOpen((open) => !open)}
+          >
+            <Icon name="menu" />
+          </button>
+          <div className={`student-breadcrumb student-page-heading${isCourseLearningPage ? ' student-course-learning-topbar__identity' : ''}`}>
             {isCourseLearningPage ? (
-              <label className="student-search student-course-learning-topbar__search">
-                <Icon name="search" size={17} />
-                <input
-                  type="search"
-                  value={courseContentSearch}
-                  onChange={(event) => setCourseContentSearch(event.target.value)}
-                  placeholder="Search here..."
-                  aria-label="Search course content"
-                />
-              </label>
-            ) : <StudentSearch onLogout={onLogout} navigateTo={navigateTo} />}
-            {isCourseLearningPage && (
-              <button
-                className={`student-course-learning__bookmark student-course-learning-topbar__bookmark${courseBookmarked ? ' is-active' : ''}`}
-                type="button"
-                aria-label={courseBookmarked ? 'Remove course bookmark' : 'Bookmark course'}
-                aria-pressed={courseBookmarked}
-                onClick={() => setCourseBookmarked((saved) => !saved)}
-              >
-                <Icon name="book" size={17} />
-              </button>
+              <strong>{courseLearningTitle || 'Course learning'}</strong>
+            ) : (
+              <>
+                <Icon name={pageIcon} size={19} />
+                <strong>{pageTitle}</strong>
+              </>
             )}
-            <div className="student-topbar__actions">
-              <ThemeToggle isDark={isDark} onToggle={handleToggleTheme} onToggleTheme={handleToggleTheme} className="student-theme-toggle" />
-              <StudentNotificationBell onLogout={onLogout} />
-              <div className={`student-profile-menu${profileMenuOpen ? ' is-open' : ''}`} ref={profileMenuRef}>
-                <button
-                  className="student-profile-trigger"
-                  type="button"
-                  aria-haspopup="menu"
-                  aria-expanded={profileMenuOpen}
-                  aria-controls="student-profile-dropdown"
-                  onClick={() => setProfileMenuOpen((isOpen) => !isOpen)}
-                >
-                  <span className="student-avatar">{initials}</span>
-                  <span className="student-profile-trigger__copy">
-                    <strong>{user?.fullName || 'Student'}</strong>
-                    <small>{user?.studentType === 'college' ? (user?.collegeName || 'College Student') : 'Independent'}</small>
-                  </span>
-                </button>
-                {profileMenuOpen && (
-                  <div className="student-profile-dropdown" id="student-profile-dropdown" role="menu">
-                    <button
-                      className="student-profile-dropdown__logout"
-                      type="button"
-                      role="menuitem"
-                      onClick={onLogout}
-                    >
-                      <Icon name="logout" size={16} /> Logout
-                    </button>
-                  </div>
-                )}
-              </div>
+          </div>
+          <Link
+            className="student-brand"
+            to="/student/dashboard"
+            aria-label="aiHustle home"
+            onClick={() => {
+              if (location.pathname === '/student/dashboard') {
+                window.scrollTo(0, 0)
+                document.querySelector('.student-main')?.scrollTo(0, 0)
+              }
+            }}
+          >
+            <img src="/logo.png" alt="aiHustle" className="student-brand__image" />
+          </Link>
+          {isCourseLearningPage ? (
+            <label className="student-search student-course-learning-topbar__search">
+              <Icon name="search" size={17} />
+              <input
+                type="search"
+                value={courseContentSearch}
+                onChange={(event) => setCourseContentSearch(event.target.value)}
+                placeholder="Search here..."
+                aria-label="Search course content"
+              />
+            </label>
+          ) : <StudentSearch onLogout={onLogout} navigateTo={navigateTo} />}
+          {isCourseLearningPage && (
+            <button
+              className={`student-course-learning__bookmark student-course-learning-topbar__bookmark${courseBookmarked ? ' is-active' : ''}`}
+              type="button"
+              aria-label={courseBookmarked ? 'Remove course bookmark' : 'Bookmark course'}
+              aria-pressed={courseBookmarked}
+              onClick={() => setCourseBookmarked((saved) => !saved)}
+            >
+              <Icon name="book" size={17} />
+            </button>
+          )}
+          <div className="student-topbar__actions">
+            <ThemeToggle isDark={isDark} onToggle={onToggleTheme} className="student-theme-toggle" />
+            <StudentNotificationBell onLogout={onLogout} />
+            <div className={`student-profile-menu${profileMenuOpen ? ' is-open' : ''}`} ref={profileMenuRef}>
+              <button
+                className="student-profile-trigger"
+                type="button"
+                aria-haspopup="menu"
+                aria-expanded={profileMenuOpen}
+                aria-controls="student-profile-dropdown"
+                onClick={() => setProfileMenuOpen((isOpen) => !isOpen)}
+              >
+                <span className="student-avatar">{initials}</span>
+                <span className="student-profile-trigger__copy">
+                  <strong>{user?.fullName || 'Student'}</strong><small>Student</small>
+                </span>
+              </button>
+              {profileMenuOpen && (
+                <div className="student-profile-dropdown" id="student-profile-dropdown" role="menu">
+                  <strong>{user?.fullName || 'Student'}</strong>
+                  <span className="student-profile-dropdown__email">{user?.email || 'Email unavailable'}</span>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="student-profile-dropdown__profile-btn"
+                    onClick={handleMyProfileClick}
+                  >
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                      <circle cx="12" cy="7" r="4" />
+                    </svg>
+                    <span>My Profile</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="student-profile-dropdown__logout"
+                    onClick={handleLogoutClick}
+                  >
+                    Logout
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </header>
 
-        <div className="student-content student-body">
-          {error ? (
-            <div className="student-panel student-state-panel is-error">
-              <Icon name="alertCircle" size={28} />
-              <h2>Something went wrong</h2>
+        <div className="student-content">
+          {loading ? (
+            <section className="student-state-card" aria-live="polite">
+              <span className="student-loader" />
+              <h1>Preparing your learning space</h1>
+              <p>Verifying your student account...</p>
+            </section>
+          ) : error ? (
+            <section className="student-state-card student-state-card--error" role="alert">
+              <span className="student-state-card__icon"><Icon name="lock" size={22} /></span>
+              <h1>We couldn’t verify your session</h1>
               <p>{error}</p>
-              {onRetry && (
-                <button className="student-button" type="button" onClick={onRetry}>
-                  Try again
-                </button>
-              )}
-            </div>
-          ) : loading ? (
-            <div className="student-panel student-state-panel is-loading">
-              <Icon name="spark" size={28} />
-              <p>Loading your dashboard…</p>
-            </div>
+              <div><button className="student-button" type="button" onClick={onRetry}>Try again</button>
+                <button className="student-button student-button--quiet" type="button" onClick={onLogout}>Return to login</button></div>
+            </section>
           ) : (
             <Routes>
               <Route path="/student/dashboard" element={
                 <>
-                  <section className="student-welcome">
-                    <div className="student-welcome__copy">
-                      <span className="student-eyebrow"><span /> YOUR LEARNING SPACE</span>
-                      <h1>Welcome back, {firstName}!</h1>
-                      <p>Continue learning, achieve your goals and track your progress.</p>
-                      <span className="student-welcome__today"><Icon name="spark" size={16} /> A little progress adds up.</span>
-                    </div>
-                    <LearningIllustration />
-                  </section>
+              <section className="student-welcome">
+                <div className="student-welcome__copy">
+                  <span className="student-eyebrow"><span /> YOUR LEARNING SPACE</span>
+                  <h1>Welcome back, {firstName}!</h1>
+                  <p>Continue learning, achieve your goals and track your progress.</p>
+                  <span className="student-welcome__today"><Icon name="spark" size={16} /> A little progress adds up.</span>
+                </div>
+                <LearningIllustration />
+              </section>
 
-                  {learningSummaryError && (
-                    <p className="student-courses__message is-error" role="alert">{learningSummaryError}</p>
-                  )}
-                  <section className="student-stats student-stats-grid" aria-label="Student statistics">
-                    {stats.map((stat) => {
-                      const count = learningSummary[stat.value] ?? 0
-                      return (
-                        <article key={stat.label} className={`student-stat student-stat-card is-${stat.tone} student-stat-card--${stat.tone}`}>
-                          <span className={`student-stat__icon student-stat-card__icon is-${stat.tone}`}><Icon name={stat.icon} size={19} /></span>
-                          <span className="student-stat__label">{stat.label}</span>
-                          <strong className="student-stat__value" aria-label={`${count} ${stat.label.toLowerCase()}`}>
-                            {count}
-                          </strong>
-                          <small>{learningSummaryLoading ? 'Updating your learning data…' : stat.caption}</small>
-                        </article>
-                      )
-                    })}
-                  </section>
+              {learningSummaryError && (
+                <p className="student-courses__message is-error" role="alert">{learningSummaryError}</p>
+              )}
+              <section className="student-stats" aria-label="Student statistics">
+                {stats.map((stat) => (
+                  <article className="student-stat" key={stat.label}>
+                    <span className={`student-stat__icon is-${stat.tone}`}><Icon name={stat.icon} size={19} /></span>
+                    <span className="student-stat__label">{stat.label}</span>
+                    <strong className="student-stat__value" aria-label={`${learningSummary[stat.value]} ${stat.label.toLowerCase()}`}>
+                      {learningSummary[stat.value]}
+                    </strong>
+                    <small>{learningSummaryLoading ? 'Updating your learning data…' : stat.caption}</small>
+                  </article>
+                ))}
+              </section>
 
-                  <LearningActivitySection
-                    overview={learningOverview}
-                    todaySummary={todaySummary}
-                    weeklyData={weeklyData}
-                    weekOffset={weekOffset}
-                    onWeekChange={setWeekOffset}
-                    onGoalChange={handleGoalChange}
-                    loading={learningLoading}
-                    error={learningError}
-                  />
-
-                  <section className="student-panel student-progress-panel" aria-labelledby="student-progress-title">
-                    <div className="student-section-heading">
-                      <div><span className="student-eyebrow">YOUR JOURNEY</span><h2 id="student-progress-title">My learning progress</h2></div>
-                      <span className="student-data-note">
-                        {learningSummaryLoading ? 'Updating progress…' : `${learningSummary.totalLessons} lessons across enrolled courses`}
-                      </span>
-                    </div>
-                    <div className="student-progress-layout">
-                      <div
-                        className="student-donut"
-                        role="img"
-                        aria-label={`Overall learning completion ${completionPercentage}%`}
-                        style={{ background: `conic-gradient(#5d9a83 ${completionPercentage}%, #dedfd5 ${completionPercentage}% 100%)` }}
-                      >
-                        <div><strong>{completionPercentage}%</strong><span>OVERALL</span></div>
+              <section className="student-panel student-progress-panel" aria-labelledby="student-progress-title">
+                <div className="student-section-heading">
+                  <div><span className="student-eyebrow">YOUR JOURNEY</span><h2 id="student-progress-title">My learning progress</h2></div>
+                  <span className="student-data-note">
+                    {learningSummaryLoading ? 'Updating progress…' : `${learningSummary.totalLessons} lessons across enrolled courses`}
+                  </span>
+                </div>
+                <div className="student-progress-layout">
+                  <div
+                    className="student-donut"
+                    role="img"
+                    aria-label={`Overall learning completion ${completionPercentage}%`}
+                    style={{ background: `conic-gradient(#5d9a83 ${completionPercentage}%, #dedfd5 ${completionPercentage}% 100%)` }}
+                  >
+                    <div><strong>{completionPercentage}%</strong><span>OVERALL</span></div>
+                  </div>
+                  <div className="student-lesson-counts">
+                    {[
+                      ['Completed lessons', 'completedLessons', 'mint'],
+                      ['Lessons in progress', 'inProgressLessons', 'gold'],
+                      ['Lessons not started', 'notStartedLessons', 'gray'],
+                    ].map(([label, value, tone]) => (
+                      <div className="student-lesson-count" key={label}>
+                        <span className={`student-lesson-count__dot is-${tone}`} />
+                        <span>{label}</span>
+                        <strong>{learningSummary[value]}</strong>
                       </div>
-                      <div className="student-lesson-counts">
-                        {[
-                          ['Completed lessons', 'completedLessons', 'mint'],
-                          ['Lessons in progress', 'inProgressLessons', 'gold'],
-                          ['Lessons not started', 'notStartedLessons', 'gray'],
-                        ].map(([label, value, tone]) => (
-                          <div className="student-lesson-count" key={label}>
-                            <span className={`student-lesson-count__dot is-${tone}`} />
-                            <span>{label}</span>
-                            <strong>{learningSummary[value]}</strong>
-                          </div>
-                        ))}
-                        <p>Counts update as you start and complete lessons.</p>
-                      </div>
-                    </div>
-                  </section>
+                    ))}
+                    <p>Counts update as you start and complete lessons.</p>
+                  </div>
+                </div>
+              </section>
 
-                  <section className="student-categories" aria-labelledby="student-categories-title">
-                    <h2 id="student-categories-title">Explore categories</h2>
-                    <div className="student-categories__list">
+              <section className="student-categories" aria-labelledby="student-categories-title">
+                <h2 id="student-categories-title">Explore categories</h2>
+                <div className="student-categories__list">
+                  {exploreCategories.map((category) => (
+                    <button
+                      className={`student-category student-category-link${selectedCourseCategory === category.label ? ' is-selected' : ''}`}
+                      key={category.label}
+                      type="button"
+                      aria-pressed={selectedCourseCategory === category.label}
+                      onClick={() => setSelectedCourseCategory((current) => (
+                        current === category.label ? '' : category.label
+                      ))}
+                    >
+                      <Icon name={category.icon} size={19} />
+                      {category.label}
+                    </button>
+                  ))}
+                </div>
+              </section>
+
+              <section className="student-panel student-dashboard-my-courses" aria-labelledby="student-courses-eyebrow">
+                <div className="student-section-heading">
+                  <div><span className="student-eyebrow" id="student-courses-eyebrow">PICK UP WHERE YOU LEFT OFF</span></div>
+                  <div className="student-dashboard-courses__actions">
+                    {selectedCourseCategory && (
                       <button
-                        className={`student-category student-category-link${!selectedCourseCategory && !selectedCategory ? ' is-selected is-active' : ''}`}
+                        className="student-section-link"
                         type="button"
-                        onClick={() => {
-                          setSelectedCategory('')
-                          setSelectedCourseCategory('')
-                        }}
+                        onClick={() => setSelectedCourseCategory('')}
                       >
-                        <Icon name="grid" size={16} />
-                        <span>All Courses</span>
+                        Clear filter
                       </button>
-                      {exploreCategories.map((category) => (
-                        <button
-                          className={`student-category student-category-link${(selectedCourseCategory === category.label || selectedCategory === category.label) ? ' is-selected is-active' : ''}`}
-                          key={category.label}
-                          type="button"
-                          aria-pressed={selectedCourseCategory === category.label || selectedCategory === category.label}
-                          onClick={() => {
-                            const next = (selectedCourseCategory === category.label || selectedCategory === category.label) ? '' : category.label
-                            setSelectedCategory(next)
-                            setSelectedCourseCategory(next)
-                          }}
-                        >
-                          <Icon name={category.icon || 'book'} size={16} />
-                          <span>{category.label}</span>
-                        </button>
-                      ))}
-                    </div>
-                  </section>
-
-                  <section className="student-panel" aria-labelledby="student-courses-title">
-                    <div className="student-section-heading">
-                      <div><span className="student-eyebrow">PICK UP WHERE YOU LEFT OFF</span><h2 id="student-courses-title">My Courses</h2></div>
-                      <div className="student-dashboard-courses__actions">
-                        {(selectedCategory || selectedCourseCategory) && (
-                          <button
-                            className="student-section-link"
-                            type="button"
-                            onClick={() => {
-                              setSelectedCategory('')
-                              setSelectedCourseCategory('')
-                            }}
-                          >
-                            Clear filter
-                          </button>
-                        )}
-                        <Link className="student-section-link" to="/student/courses">View all</Link>
-                      </div>
-                    </div>
-                    <StudentDashboardCourses
-                      onLogout={onLogout}
-                      selectedCategory={selectedCourseCategory || selectedCategory}
-                      refreshKey={dashboardRefreshKey}
-                    />
-                  </section>
-
-                  <StudentAvailableCourses
-                    user={user}
-                    onLogout={onLogout}
-                    onLearningDataChanged={refreshLearningSummary}
-                    onCategoriesLoaded={setPublishedCourseCategories}
-                    selectedCategory={selectedCourseCategory || selectedCategory}
-                  />
-
-                  <div className="student-two-column">
-                    <section className="student-panel" aria-labelledby="student-assignments-title">
-                      <div className="student-section-heading">
-                        <div><span className="student-eyebrow">STAY ON TRACK</span><h2 id="student-assignments-title">Upcoming assignments</h2></div>
-                        <Link className="student-section-link student-section-link--muted" to="/student/assignments">View all</Link>
-                      </div>
-                      <StudentDashboardUpcomingAssignments onLogout={onLogout} />
-                    </section>
-                    <section className="student-panel student-announcements" aria-labelledby="student-announcements-title">
-                      <div className="student-section-heading">
-                        <div><span className="student-eyebrow">FROM YOUR LEARNING COMMUNITY</span><h2 id="student-announcements-title">Announcements</h2></div>
-                        <Link className="student-section-link student-section-link--muted" to="/student/announcements">
-                          Updates <Icon name="arrow" size={15} />
-                        </Link>
-                      </div>
-                      <NotificationFeed role="student" onLogout={onLogout} />
-                    </section>
+                    )}
+                    <Link className="student-section-link" to="/student/courses">View all</Link>
                   </div>
+                </div>
+                <StudentDashboardCourses
+                  onLogout={onLogout}
+                  selectedCategory={selectedCourseCategory}
+                />
+              </section>
 
-                  <div className="student-two-column student-lower-grid">
-                    <section className="student-panel student-weekly-goal" aria-labelledby="student-goal-title">
-                      <span className="student-eyebrow">A STEADY RHYTHM</span>
-                      <h2 id="student-goal-title">Weekly learning goal</h2>
-                      <div className="student-goal-values"><strong>— <small>hrs</small></strong><span>of — hrs this week</span></div>
-                      <div className="student-progress-track"><span /></div>
-                      <p>Learning time and weekly goal tracking aren’t connected yet.</p>
-                    </section>
-                    <section className="student-panel student-ai-card" aria-labelledby="student-ai-title">
-                      <span className="student-ai-card__icon"><Icon name="spark" size={20} /></span>
-                      <span className="student-eyebrow">A HELPFUL STUDY SPACE</span>
-                      <h2 id="student-ai-title">AI Study Companion</h2>
-                      <p>Topic explanations, lesson summaries and practice questions are planned for a future release.</p>
-                      <span className="student-ai-card__status">Not connected to an AI service</span>
-                    </section>
+              <StudentAvailableCourses
+                user={user}
+                onLogout={onLogout}
+                onLearningDataChanged={refreshLearningSummary}
+                onCategoriesLoaded={setPublishedCourseCategories}
+                selectedCategory={selectedCourseCategory}
+              />
+
+              <div className="student-two-column">
+                <section className="student-panel" aria-labelledby="student-assignments-title">
+                  <div className="student-section-heading">
+                    <div><span className="student-eyebrow">STAY ON TRACK</span><h2 id="student-assignments-title">Upcoming assignments</h2></div>
+                    <Link className="student-section-link student-section-link--muted" to="/student/assignments">View all</Link>
                   </div>
+                  <StudentDashboardUpcomingAssignments onLogout={onLogout} />
+                </section>
+                <section className="student-panel student-announcements" aria-labelledby="student-announcements-title">
+                  <div className="student-section-heading">
+                    <div><span className="student-eyebrow">FROM YOUR LEARNING COMMUNITY</span><h2 id="student-announcements-title">Announcements</h2></div>
+                    <Link className="student-section-link student-section-link--muted" to="/student/announcements">
+                      Updates <Icon name="arrow" size={15} />
+                    </Link>
+                  </div>
+                  <NotificationFeed role="student" onLogout={onLogout} />
+                </section>
+              </div>
 
-                  <section className="student-tools" aria-labelledby="student-tools-title">
-                    <div className="student-section-heading">
-                      <div><span className="student-eyebrow">MORE FOR YOUR JOURNEY</span><h2 id="student-tools-title">Student tools</h2></div>
-                    </div>
-                    <div className="student-tools-grid">
-                      {tools.map((tool) => (
-                        <Link className="student-tool-card" id={tool.id} key={tool.id} to={tool.path}>
-                          <span className="student-tool-card__icon"><Icon name={tool.icon} size={19} /></span>
-                          <span className="student-tool-card__copy">
-                            <h3>{tool.title}</h3>
-                            <p>{tool.description}</p>
-                          </span>
-                          <span className="student-tool-card__arrow" aria-hidden="true"><Icon name="arrow" size={18} /></span>
-                        </Link>
-                      ))}
-                    </div>
-                  </section>
-                  <footer className="student-footer"><span>Made for curious minds</span><span>Keep going, one lesson at a time.</span></footer>
+              <StudentLearningActivityPanel
+                onLogout={onLogout}
+                studentId={user?.id}
+                learningStreak={learningSummary.learningStreak}
+                streakLoading={learningSummaryLoading || Boolean(learningSummaryError)}
+              />
+
+              <section className="student-tools" aria-labelledby="student-tools-title">
+                <div className="student-section-heading">
+                  <div><span className="student-eyebrow">MORE FOR YOUR JOURNEY</span><h2 id="student-tools-title">Student tools</h2></div>
+                </div>
+                <div className="student-tools-grid">
+                  {tools.map((tool) => (
+                    <Link className="student-tool-card" id={tool.id} key={tool.id} to={tool.path}>
+                      <span className="student-tool-card__icon"><Icon name={tool.icon} size={19} /></span>
+                      <span className="student-tool-card__copy">
+                        <h3>{tool.title}</h3>
+                        <p>{tool.description}</p>
+                      </span>
+                      <span className="student-tool-card__arrow" aria-hidden="true"><Icon name="arrow" size={18} /></span>
+                    </Link>
+                  ))}
+                </div>
+              </section>
+              <footer className="student-footer"><span>Made for curious minds</span><span>Keep going, one lesson at a time.</span></footer>
                 </>
               } />
               <Route path="/student/course/:courseId/learn" element={
@@ -8009,33 +8315,21 @@ function StudentDashboard({
                   contentSearch={courseContentSearch}
                 />
               } />
-              <Route path="/student/course/:courseId/details" element={
-                <StudentCourseDetailsPage user={user} onLogout={onLogout} onLearningDataChanged={refreshLearningSummary} />
-              } />
               <Route path="/student/course/:courseId" element={
                 <StudentCourseDetailsPage user={user} onLogout={onLogout} onLearningDataChanged={refreshLearningSummary} />
               } />
-              <Route path="/student/learning" element={<StudentLearningActivity onLogout={onLogout} />} />
               <Route path="/student/courses" element={<StudentCourses user={user} onLogout={onLogout} />} />
               <Route path="/student/assignments" element={
                 <StudentAssignmentsPage onLogout={onLogout} onLearningDataChanged={refreshLearningSummary} />
-              } />
-              <Route path="/student/quizzes-assignments" element={
-                <StudentQuizzesAndAssignments user={user} onLogout={onLogout} />
               } />
               <Route path="/student/results" element={
                 <StudentResultsPage onLogout={onLogout} />
               } />
               <Route path="/student/resources" element={
-                <StudentLearningResourcesPage user={user} onLogout={onLogout} />
-              } />
-              <Route path="/student/messages" element={
-                <StudentRoutePage eyebrow="YOUR LEARNING COMMUNITY" title="Messages">
-                  <EmptyState icon="message" title="Messages are not connected yet" description="Course conversations and messages will appear here when messaging is available." />
-                </StudentRoutePage>
+                <StudentResourcesPage onLogout={onLogout} />
               } />
               <Route path="/student/certificates" element={
-                <StudentCertificatesPage user={user} onLogout={onLogout} />
+                <StudentCertificatesPage onLogout={onLogout} />
               } />
               <Route
                 path="/student/referrals"
@@ -8043,10 +8337,10 @@ function StudentDashboard({
                   ? <StudentReferrals onLogout={onLogout} />
                   : <Navigate to="/student/dashboard" replace />}
               />
-              <Route path="/student/profile" element={<StudentProfile user={user} onLogout={onLogout} />} />
+              <Route path="/student/profile" element={<StudentProfile user={user} onLogout={onLogout} onAccountUpdated={onAccountUpdated} />} />
               <Route path="/student/purchases" element={<StudentPurchases />} />
-              <Route path="/student/achievements" element={<StudentAchievements user={user} onLogout={onLogout} />} />
-              <Route path="/student/learning-activity" element={<StudentLearningActivity onLogout={onLogout} />} />
+              <Route path="/student/achievements" element={<StudentAchievements onLogout={onLogout} />} />
+              <Route path="/student/learning-activity" element={<StudentLearningActivity onLogout={onLogout} user={user} />} />
               <Route path="/student/updates" element={<StudentUpdates />} />
               <Route path="/student/settings" element={
                 <StudentRoutePage eyebrow="PREFERENCES" title="Settings">
@@ -8060,12 +8354,12 @@ function StudentDashboard({
                 </StudentRoutePage>
               } />
               <Route path="/student/help" element={<HelpCenterHome />} />
-              <Route path="/student/help/email" element={<EmailSupportPage user={user} onLogout={onLogout} />} />
+              <Route path="/student/help/email" element={<EmailSupportPage user={user} />} />
               <Route path="/student/help/complaint" element={<SubmitComplaintPage />} />
-              <Route path="/student/help/submit-ticket" element={<SubmitSupportTicketPage user={user} onLogout={onLogout} />} />
+              <Route path="/student/help/submit-ticket" element={<SubmitSupportTicketPage />} />
               <Route path="/student/help/faqs" element={<SupportFaqPage />} />
-              <Route path="/student/help/requests" element={<SupportRequestsPage user={user} onLogout={onLogout} />} />
-              <Route path="/student/help/requests/:ticketId" element={<SupportTicketDetailPage user={user} onLogout={onLogout} />} />
+              <Route path="/student/help/requests" element={<SupportRequestsPage />} />
+              <Route path="/student/help/requests/:ticketId" element={<SupportTicketDetailPage />} />
               <Route path="/student/announcements" element={
                 <StudentNotificationsPage onLogout={onLogout} />
               } />
@@ -8085,18 +8379,5 @@ function StudentDashboard({
 
 
 
-export {
-  StudentQuizzesAndAssignments,
-  fetchStudentActivities,
-  formatActivityDueDate,
-  getActivityStatusDetails,
-  getActivityActionLabel,
-  StudentCourseDetailsPage,
-  StudentCertificatesPage,
-  fetchCourseDetails,
-  enrollInCourse,
-  unenrollFromCourse,
-  fetchStudentCertificates,
-}
 
 export default StudentDashboard

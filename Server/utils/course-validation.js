@@ -29,6 +29,44 @@ function normalizeTextList(value, label, maxItems = 30, maxLength = 500) {
   return { value: value.map((entry) => entry.trim()).filter(Boolean) }
 }
 
+function normalizeAssignmentRubric(rubric, maximumMarks, label) {
+  if (rubric === undefined || rubric === null || (Array.isArray(rubric) && rubric.length === 0)) {
+    return { value: [] }
+  }
+  if (!Array.isArray(rubric) || rubric.length > 20 || !Number.isFinite(Number(maximumMarks))) {
+    return { error: `Check the marking rubric for ${label}.` }
+  }
+
+  const names = new Set()
+  let totalMarks = 0
+  const value = []
+  for (const criterion of rubric) {
+    if (
+      !criterion || typeof criterion !== 'object' || Array.isArray(criterion) ||
+      typeof criterion.name !== 'string' || !criterion.name.trim() || criterion.name.trim().length > 120 ||
+      (criterion.description !== undefined && (
+        typeof criterion.description !== 'string' || criterion.description.length > 1000
+      )) ||
+      !Number.isFinite(Number(criterion.maximumMarks)) ||
+      Number(criterion.maximumMarks) <= 0 ||
+      Number(criterion.maximumMarks) > Number(maximumMarks)
+    ) return { error: `Check the marking rubric for ${label}.` }
+    const name = criterion.name.trim()
+    if (names.has(name.toLocaleLowerCase())) return { error: `Rubric criteria must have unique names for ${label}.` }
+    names.add(name.toLocaleLowerCase())
+    totalMarks += Number(criterion.maximumMarks)
+    value.push({
+      name,
+      description: criterion.description?.trim() || '',
+      maximumMarks: Number(criterion.maximumMarks),
+    })
+  }
+  if (Math.abs(totalMarks - Number(maximumMarks)) > 1e-6) {
+    return { error: `The marking rubric for ${label} must add up to its maximum marks.` }
+  }
+  return { value }
+}
+
 function normalizeModuleQuiz(quiz, moduleIndex) {
   if (quiz === undefined || quiz === null) return { value: undefined }
   if (
@@ -223,6 +261,96 @@ function normalizeTranscriptCues(transcriptCues, label) {
   return { value: cues.sort((left, right) => left.startTimeMs - right.startTimeMs) }
 }
 
+export function normalizeLessons(lessons) {
+  if (Array.isArray(lessons)) return lessons
+  if (!lessons) return []
+
+  if (typeof lessons === 'string') {
+    const trimmed = lessons.trim()
+    if ((trimmed.startsWith('[') && trimmed.endsWith(']')) || (trimmed.startsWith('{') && trimmed.endsWith('}'))) {
+      try {
+        const parsed = JSON.parse(trimmed)
+        return normalizeLessons(parsed)
+      } catch {
+        return []
+      }
+    }
+    return []
+  }
+
+  if (typeof lessons === 'object') {
+    if (Array.isArray(lessons.lessons)) return normalizeLessons(lessons.lessons)
+    if (Array.isArray(lessons.items)) return normalizeLessons(lessons.items)
+
+    const entries = Object.entries(lessons)
+    if (entries.length === 0) return []
+
+    const objectEntries = entries.filter(([, val]) => val && typeof val === 'object' && !Array.isArray(val))
+    if (objectEntries.length > 0) {
+      const allNumericKeys = objectEntries.every(([key]) => /^\d+$/.test(key))
+      if (allNumericKeys) {
+        objectEntries.sort(([keyA], [keyB]) => Number(keyA) - Number(keyB))
+      } else {
+        objectEntries.sort(([, a], [, b]) => {
+          if (Number.isFinite(a.order) && Number.isFinite(b.order)) return a.order - b.order
+          return 0
+        })
+      }
+      return objectEntries.map(([, val]) => val)
+    }
+
+    if (
+      typeof lessons.title === 'string'
+      || lessons._id
+      || lessons.videoUrl
+      || lessons.content
+      || lessons.resources
+    ) {
+      return [lessons]
+    }
+
+    return []
+  }
+
+  return []
+}
+
+export function normalizeArray(value) {
+  if (Array.isArray(value)) return value
+  if (!value) return []
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if ((trimmed.startsWith('[') && trimmed.endsWith(']')) || (trimmed.startsWith('{') && trimmed.endsWith('}'))) {
+      try {
+        const parsed = JSON.parse(trimmed)
+        return normalizeArray(parsed)
+      } catch {
+        return []
+      }
+    }
+    return []
+  }
+  if (typeof value === 'object') {
+    const entries = Object.entries(value)
+    if (entries.length === 0) return []
+    const objectEntries = entries.filter(([, val]) => val && typeof val === 'object' && !Array.isArray(val))
+    if (objectEntries.length > 0) {
+      const allNumericKeys = objectEntries.every(([key]) => /^\d+$/.test(key))
+      if (allNumericKeys) {
+        objectEntries.sort(([keyA], [keyB]) => Number(keyA) - Number(keyB))
+      } else {
+        objectEntries.sort(([, a], [, b]) => {
+          if (Number.isFinite(a.order) && Number.isFinite(b.order)) return a.order - b.order
+          return 0
+        })
+      }
+      return objectEntries.map(([, val]) => val)
+    }
+    return [value]
+  }
+  return []
+}
+
 export function normalizeCourseDetails(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return { error: 'Enter valid course details.' }
   const {
@@ -235,6 +363,9 @@ export function normalizeCourseDetails(input) {
     thumbnailPublicId = '',
     learningObjectives,
     prerequisites,
+    tags,
+    skills,
+    practicalBenefits,
     estimatedDurationMinutes = 0,
     generateCertificate = true,
     status = 'draft',
@@ -259,19 +390,26 @@ export function normalizeCourseDetails(input) {
   if (objectives.error) return objectives
   const required = normalizeTextList(prerequisites, 'prerequisites', 30, 500)
   if (required.error) return required
+  const normalizedTags = normalizeTextList(tags, 'tags', 30, 500)
+  if (normalizedTags.error) return normalizedTags
+  const normalizedSkills = normalizeTextList(skills, 'skills', 30, 500)
+  if (normalizedSkills.error) return normalizedSkills
+  const normalizedBenefits = normalizeTextList(practicalBenefits, 'practical benefits', 30, 500)
+  if (normalizedBenefits.error) return normalizedBenefits
 
   const normalizedModules = []
   for (const [moduleIndex, module] of modules.entries()) {
+    const rawLessons = module?.lessons !== undefined ? normalizeLessons(module.lessons) : []
     if (!module || typeof module !== 'object' || Array.isArray(module) ||
       (module._id !== undefined && !validDocumentId(module._id)) ||
       typeof module.title !== 'string' || !module.title.trim() || module.title.trim().length > 200 ||
       (module.description !== undefined && (typeof module.description !== 'string' || module.description.length > 2000)) ||
-      (module.lessons !== undefined && !Array.isArray(module.lessons)) || (module.lessons?.length || 0) > 100 ||
+      rawLessons.length > 100 ||
       (module.contentItems !== undefined && (!Array.isArray(module.contentItems) || module.contentItems.length > 100))) {
       return { error: `Check the title, description, and lessons for module ${moduleIndex + 1}.` }
     }
     const lessons = []
-    for (const [lessonIndex, lesson] of (module.lessons || []).entries()) {
+    for (const [lessonIndex, lesson] of rawLessons.entries()) {
       if (!lesson || typeof lesson !== 'object' || Array.isArray(lesson) ||
         (lesson._id !== undefined && !validDocumentId(lesson._id)) ||
         (lesson.requiredForCertificate !== undefined && typeof lesson.requiredForCertificate !== 'boolean') ||
@@ -370,9 +508,15 @@ export function normalizeCourseDetails(input) {
           (resource.bytes !== undefined && (!Number.isSafeInteger(Number(resource.bytes)) || Number(resource.bytes) < 0)) ||
           !['raw', 'image', 'video'].includes(resource.resourceType || 'raw')) ||
         (item.dueDate !== undefined && item.dueDate !== '' && (typeof item.dueDate !== 'string' || Number.isNaN(Date.parse(item.dueDate)))) ||
-        (item.points !== undefined && (!Number.isFinite(Number(item.points)) || Number(item.points) < 0))) {
+        (item.points !== undefined && (!Number.isFinite(Number(item.points)) || Number(item.points) < 0)) ||
+        (item.rubric !== undefined && item.type !== 'assignment')) {
         return { error: `Check content item ${itemIndex + 1} in module ${moduleIndex + 1}.` }
       }
+      const points = item.points === undefined ? (item.type === 'assignment' ? 100 : 0) : Number(item.points)
+      const rubric = item.type === 'assignment'
+        ? normalizeAssignmentRubric(item.rubric, points, `content item ${itemIndex + 1} in module ${moduleIndex + 1}`)
+        : { value: [] }
+      if (rubric.error) return rubric
       const itemQuiz = item.type === 'quiz' ? normalizeModuleQuiz(item.quiz, moduleIndex) : { value: undefined }
       if (itemQuiz.error || (item.type === 'quiz' && !itemQuiz.value)) return itemQuiz.error ? itemQuiz : { error: `Check the quiz for content item ${itemIndex + 1} in module ${moduleIndex + 1}.` }
       const attentionCheck = item.type === 'video-lesson'
@@ -412,7 +556,8 @@ export function normalizeCourseDetails(input) {
           bytes: resource.bytes === undefined ? undefined : Number(resource.bytes),
         })),
         dueDate: item.dueDate || undefined,
-        points: item.points === undefined ? 0 : Number(item.points),
+        points,
+        ...(item.type === 'assignment' ? { rubric: rubric.value } : {}),
         ...(attentionCheck.value ? { attentionCheck: attentionCheck.value } : {}),
         ...(itemQuiz.value ? { quiz: itemQuiz.value } : {}),
         order: itemIndex,
@@ -440,7 +585,10 @@ export function normalizeCourseDetails(input) {
       (assignment.points !== undefined && (!Number.isFinite(Number(assignment.points)) || Number(assignment.points) < 0))) {
       return { error: `Check assignment ${index + 1}.` }
     }
-    normalizedAssignments.push({ ...(assignment._id ? { _id: normalizedDocumentId(assignment._id) } : {}), title: assignment.title.trim(), description: assignment.description?.trim() || '', dueDate: assignment.dueDate || undefined, points: assignment.points === undefined ? 0 : Number(assignment.points), requiredForCertificate: assignment.requiredForCertificate !== false })
+    const points = assignment.points === undefined ? 100 : Number(assignment.points)
+    const rubric = normalizeAssignmentRubric(assignment.rubric, points, `assignment ${index + 1}`)
+    if (rubric.error) return rubric
+    normalizedAssignments.push({ ...(assignment._id ? { _id: normalizedDocumentId(assignment._id) } : {}), title: assignment.title.trim(), description: assignment.description?.trim() || '', dueDate: assignment.dueDate || undefined, points, rubric: rubric.value, requiredForCertificate: assignment.requiredForCertificate !== false })
   }
 
   const normalizedQuizzes = []
@@ -484,6 +632,9 @@ export function normalizeCourseDetails(input) {
       thumbnailPublicId: thumbnailPublicId.trim(),
       learningObjectives: objectives.value,
       prerequisites: required.value,
+      tags: normalizedTags.value,
+      skills: normalizedSkills.value,
+      practicalBenefits: normalizedBenefits.value,
       estimatedDurationMinutes: Number(estimatedDurationMinutes),
       generateCertificate,
       status,

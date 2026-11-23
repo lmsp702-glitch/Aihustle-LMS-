@@ -1,32 +1,20 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { API_BASE_URL } from './api-base-url.js'
 import WorkspaceTopbar from './WorkspaceTopbar.jsx'
+import './AdminDashboard.css'
 import './AdminSupport.css'
 import './SupportCenter.css'
 
-const statuses = [
-  'Open',
-  'In Progress',
-  'Waiting for Student',
-  'Waiting for User',
-  'Resolved',
-  'Closed',
-]
+const statuses = ['Open', 'In Progress', 'Waiting for User', 'Resolved', 'Closed']
 const mainAdminStatuses = ['Open', 'In Progress', 'Resolved', 'Closed']
+const complaintStatuses = ['Unsolved', 'Solved']
 const categories = [
   'Account and Login',
-  'Account and Registration',
-  'Login and Security',
-  'Courses and Learning',
   'Course and Enrollment',
-  'Enrollments',
   'Assignments and Results',
-  'Certificates',
   'Payments and Purchases',
-  'Payments',
   'Technical Issue',
-  'Technical Issues',
   'Other',
 ]
 const priorities = ['Low', 'Medium', 'High']
@@ -57,25 +45,15 @@ const mainAdminNavigation = [
   { label: 'Settings', group: 'SYSTEM', icon: '⚙' },
 ]
 
-function getToken(onLogout) {
+function getToken() {
   const storedAuth = sessionStorage.getItem('lms.auth')
   let token
   try {
     token = storedAuth ? JSON.parse(storedAuth)?.token : null
   } catch {
-    sessionStorage.removeItem('lms.auth')
-    if (typeof onLogout === 'function') onLogout()
-    const err = new Error('Your saved session is invalid. Please sign in again.')
-    err.isSessionExpired = true
-    throw err
+    throw new Error('Your saved session is invalid. Please sign in again.')
   }
-  if (typeof token !== 'string' || !token) {
-    sessionStorage.removeItem('lms.auth')
-    if (typeof onLogout === 'function') onLogout()
-    const err = new Error('Your session has expired. Please sign in again.')
-    err.isSessionExpired = true
-    throw err
-  }
+  if (typeof token !== 'string' || !token) throw new Error('Your session has expired. Please sign in again.')
   return token
 }
 
@@ -85,21 +63,32 @@ function getTicketQuery(filters) {
   return serialized ? `?${serialized}` : ''
 }
 
-async function adminSupportRequest(path, options = {}, onLogout) {
-  const token = getToken(onLogout)
+function displayTicketValue(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : 'Not available'
+}
+
+function displayComplaintStatus(complaint, status = complaint?.status) {
+  if (complaint?.source !== 'Email Support') return status
+  return ['Solved', 'Resolved'].includes(status) ? 'Solved' : 'Unsolved'
+}
+
+function formatTicketDate(value) {
+  if (value === undefined || value === null || value === '') return 'Not available'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? 'Not available' : date.toLocaleString()
+}
+
+function formatTicketListDate(value) {
+  if (value === undefined || value === null || value === '') return 'Not available'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? 'Not available' : date.toLocaleDateString()
+}
+
+async function adminSupportRequest(path, options = {}) {
   const headers = new Headers(options.headers)
-  headers.set('Authorization', `Bearer ${token}`)
+  headers.set('Authorization', `Bearer ${getToken()}`)
   if (options.body) headers.set('Content-Type', 'application/json')
   const response = await fetch(`${API_BASE_URL}/support${path}`, { ...options, headers })
-  if (response.status === 401) {
-    sessionStorage.removeItem('lms.auth')
-    if (typeof onLogout === 'function') {
-      try { onLogout() } catch {}
-    }
-    const err = new Error('Your session has expired. Please sign in again.')
-    err.isSessionExpired = true
-    throw err
-  }
   let result
   try {
     result = await response.json()
@@ -156,11 +145,8 @@ function AdminSupport({
     const parts = location.pathname.split('/').filter(Boolean)
     return parts.length > 2 ? decodeURIComponent(parts[2]) : ''
   }, [location.pathname])
-
   const [filters, setFilters] = useState({ status: '', category: '', priority: '' })
-  const [search, setSearch] = useState('')
-  const ticketSearch = search
-  const setTicketSearch = setSearch
+  const [ticketSearch, setTicketSearch] = useState('')
   const [tickets, setTickets] = useState([])
   const [complaints, setComplaints] = useState([])
   const [ticket, setTicket] = useState(null)
@@ -168,18 +154,16 @@ function AdminSupport({
   const [handlers, setHandlers] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [isSessionExpired, setIsSessionExpired] = useState(false)
   const [reply, setReply] = useState('')
   const [notice, setNotice] = useState('')
-  const [isSaving, setIsSaving] = useState(false)
-
+  const statusToggleLock = useRef(false)
   const isComplaintsTab = isMainAdminView && activeTab === 'complaints'
   const displayedStatus = (status) =>
-    isMainAdminView && !isComplaintsTab && (status === 'Waiting for User' || status === 'Waiting for Student') ? 'In Progress' : status
-  const isDrawerViewport = typeof window !== 'undefined' && window.matchMedia ? window.matchMedia(
+    isMainAdminView && !isComplaintsTab && status === 'Waiting for User' ? 'In Progress' : status
+  const isDrawerViewport = window.matchMedia(
     roleLabel === 'Main Admin' ? '(max-width: 1024px)' : '(max-width: 760px)',
-  ).matches : false
-
+  ).matches
+  const [isSaving, setIsSaving] = useState(false)
   const visibleTickets = useMemo(() => {
     const query = ticketSearch.trim().toLocaleLowerCase()
     return tickets.filter((item) => {
@@ -195,7 +179,6 @@ function AdminSupport({
       return matchesSearch
     })
   }, [ticketSearch, tickets])
-
   const visibleComplaints = useMemo(() => {
     const query = ticketSearch.trim().toLocaleLowerCase()
     return [...complaints]
@@ -211,13 +194,14 @@ function AdminSupport({
           item.requester?.email,
         ].some((value) => String(value || '').toLocaleLowerCase().includes(query))
         const matchesFilter = complaintFilter === 'all' ||
-          (complaintFilter === 'solved' ? item.status === 'Solved' : item.status === 'Unsolved')
+          displayComplaintStatus(item) === complaintFilter
         return matchesSearch && matchesFilter
       })
   }, [complaintFilter, complaints, ticketSearch])
-
   const activeRecord = isComplaintsTab ? complaint : ticket
+  const isEmailSupportRecord = isComplaintsTab && activeRecord?.source === 'Email Support'
   const visibleRecords = isComplaintsTab ? visibleComplaints : visibleTickets
+  const activeTicketStatus = displayTicketValue(displayedStatus(activeRecord?.status))
   const supportNavigation = (roleLabel === 'Main Admin' ? mainAdminNavigation : adminNavigation).map((item) => ({
     ...item,
     active: item.tab === 'complaints' ? isMainAdminView : item.tab ? item.tab === activeTab : Boolean(item.active),
@@ -232,26 +216,20 @@ function AdminSupport({
     setActiveTab(isMainAdminView && requestedTab === 'complaints' ? 'complaints' : initialTab)
   }, [initialTab, isMainAdminView, location.pathname, location.search])
 
-  // Fetch ticket list
   useEffect(() => {
     let active = true
     setLoading(true)
     setError('')
-    setIsSessionExpired(false)
     const request = isComplaintsTab
       ? adminComplaintRequest('/admin').then((result) => {
-        if (active) setComplaints(result.complaints || [])
+        if (active) setComplaints(result.complaints)
       })
-      : adminSupportRequest(`/admin/tickets${getTicketQuery(filters)}`, {}, onLogout).then((result) => {
-        if (active) setTickets(result.tickets || [])
+      : adminSupportRequest(`/admin/tickets${getTicketQuery(filters)}`).then((result) => {
+        if (active) setTickets(result.tickets)
       })
     request
       .catch((requestError) => {
-        if (!active) return
-        if (requestError?.isSessionExpired) {
-          setIsSessionExpired(true)
-        }
-        setError(requestError instanceof Error
+        if (active) setError(requestError instanceof Error
           ? requestError.message
           : isComplaintsTab ? 'Complaints could not be loaded.' : 'Support tickets could not be loaded.')
       })
@@ -259,9 +237,8 @@ function AdminSupport({
         if (active) setLoading(false)
       })
     return () => { active = false }
-  }, [filters, isComplaintsTab, onLogout])
+  }, [filters, isComplaintsTab])
 
-  // Fetch single ticket details
   useEffect(() => {
     if (!ticketId) {
       setTicket(null)
@@ -271,7 +248,6 @@ function AdminSupport({
     let active = true
     setLoading(true)
     setError('')
-    setIsSessionExpired(false)
     const request = isComplaintsTab
       ? adminComplaintRequest(`/admin/${encodeURIComponent(ticketId)}`).then((result) => {
         if (active) {
@@ -279,23 +255,26 @@ function AdminSupport({
           setTicket(null)
         }
       })
-      : Promise.all([
-        adminSupportRequest(`/admin/tickets/${encodeURIComponent(ticketId)}`, {}, onLogout),
-        adminSupportRequest('/admin/tickets/handlers', {}, onLogout).catch(() => ({ handlers: [] })),
-      ]).then(([ticketResult, handlerResult]) => {
-        if (active) {
-          setTicket(ticketResult.ticket)
-          setComplaint(null)
-          setHandlers(handlerResult.handlers || [])
-        }
-      })
+      : isMainAdminView
+        ? adminSupportRequest(`/admin/tickets/${encodeURIComponent(ticketId)}`).then((ticketResult) => {
+          if (active) {
+            setTicket(ticketResult.ticket)
+            setComplaint(null)
+          }
+        })
+        : Promise.all([
+          adminSupportRequest(`/admin/tickets/${encodeURIComponent(ticketId)}`),
+          adminSupportRequest('/admin/tickets/handlers'),
+        ]).then(([ticketResult, handlerResult]) => {
+          if (active) {
+            setTicket(ticketResult.ticket)
+            setComplaint(null)
+            setHandlers(handlerResult.handlers)
+          }
+        })
     request
       .catch((requestError) => {
-        if (!active) return
-        if (requestError?.isSessionExpired) {
-          setIsSessionExpired(true)
-        }
-        setError(requestError instanceof Error
+        if (active) setError(requestError instanceof Error
           ? requestError.message
           : isComplaintsTab ? 'Complaint details could not be loaded.' : 'Support ticket details could not be loaded.')
       })
@@ -303,30 +282,7 @@ function AdminSupport({
         if (active) setLoading(false)
       })
     return () => { active = false }
-  }, [isComplaintsTab, ticketId, onLogout])
-
-  // Compute live statistics from tickets
-  const stats = useMemo(() => {
-    const total = tickets.length
-    const open = tickets.filter((t) => t.status === 'Open').length
-    const inProgress = tickets.filter((t) => t.status === 'In Progress').length
-    const waiting = tickets.filter((t) => ['Waiting for Student', 'Waiting for User'].includes(t.status)).length
-    const resolved = tickets.filter((t) => ['Resolved', 'Closed'].includes(t.status)).length
-    return { total, open, inProgress, waiting, resolved }
-  }, [tickets])
-
-  // Filter tickets by search text
-  const filteredTickets = useMemo(() => {
-    const q = search.trim().toLowerCase()
-    if (!q) return tickets
-    return tickets.filter((t) => {
-      const matchId = (t.ticketId || '').toLowerCase().includes(q)
-      const matchSubject = (t.subject || '').toLowerCase().includes(q)
-      const matchRequester = (t.requester?.fullName || '').toLowerCase().includes(q)
-      const matchEmail = (t.requester?.email || '').toLowerCase().includes(q)
-      return matchId || matchSubject || matchRequester || matchEmail
-    })
-  }, [tickets, search])
+  }, [isComplaintsTab, ticketId])
 
   async function updateTicket(path, body, successMessage) {
     setIsSaving(true)
@@ -334,21 +290,18 @@ function AdminSupport({
     setNotice('')
     try {
       const result = await adminSupportRequest(`/admin/tickets/${encodeURIComponent(ticketId)}${path}`, {
-        method: path === '/status' || path === '/assignment' ? 'PATCH' : 'POST',
+        method: ['/status', '/assignment', '/priority'].includes(path) ? 'PATCH' : 'POST',
         body: JSON.stringify(body),
-      }, onLogout)
+      })
       setTicket((current) => ({ ...current, ...result.ticket, requester: current?.requester }))
       setNotice(successMessage)
       const [ticketResult, listResult] = await Promise.all([
-        adminSupportRequest(`/admin/tickets/${encodeURIComponent(ticketId)}`, {}, onLogout),
-        adminSupportRequest(`/admin/tickets${getTicketQuery(filters)}`, {}, onLogout),
+        adminSupportRequest(`/admin/tickets/${encodeURIComponent(ticketId)}`),
+        adminSupportRequest(`/admin/tickets${getTicketQuery(filters)}`),
       ])
       setTicket(ticketResult.ticket)
-      setTickets(listResult.tickets || [])
+      setTickets(listResult.tickets)
     } catch (requestError) {
-      if (requestError?.isSessionExpired) {
-        setIsSessionExpired(true)
-      }
       setError(requestError instanceof Error ? requestError.message : 'The ticket could not be updated.')
     } finally {
       setIsSaving(false)
@@ -360,21 +313,63 @@ function AdminSupport({
     setError('')
     setNotice('')
     try {
-      await adminComplaintRequest(`/admin/${encodeURIComponent(ticketId)}${path}`, {
+      const complaintId = activeRecord?._id || ticketId
+      const result = await adminComplaintRequest(`/admin/${encodeURIComponent(complaintId)}${path}`, {
         method: path === '/status' ? 'PATCH' : 'POST',
         body: JSON.stringify(body),
       })
-      const [detailResult, listResult] = await Promise.all([
-        adminComplaintRequest(`/admin/${encodeURIComponent(ticketId)}`),
-        adminComplaintRequest('/admin'),
-      ])
-      setComplaint(detailResult.complaint)
-      setComplaints(listResult.complaints)
-      setNotice(successMessage)
+      setComplaint(result.complaint)
+      if (result.emailSent === false) {
+        setError(result.message || 'The reply was saved, but its email could not be delivered.')
+      } else {
+        setNotice(successMessage)
+      }
+      try {
+        const listResult = await adminComplaintRequest('/admin')
+        setComplaints(listResult.complaints)
+      } catch {
+        setError(result.emailSent === false
+          ? `${result.message} The complaint list could not be refreshed.`
+          : 'The update was saved, but the complaint list could not be refreshed.')
+      }
+      return true
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'The complaint could not be updated.')
+      return false
     } finally {
       setIsSaving(false)
+    }
+  }
+
+  async function toggleComplaintStatus() {
+    if (!activeRecord || statusToggleLock.current) return
+    statusToggleLock.current = true
+    const previousComplaint = activeRecord
+    const nextStatus = displayComplaintStatus(activeRecord) === 'Solved' ? 'Unsolved' : 'Solved'
+    const changedAt = new Date().toISOString()
+    setComplaint((current) => current ? {
+      ...current,
+      status: nextStatus,
+      statusHistory: [
+        ...(current.statusHistory || []),
+        {
+          _id: `pending-${changedAt}`,
+          from: current.status,
+          to: nextStatus,
+          createdAt: changedAt,
+        },
+      ],
+    } : current)
+    try {
+      const label = activeRecord.source === 'Email Support' ? 'Email Support' : 'Complaint'
+      const saved = await updateComplaint(
+        '/status',
+        { status: nextStatus },
+        `${label} marked ${nextStatus.toLowerCase()}.`,
+      )
+      if (!saved) setComplaint(previousComplaint)
+    } finally {
+      statusToggleLock.current = false
     }
   }
 
@@ -382,7 +377,7 @@ function AdminSupport({
     try {
       const response = await fetch(
         `${API_BASE_URL}/support/admin/tickets/${encodeURIComponent(ticketId)}/attachment?id=${encodeURIComponent(ticket.attachment.id)}`,
-        { headers: { Authorization: `Bearer ${getToken(onLogout)}` } },
+        { headers: { Authorization: `Bearer ${getToken()}` } },
       )
       if (!response.ok) {
         const result = await response.json().catch(() => ({}))
@@ -399,17 +394,9 @@ function AdminSupport({
     }
   }
 
-  const resetFilters = () => {
-    setFilters({ status: '', category: '', priority: '' })
-    setSearch('')
-  }
-
   return (
     <div className={`admin-app admin-support${embedded ? ' admin-support--embedded' : ''}${isDark ? ' is-dark' : ''}${roleLabel === 'Main Admin' ? ' is-main-admin' : ''}${sidebarCollapsed ? ' admin-app--sidebar-collapsed' : ''}`} data-theme={isDark ? 'dark' : 'light'}>
-      {!embedded && sidebarOpen && <button className="admin-backdrop" type="button" aria-label="Close navigation" onClick={() => {
-        setSidebarOpen(false)
-        if (roleLabel === 'Main Admin') setSidebarCollapsed(true)
-      }} />}
+      {!embedded && sidebarOpen && <div className="admin-backdrop" aria-hidden="true" />}
       {!embedded && <aside className={`admin-sidebar${sidebarOpen ? ' admin-sidebar--open' : ''}`}>
         <Link className="admin-brand" to={dashboardPath} aria-label="AIHustle Admin Dashboard">
           <img className="admin-brand__image" src="/logo.png" alt="LMS logo" />
@@ -422,9 +409,6 @@ function AdminSupport({
                 className={`admin-nav__item${item.active ? ' is-active' : ''}`}
                 to={item.to || (item.tab ? `${supportPath}?tab=${item.tab}` : item.active ? supportPath : item.label === 'Settings' ? settingsPath : dashboardPath)}
                 aria-current={item.active ? 'page' : undefined}
-                onClick={() => {
-                  if (roleLabel !== 'Main Admin') setSidebarOpen(false)
-                }}
               >
                 <span className="admin-nav__icon" aria-hidden="true">{item.icon}</span>
                 <span>{item.label}</span>
@@ -436,20 +420,7 @@ function AdminSupport({
           <div className="admin-sidebar__help"><span>✦</span><strong>Need a hand?</strong><small>Help center and support</small></div>
         </div>
       </aside>}
-      <div
-        className={embedded ? 'admin-support__embedded-shell' : 'admin-main admin-support__main-shell'}
-        onClick={(event) => {
-          if (
-            !embedded &&
-            roleLabel === 'Main Admin' &&
-            !sidebarCollapsed &&
-            !event.target.closest('.admin-support__menu-toggle')
-          ) {
-            setSidebarOpen(false)
-            setSidebarCollapsed(true)
-          }
-        }}
-      >
+      <div className={embedded ? 'admin-support__embedded-shell' : 'admin-main admin-support__main-shell'}>
         {!embedded && <div className="admin-support__topbar-wrap">
           <button
             type="button"
@@ -468,25 +439,73 @@ function AdminSupport({
                 setSidebarCollapsed((collapsed) => !collapsed)
               }
             }}
-          >☰</button>
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+          </button>
+          {roleLabel === 'Main Admin' && (
+            <Link
+              className="admin-home-button admin-support__home-link"
+              to={dashboardPath}
+              aria-label="Go to home"
+              title="Home"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z" />
+              </svg>
+            </Link>
+          )}
           <WorkspaceTopbar
-            title="Support"
+            title={roleLabel === 'Main Admin' ? '' : 'Support'}
             name={user?.fullName}
             email={user?.email}
             roleLabel={roleLabel}
             dashboardPath={dashboardPath}
             helpPath={supportPath}
-            settingsPath={settingsPath}
             isDark={isDark}
             onToggleTheme={onToggleTheme}
             onLogout={onLogout}
           />
         </div>}
         <main className={`admin-support__main${embedded ? ' admin-support__main--embedded' : ''}`}>
-        {!embedded && <Link className="admin-back-dashboard admin-support__back-link admin-support__back-link--dashboard" to={dashboardPath}>
-          <span aria-hidden="true">←</span> Back to Dashboard
-        </Link>}
-        {embedded ? <section className="admin-page-heading admin-page-heading--compact">
+        {isMainAdminView && !ticketId ? (
+          <section className="admin-support__hero">
+            <div className="admin-support__hero-copy">
+              <p>COMMUNICATION &amp; SUPPORT</p>
+              <h1>{isComplaintsTab ? 'COMPLAINTS' : 'SUPPORT'}</h1>
+            </div>
+            <div className="admin-support__hero-art" aria-hidden="true">
+              <svg viewBox="0 0 180 140" focusable="false">
+                <circle cx="90" cy="65" r="53" fill="#e4eee5" />
+                <path d="M62 75V59a28 28 0 0 1 56 0v16" fill="none" stroke="#719183" strokeLinecap="round" strokeWidth="9" />
+                <rect x="51" y="69" width="78" height="46" rx="10" fill="#527b6e" />
+                <rect x="55" y="55" width="10" height="23" rx="5" fill="#d9b34d" />
+                <rect x="115" y="55" width="10" height="23" rx="5" fill="#d9b34d" />
+                <path d="M68 87h39M68 98h29" fill="none" stroke="#f8f3e8" strokeLinecap="round" strokeWidth="3" />
+                <path d="M120 77c0 13-9 20-20 22" fill="none" stroke="#d9b34d" strokeLinecap="round" strokeWidth="3" />
+                <circle cx="99" cy="100" r="5" fill="#d9b34d" />
+                <path d="M16 123h148" stroke="#b7c8b7" strokeLinecap="round" strokeWidth="3" />
+                <path d="m31 35 2.5 6.5L40 44l-6.5 2.5L31 53l-2.5-6.5L22 44l6.5-2.5z" fill="#86aa98" />
+                <circle cx="148" cy="31" r="3" fill="#d9b34d" />
+              </svg>
+            </div>
+            <button
+              className="admin-support__hero-switch"
+              type="button"
+              onClick={() => {
+                const nextTab = isComplaintsTab ? 'tickets' : 'complaints'
+                setActiveTab(nextTab)
+                setFilters({ status: '', category: '', priority: '' })
+                setTicketSearch('')
+                navigate(`${supportPath}?tab=${nextTab}`)
+              }}
+            >
+              <span aria-hidden="true">{isComplaintsTab ? '✉' : '▣'}</span>
+              {isComplaintsTab ? 'Support Tickets' : 'Complaints'}
+            </button>
+          </section>
+        ) : embedded ? <section className="admin-page-heading admin-page-heading--compact">
           <div>
             <p className="admin-eyebrow">COMMUNICATION &amp; SUPPORT</p>
             <h1>{ticketId
@@ -496,41 +515,14 @@ function AdminSupport({
               ? 'Review submitted complaints and respond to users.'
               : 'Review, organize and respond to submitted support requests.'}</p>
           </div>
-          {!ticketId && (
-            <div className="admin-page-heading__actions">
-              <button
-                className="admin-button admin-button--primary admin-support__switch-button"
-                type="button"
-                onClick={() => {
-                  const nextTab = isComplaintsTab ? 'tickets' : 'complaints'
-                  setActiveTab(nextTab)
-                  setFilters({ status: '', category: '', priority: '' })
-                  setTicketSearch('')
-                  navigate(`${supportPath}?tab=${nextTab}`)
-                }}
-              >
-                <span aria-hidden="true">{isComplaintsTab ? '✉' : '▣'}</span>
-                {isComplaintsTab ? 'Support Tickets' : 'Complaints'}
-              </button>
-            </div>
-          )}
         </section> : <div className="admin-support__heading">
           <div>
             <span className="student-eyebrow">SUPPORT MANAGEMENT</span>
             <h1>{ticketId ? isComplaintsTab ? 'Review Complaint' : 'Review Support Request' : isComplaintsTab ? 'Complaints' : 'Support Tickets'}</h1>
           </div>
-          {ticketId && (
-            <button
-              className="student-button student-button--quiet"
-              type="button"
-              onClick={() => navigate(supportPath)}
-            >
-              ← Back to all tickets
-            </button>
-          )}
         </div>}
 
-        <div className="admin-support__content-card">
+        <div className={`admin-support__content-card${isMainAdminView && !ticketId ? ' admin-support__content-card--list' : ''}`}>
         {ticketId && (
           <Link
             className="admin-support__back-link admin-support__back-link--tickets"
@@ -539,461 +531,239 @@ function AdminSupport({
             <span aria-hidden="true">←</span> Back to {isComplaintsTab ? 'Complaints' : 'Support Tickets'}
           </Link>
         )}
-
-        {isSessionExpired ? (
-          <div className="support-notice is-warning" role="alert">
-            <div className="support-session-alert">
-              <span>Your session has expired. Please sign in again to access the support desk.</span>
-              <Link to="/login" className="student-button" style={{ padding: '6px 14px', fontSize: '12px' }}>
-                Sign In Again
-              </Link>
-            </div>
-          </div>
-        ) : null}
-
-        {error && !isSessionExpired && <div className="support-notice is-error" role="alert">{error}</div>}
+        {error && <div className="support-notice is-error" role="alert">{error}</div>}
         {notice && <div className="support-notice is-success" role="status">{notice}</div>}
 
         {ticketId ? (
-          loading ? (
-            <div className="support-loading-container" role="status">
-              <div className="support-loading-spinner" />
-              <p className="support-loading">Loading {isComplaintsTab ? 'complaint' : 'support request'}…</p>
-            </div>
-          ) : activeRecord ? (
+          loading ? <p className="support-loading" role="status">Loading {isComplaintsTab ? 'complaint' : 'ticket'}…</p> : activeRecord ? (
             <section className="student-panel admin-support__detail">
-              <div className="admin-support__ticket-title">
-                <div>
-                  <div className="admin-support__badges-row">
-                    <span className="support-ticket-id-badge">
-                      {isComplaintsTab ? activeRecord.complaintId : activeRecord.ticketId}
-                    </span>
-                    <span className="support-ticket-category-tag">{activeRecord.category}</span>
-                    {!isComplaintsTab && (
-                      <span className={`support-priority-tag is-${activeRecord.priority?.toLowerCase() || 'medium'}`}>
-                        {activeRecord.priority || 'Medium'}
-                      </span>
-                    )}
-                  </div>
-                  <h2>{activeRecord.subject}</h2>
-                </div>
-                <span className={`support-status is-${displayedStatus(activeRecord.status).toLowerCase().replaceAll(' ', '-')}`}>
-                  {displayedStatus(activeRecord.status)}
-                </span>
-              </div>
-
-              {/* Requester Info Card */}
-              <div className="admin-support__requester">
-                <div>
-                  <strong>Requester:</strong> {activeRecord.requester?.fullName || 'Student'} ({activeRecord.requester?.email || 'No email'})
-                </div>
-                <div>
-                  <strong>Student ID:</strong> {activeRecord.requester?.studentId || activeRecord.requester?.id || activeRecord.userId || 'N/A'}
-                </div>
-                <div>
-                  <strong>Account Type:</strong> {activeRecord.userCollection === 'clg_students' || activeRecord.accountType === 'college' ? 'College Student' : 'Independent Student'}
-                </div>
-                {!isComplaintsTab && (
-                  <div>
-                    <strong>Priority:</strong> {activeRecord.priority || 'Medium'}
-                  </div>
-                )}
-                <div>
-                  <strong>Submitted:</strong> {new Date(activeRecord.createdAt).toLocaleString()}
-                </div>
-                {activeRecord.resolvedAt && (
-                  <div>
-                    <strong>Resolved:</strong> {new Date(activeRecord.resolvedAt).toLocaleString()}
-                  </div>
-                )}
-              </div>
-
-              {/* Quick Status Action Controls */}
-              {!isComplaintsTab && (
-                <div className="admin-support__quick-actions-bar">
-                  <span className="admin-support__quick-actions-label">Quick Actions:</span>
-                  {activeRecord.status !== 'In Progress' && activeRecord.status !== 'Resolved' && activeRecord.status !== 'Closed' && (
-                    <button
-                      type="button"
-                      className="admin-support__quick-btn is-teal"
-                      disabled={isSaving}
-                      onClick={() => updateTicket('/status', { status: 'In Progress' }, 'Status updated to In Progress.')}
-                    >
-                      Mark In Progress
-                    </button>
-                  )}
-                  {activeRecord.status !== 'Waiting for Student' && activeRecord.status !== 'Waiting for User' && activeRecord.status !== 'Resolved' && activeRecord.status !== 'Closed' && (
-                    <button
-                      type="button"
-                      className="admin-support__quick-btn is-amber"
-                      disabled={isSaving}
-                      onClick={() => updateTicket('/status', { status: 'Waiting for Student' }, 'Status updated to Waiting for Student.')}
-                    >
-                      Waiting for Student
-                    </button>
-                  )}
-                  {activeRecord.status !== 'Resolved' && (
-                    <button
-                      type="button"
-                      className="admin-support__quick-btn is-green"
-                      disabled={isSaving}
-                      onClick={() => updateTicket('/status', { status: 'Resolved' }, 'Ticket resolved successfully.')}
-                    >
-                      Mark as Resolved
-                    </button>
-                  )}
-                  {activeRecord.status !== 'Closed' && (
-                    <button
-                      type="button"
-                      className="admin-support__quick-btn is-slate"
-                      disabled={isSaving}
-                      onClick={() => updateTicket('/status', { status: 'Closed' }, 'Ticket closed.')}
-                    >
-                      Close Ticket
-                    </button>
-                  )}
-                  {(activeRecord.status === 'Resolved' || activeRecord.status === 'Closed') && (
-                    <button
-                      type="button"
-                      className="admin-support__quick-btn is-teal"
-                      disabled={isSaving}
-                      onClick={() => updateTicket('/status', { status: 'In Progress' }, 'Ticket reopened in progress.')}
-                    >
-                      Reopen Ticket
-                    </button>
-                  )}
-                </div>
-              )}
-
-              {/* Request Details */}
-              <section className="support-ticket-description">
-                <h3>{isComplaintsTab ? 'Complaint details' : 'Original Request'}</h3>
-                <p>{activeRecord.description}</p>
-                {!isComplaintsTab && activeRecord.attachment && (
-                  <button className="support-text-button" type="button" onClick={downloadAttachment}>
-                    Download Attachment: {activeRecord.attachment.fileName}
-                  </button>
-                )}
-              </section>
-
-              {/* Management Controls */}
               {isComplaintsTab ? (
-                <div className="admin-support__complaint-actions">
+                <>
+                  <div className="admin-support__ticket-title">
+                    <div>
+                      <small>{isEmailSupportRecord ? 'Email Support request' : `Complaint ${activeRecord.complaintId}`}</small>
+                      <h2>{isEmailSupportRecord && <span className="admin-support__email-subject-label">Subject: </span>}{activeRecord.subject}</h2>
+                    </div>
+                    <span className={`support-status is-${displayComplaintStatus(activeRecord).toLowerCase().replaceAll(' ', '-')}`}>
+                      {displayComplaintStatus(activeRecord)}
+                    </span>
+                  </div>
+                  {isEmailSupportRecord ? (
+                    <dl className="admin-support__ticket-metadata admin-support__email-metadata">
+                      <div><dt>Email Support No.</dt><dd>{activeRecord.complaintId}</dd></div>
+                      <div>
+                        <dt>From</dt>
+                        <dd>{activeRecord.requester?.fullName || 'Student'} &lt;{activeRecord.requester?.email || 'Email unavailable'}&gt;</dd>
+                      </div>
+                      <div><dt>Student ID</dt><dd>{activeRecord.requester?.studentId || activeRecord.requester?.id || activeRecord.userId}</dd></div>
+                      <div><dt>Submitted</dt><dd>{formatTicketDate(activeRecord.createdAt)}</dd></div>
+                    </dl>
+                  ) : (
+                    <div className="admin-support__requester">
+                      <span>Student: {activeRecord.requester?.fullName || 'Student'} · {activeRecord.requester?.email || 'Email unavailable'}</span>
+                      <span>Student ID: {activeRecord.requester?.studentId || activeRecord.requester?.id || activeRecord.userId}</span>
+                      <span>Account: {activeRecord.userCollection === 'clg_students' || activeRecord.accountType === 'college' ? 'College student' : 'Independent student'}</span>
+                      <span>Submitted: {new Date(activeRecord.createdAt).toLocaleString()}</span>
+                    </div>
+                  )}
+                  <section className={`support-ticket-description${isEmailSupportRecord ? ' admin-support__email-body' : ''}`}>
+                    <h3>{isEmailSupportRecord ? 'Body' : 'Complaint details'}</h3><p>{activeRecord.description}</p>
+                  </section>
+                </>
+              ) : (
+                <>
+                  <div className="admin-support__ticket-title">
+                    <div><small>Support ticket</small><h2>{displayTicketValue(activeRecord.subject)}</h2></div>
+                  </div>
+                  <dl className="admin-support__ticket-metadata">
+                    <div>
+                      <dt>Ticket Number</dt>
+                      <dd>{displayTicketValue(activeRecord.ticketId)}</dd>
+                    </div>
+                    <div>
+                      <dt>Status</dt>
+                      <dd><span className={`support-status is-${activeTicketStatus.toLowerCase().replaceAll(' ', '-')}`}>{activeTicketStatus}</span></dd>
+                    </div>
+                    <div>
+                      <dt>Priority</dt>
+                      <dd>{displayTicketValue(activeRecord.priority)}</dd>
+                    </div>
+                    <div className="admin-support__ticket-metadata-reason">
+                      <dt>Reason</dt>
+                      <dd>
+                        <strong>{displayTicketValue(activeRecord.category)}</strong>
+                        <p>{displayTicketValue(activeRecord.description)}</p>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Generated By</dt>
+                      <dd className="admin-support__ticket-requester">
+                        <strong>{displayTicketValue(activeRecord.requester?.fullName)}</strong>
+                        <span>{displayTicketValue(activeRecord.requester?.email)}</span>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Date</dt>
+                      <dd>{formatTicketDate(activeRecord.createdAt)}</dd>
+                    </div>
+                  </dl>
+                  {activeRecord.attachment && (
+                    <div className="admin-support__attachment">
+                      <span className="admin-support__attachment-type" aria-hidden="true">
+                        {activeRecord.attachment.contentType === 'application/pdf' ? 'PDF' : 'FILE'}
+                      </span>
+                      <div className="admin-support__attachment-info">
+                        <strong>Attached document</strong>
+                        <span>{displayTicketValue(activeRecord.attachment.fileName)}</span>
+                      </div>
+                      <button className="support-text-button" type="button" onClick={downloadAttachment}>
+                        Download
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
+              {isComplaintsTab ? (
+                isEmailSupportRecord ? null : (
+                  <div className="admin-support__completion-actions">
+                    <button
+                      className="student-button admin-support__complaint-action"
+                      type="button"
+                      disabled={isSaving}
+                      onClick={toggleComplaintStatus}
+                    >
+                      {activeRecord.status === 'Solved' ? 'Unsolved' : 'Solved'}
+                    </button>
+                  </div>
+                )
+              ) : isMainAdminView ? (
+                <div className="admin-support__completion-actions">
                   <button
                     className="student-button"
                     type="button"
-                    disabled={isSaving}
-                    onClick={() => updateComplaint(
-                      '/status',
-                      { status: activeRecord.status === 'Solved' ? 'Unsolved' : 'Solved' },
-                      activeRecord.status === 'Solved' ? 'Complaint reopened.' : 'Complaint resolved.',
-                    )}
+                    disabled={isSaving || ['Resolved', 'Closed'].includes(activeRecord.status)}
+                    onClick={() => updateTicket('/status', { status: 'Resolved' }, 'Ticket marked completed.')}
                   >
-                    {activeRecord.status === 'Solved' ? 'Mark Unsolved' : 'Mark Solved'}
+                    {['Resolved', 'Closed'].includes(activeRecord.status) ? 'Completed' : 'Mark Completed'}
                   </button>
                 </div>
               ) : (
                 <div className="admin-support__controls">
-                  <label>
-                    Change Status
-                    <select
-                      value={activeRecord.status}
-                      disabled={isSaving}
-                      onChange={(event) =>
-                        updateTicket('/status', { status: event.currentTarget.value }, 'Ticket status updated.')
-                      }
-                    >
-                      {(isMainAdminView ? mainAdminStatuses : statuses).map((status) => (
-                        <option key={status} value={status}>
-                          {status}
-                        </option>
-                      ))}
+                  <label>Status
+                    <select value={displayedStatus(activeRecord.status)} disabled={isSaving} onChange={(event) => updateTicket('/status', { status: event.currentTarget.value }, 'Ticket status updated.')}>
+                      {mainAdminStatuses.map((status) => <option key={status}>{status}</option>)}
                     </select>
                   </label>
-                  <label>
-                    Priority
-                    <select
-                      value={activeRecord.priority || 'Medium'}
-                      disabled={isSaving}
-                      onChange={(event) =>
-                        updateTicket('/priority', { priority: event.currentTarget.value }, 'Ticket priority updated.')
-                      }
-                    >
-                      {priorities.map((priority) => (
-                        <option key={priority} value={priority}>
-                          {priority}
-                        </option>
-                      ))}
+                  <label>Priority
+                    <select value={activeRecord.priority} disabled={isSaving} onChange={(event) => updateTicket('/priority', { priority: event.currentTarget.value }, 'Ticket priority updated.')}>
+                      {priorities.map((priority) => <option key={priority}>{priority}</option>)}
                     </select>
                   </label>
-                  <label>
-                    Assigned Support Handler
-                    <select
-                      value={activeRecord.assignedTo || ''}
-                      disabled={isSaving}
-                      onChange={(event) =>
-                        updateTicket(
-                          '/assignment',
-                          { assignedTo: event.currentTarget.value || null },
-                          'Ticket assignment updated.',
-                        )
-                      }
-                    >
+                  <label>Assigned support handler
+                    <select value={activeRecord.assignedTo || ''} disabled={isSaving} onChange={(event) => updateTicket('/assignment', { assignedTo: event.currentTarget.value || null }, 'Ticket assignment updated.')}>
                       <option value="">Unassigned</option>
-                      {handlers.map((handler) => (
-                        <option key={handler.id} value={handler.id}>
-                          {handler.fullName} · {handler.email}
-                        </option>
-                      ))}
+                      {handlers.map((handler) => <option key={handler.id} value={handler.id}>{handler.fullName} · {handler.email}</option>)}
                     </select>
                   </label>
                 </div>
               )}
-
-              {/* Conversation History */}
-              <section className="support-conversation">
-                <h3>Conversation History</h3>
-                {(activeRecord.messages || activeRecord.replies)?.length ? (
-                  <div className="support-messages-stream">
-                    {(activeRecord.messages || activeRecord.replies).map((item) => {
-                      const isAdmin = item.authorRole === 'admin' || item.authorRole === 'main_admin'
-                      return (
-                        <article className={`support-message is-${item.authorRole}`} key={item._id}>
-                          <div className="support-message__header">
-                            <span className={`support-author-pill is-${item.authorRole}`}>
-                              {isAdmin ? (isComplaintsTab ? 'Main Admin' : 'Support Team (Admin)') : (activeRecord.requester?.fullName || 'Student')}
-                            </span>
-                            <time className="support-message__time">
-                              {new Date(item.createdAt).toLocaleString()}
-                            </time>
-                          </div>
-                          <p className="support-message__body">{item.message}</p>
-                        </article>
-                      )
-                    })}
-                  </div>
-                ) : (
-                  <p className="support-muted">No replies yet.</p>
-                )}
-              </section>
-
-              {/* Status History */}
-              <section className="support-status-history">
-                <h3>Status History</h3>
-                {activeRecord.statusHistory?.length ? (
-                  <ol className="support-status-timeline">
-                    {activeRecord.statusHistory.map((entry, index) => (
-                      <li key={entry._id || index}>
-                        <span>
-                          {entry.from ? `${displayedStatus(entry.from)} → ` : 'Created as '}
-                          <strong>{displayedStatus(entry.to)}</strong>
-                          {entry.changedByRole ? ` by ${entry.changedByRole === 'admin' ? 'Support Team' : 'Student'}` : ''}
-                        </span>
-                        <time>{new Date(entry.createdAt).toLocaleString()}</time>
-                      </li>
+              {(!isMainAdminView || isComplaintsTab) && !isEmailSupportRecord && (
+                <section className="support-conversation">
+                  <h3>Conversation</h3>
+                  {activeRecord.replies?.length ? activeRecord.replies.map((item) => (
+                    <article className={`support-message is-${item.authorRole}`} key={item._id}>
+                      <div><strong>{item.authorRole === 'admin' || item.authorRole === 'main_admin' ? isComplaintsTab ? 'Main Admin' : 'Support team' : activeRecord.requester?.fullName || 'Student'}</strong><time>{new Date(item.createdAt).toLocaleString()}</time></div>
+                      <p>{item.message}</p>
+                    </article>
+                  )) : <p className="support-muted">No replies yet.</p>}
+                </section>
+              )}
+              {!isEmailSupportRecord && (
+                <section className="support-status-history">
+                  <h3>Status history</h3>
+                  <ol>
+                    <li><span>Generated</span><time>{formatTicketDate(activeRecord.createdAt)}</time></li>
+                    {activeRecord.statusHistory?.filter((entry) => entry.from).map((entry) => (
+                      <li key={entry._id}><span>{displayedStatus(entry.to)}</span><time>{formatTicketDate(entry.createdAt)}</time></li>
                     ))}
                   </ol>
-                ) : (
-                  <p className="support-muted">No status transitions recorded.</p>
-                )}
-              </section>
-
-              {!isComplaintsTab && activeRecord.priorityHistory?.length > 0 && (
+                </section>
+              )}
+              {!isMainAdminView && !isComplaintsTab && activeRecord.priorityHistory?.length > 0 && (
                 <section className="support-status-history">
                   <h3>Priority history</h3>
-                  <ol className="support-status-timeline">
-                    {activeRecord.priorityHistory.map((entry) => (
+                  <ol>{activeRecord.priorityHistory.map((entry) => (
+                    <li key={entry._id}><span>{entry.from ? `${entry.from} → ` : ''}{entry.to}</span><time>{new Date(entry.createdAt).toLocaleString()}</time></li>
+                  ))}</ol>
+                </section>
+              )}
+              {(!isMainAdminView || isComplaintsTab) && (isComplaintsTab || !['Resolved', 'Closed'].includes(activeRecord.status)) && (
+                <form className="support-form support-reply-form" onSubmit={(event) => {
+                  event.preventDefault()
+                  if (isComplaintsTab) {
+                    updateComplaint('/replies', { message: reply }, 'Reply sent.')
+                      .then((saved) => { if (saved) setReply('') })
+                  } else {
+                    updateTicket('/replies', { message: reply }, 'Reply sent.')
+                    setReply('')
+                  }
+                }}>
+                  <label>Reply to student<textarea value={reply} onChange={(event) => setReply(event.currentTarget.value)} required maxLength={5000} rows={4} /></label>
+                  <button
+                    className={isComplaintsTab ? 'student-button admin-support__complaint-action' : 'student-button'}
+                    type="submit"
+                    disabled={isSaving}
+                  >
+                    {isSaving ? 'Sending…' : 'Send Reply'}
+                  </button>
+                </form>
+              )}
+              {isEmailSupportRecord && (
+                <section className="support-status-history">
+                  <h3>Status history</h3>
+                  <ol>
+                    <li><span>Generated · Unsolved</span><time>{formatTicketDate(activeRecord.createdAt)}</time></li>
+                    {activeRecord.statusHistory?.filter((entry) => entry.from).map((entry) => (
                       <li key={entry._id}>
-                        <span>{entry.from ? `${entry.from} → ` : ''}{entry.to}</span>
-                        <time>{new Date(entry.createdAt).toLocaleString()}</time>
+                        <span>{displayComplaintStatus(activeRecord, entry.to)}</span>
+                        <time>{formatTicketDate(entry.createdAt)}</time>
                       </li>
                     ))}
                   </ol>
                 </section>
               )}
-
-              {/* Reply Form */}
-              {(isComplaintsTab || !['Resolved', 'Closed'].includes(activeRecord.status)) && (
-                <form
-                  className="support-form support-reply-form"
-                  onSubmit={(event) => {
-                    event.preventDefault()
-                    if (!reply.trim()) return
-                    if (isComplaintsTab) {
-                      updateComplaint('/replies', { message: reply }, 'Reply sent to complainant.')
-                    } else {
-                      updateTicket('/messages', { message: reply }, 'Reply sent to student.')
-                    }
-                    setReply('')
-                  }}
-                >
-                  <label>
-                    Reply to {isComplaintsTab ? 'complainant' : 'student'}
-                    <textarea
-                      value={reply}
-                      onChange={(event) => setReply(event.currentTarget.value)}
-                      required
-                      minLength={1}
-                      maxLength={5000}
-                      rows={4}
-                      placeholder={isComplaintsTab ? 'Type your response to the complainant...' : 'Type your response to the student...'}
-                    />
-                  </label>
-                  <button className="student-button" type="submit" disabled={isSaving || !reply.trim()}>
-                    {isSaving ? 'Sending…' : 'Send reply'}
+              {isEmailSupportRecord && (
+                <div className="admin-support__completion-actions">
+                  <button
+                    className="student-button admin-support__complaint-action"
+                    type="button"
+                    disabled={isSaving}
+                    onClick={toggleComplaintStatus}
+                  >
+                    {displayComplaintStatus(activeRecord) === 'Solved' ? 'Unsolved' : 'Solved'}
                   </button>
-                </form>
+                </div>
               )}
             </section>
           ) : null
         ) : (
           <>
-            {!isComplaintsTab && (
-              <div className="support-stats-grid" role="region" aria-label="Support statistics">
-                <button
-                  type="button"
-                  className={`support-stat-card tone-gold${filters.status === '' ? ' is-selected' : ''}`}
-                  onClick={() => setFilters((prev) => ({ ...prev, status: '' }))}
-                >
-                  <div className="support-stat-card__icon">
-                    <span style={{ fontSize: '20px' }}>✉</span>
-                  </div>
-                  <div className="support-stat-card__body">
-                    <span className="support-stat-card__count">{stats.total}</span>
-                    <span className="support-stat-card__label">Total Tickets</span>
-                  </div>
-                </button>
-
-                <button
-                  type="button"
-                  className={`support-stat-card tone-peach${filters.status === 'Open' ? ' is-selected' : ''}`}
-                  onClick={() => setFilters((prev) => ({ ...prev, status: 'Open' }))}
-                >
-                  <div className="support-stat-card__icon">
-                    <span style={{ fontSize: '20px' }}>⏱</span>
-                  </div>
-                  <div className="support-stat-card__body">
-                    <span className="support-stat-card__count">{stats.open}</span>
-                    <span className="support-stat-card__label">Open Tickets</span>
-                  </div>
-                </button>
-
-                <button
-                  type="button"
-                  className={`support-stat-card tone-teal${filters.status === 'In Progress' ? ' is-selected' : ''}`}
-                  onClick={() => setFilters((prev) => ({ ...prev, status: 'In Progress' }))}
-                >
-                  <div className="support-stat-card__icon">
-                    <span style={{ fontSize: '20px' }}>⚡</span>
-                  </div>
-                  <div className="support-stat-card__body">
-                    <span className="support-stat-card__count">{stats.inProgress}</span>
-                    <span className="support-stat-card__label">In Progress</span>
-                  </div>
-                </button>
-
-                <button
-                  type="button"
-                  className={`support-stat-card tone-gold${filters.status === 'Waiting for Student' ? ' is-selected' : ''}`}
-                  onClick={() => setFilters((prev) => ({ ...prev, status: 'Waiting for Student' }))}
-                >
-                  <div className="support-stat-card__icon">
-                    <span style={{ fontSize: '20px' }}>⏳</span>
-                  </div>
-                  <div className="support-stat-card__body">
-                    <span className="support-stat-card__count">{stats.waiting}</span>
-                    <span className="support-stat-card__label">Waiting for Student</span>
-                  </div>
-                </button>
-
-                <button
-                  type="button"
-                  className={`support-stat-card tone-mint${filters.status === 'Resolved' ? ' is-selected' : ''}`}
-                  onClick={() => setFilters((prev) => ({ ...prev, status: 'Resolved' }))}
-                >
-                  <div className="support-stat-card__icon">
-                    <span style={{ fontSize: '20px' }}>✓</span>
-                  </div>
-                  <div className="support-stat-card__body">
-                    <span className="support-stat-card__count">{stats.resolved}</span>
-                    <span className="support-stat-card__label">Resolved / Closed</span>
-                  </div>
-                </button>
-              </div>
-            )}
-
             <div className="admin-support__filters">
-              <label className="admin-support__search">
-                Search {isComplaintsTab ? 'complaints' : 'tickets'}
-                <input
-                  type="search"
-                  value={ticketSearch}
-                  onChange={(event) => setTicketSearch(event.currentTarget.value)}
-                  placeholder="ID, subject, requester or category"
-                />
-              </label>
+              <label className="admin-support__search">Search {isComplaintsTab ? 'complaints' : 'tickets'}<input type="search" value={ticketSearch} onChange={(event) => setTicketSearch(event.currentTarget.value)} placeholder="ID, subject, requester or category" /></label>
               {isComplaintsTab ? (
-                <label>
-                  Filter
-                  <select value={complaintFilter} onChange={(event) => setComplaintFilter(event.currentTarget.value)}>
-                    <option value="all">All Complaints</option>
-                    <option value="unsolved">Unsolved</option>
-                    <option value="solved">Solved</option>
-                  </select>
-                </label>
+                <label>Filter<select value={complaintFilter} onChange={(event) => setComplaintFilter(event.currentTarget.value)}>
+                  <option value="all">All Complaints</option>
+                  {complaintStatuses.map((status) => <option key={status} value={status}>{status}</option>)}
+                </select></label>
               ) : (
                 <>
-                  <label>
-                    Status
-                    <select
-                      value={filters.status}
-                      onChange={(event) => setFilters((current) => ({ ...current, status: event.currentTarget.value }))}
-                    >
-                      <option value="">All statuses</option>
-                      {(isMainAdminView ? mainAdminStatuses : statuses).map((status) => (
-                        <option key={status}>{status}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    Category
-                    <select
-                      value={filters.category}
-                      onChange={(event) => setFilters((current) => ({ ...current, category: event.currentTarget.value }))}
-                    >
-                      <option value="">All categories</option>
-                      {categories.map((category) => (
-                        <option key={category}>{category}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    Priority
-                    <select
-                      value={filters.priority}
-                      onChange={(event) => setFilters((current) => ({ ...current, priority: event.currentTarget.value }))}
-                    >
-                      <option value="">All priorities</option>
-                      {priorities.map((priority) => (
-                        <option key={priority}>{priority}</option>
-                      ))}
-                    </select>
-                  </label>
-                  {(filters.status || filters.category || filters.priority || search) && (
-                    <button type="button" className="student-button student-button--secondary" onClick={resetFilters} style={{ alignSelf: 'flex-end', height: '42px' }}>
-                      Reset filters
-                    </button>
-                  )}
+                  <label>Status<select value={filters.status} onChange={(event) => setFilters((current) => ({ ...current, status: event.currentTarget.value }))}><option value="">All statuses</option>{(isMainAdminView ? mainAdminStatuses : statuses).map((status) => <option key={status}>{status}</option>)}</select></label>
+                  <label>Category<select value={filters.category} onChange={(event) => setFilters((current) => ({ ...current, category: event.currentTarget.value }))}><option value="">All categories</option>{categories.map((category) => <option key={category}>{category}</option>)}</select></label>
+                  <label>Priority<select value={filters.priority} onChange={(event) => setFilters((current) => ({ ...current, priority: event.currentTarget.value }))}><option value="">All priorities</option>{priorities.map((priority) => <option key={priority}>{priority}</option>)}</select></label>
                 </>
               )}
             </div>
-
-            {loading ? (
-              <div className="support-loading-container" role="status">
-                <div className="support-loading-spinner" />
-                <p className="support-loading">Loading {isComplaintsTab ? 'complaints' : 'support tickets'}…</p>
-              </div>
-            ) : visibleRecords.length ? (
+            {loading ? <p className="support-loading" role="status">Loading {isComplaintsTab ? 'complaints' : 'support tickets'}…</p> : visibleRecords.length ? (
               isMainAdminView ? (
                 <div className="admin-support__table-wrap">
                   <table className="admin-support__table">
@@ -1001,11 +771,7 @@ function AdminSupport({
                       <tr>
                         <th>{isComplaintsTab ? 'Complaint ID' : 'Ticket ID'}</th>
                         <th>Subject</th>
-                        <th>Submitted By</th>
-                        <th>Student ID</th>
-                        <th>Email</th>
-                        <th>Category</th>
-                        {!isComplaintsTab && <th>Priority</th>}
+                        <th>Student</th>
                         <th>Date</th>
                         <th>Status</th>
                         <th>Action</th>
@@ -1017,22 +783,25 @@ function AdminSupport({
                         const detailId = isComplaintsTab ? item._id : item.ticketId
                         const detailTab = isMainAdminView ? `?tab=${isComplaintsTab ? 'complaints' : 'tickets'}` : ''
                         const detailPath = `${supportPath}/${encodeURIComponent(detailId)}${detailTab}`
-                        const status = isComplaintsTab ? item.status : displayedStatus(item.status)
+                        const status = displayTicketValue(isComplaintsTab
+                          ? displayComplaintStatus(item)
+                          : displayedStatus(item.status))
                         return (
-                          <tr key={detailId}>
-                            <td><Link to={detailPath}>{displayId}</Link></td>
-                            <td><Link to={detailPath}>{item.subject}</Link></td>
-                            <td>{item.requester?.fullName || 'Student'}</td>
-                            <td>{item.requester?.studentId || item.requester?.id || item.userId}</td>
-                            <td>{item.requester?.email || 'Email unavailable'}</td>
-                            <td>{item.category}</td>
-                            {!isComplaintsTab && <td>{item.priority}</td>}
-                            <td>{new Date(item.createdAt).toLocaleDateString()}</td>
-                            <td><span className={`support-status is-${status.toLowerCase().replaceAll(' ', '-')}`}>{status}</span></td>
-                            <td><Link to={detailPath}>View Details</Link></td>
-                          </tr>
-                        )
-                      })}
+                        <tr key={detailId}>
+                          <td><Link className="admin-support__record-link" to={detailPath}>{displayTicketValue(displayId)}</Link></td>
+                          <td>
+                            <Link className="admin-support__record-link" to={detailPath}>{displayTicketValue(item.subject)}</Link>
+                            {isComplaintsTab && <span className="support-status">{item.source === 'Email Support' ? 'Email Support' : 'Complaint'}</span>}
+                          </td>
+                          <td>
+                            <strong>{displayTicketValue(item.requester?.fullName)}</strong>
+                            <small>{displayTicketValue(item.requester?.email)}</small>
+                          </td>
+                          <td>{formatTicketListDate(item.createdAt)}</td>
+                          <td><span className={`support-status is-${status.toLowerCase().replaceAll(' ', '-')}`}>{status}</span></td>
+                          <td><Link className="admin-support__record-link" to={detailPath}>View Details</Link></td>
+                        </tr>
+                      )})}
                     </tbody>
                   </table>
                 </div>
@@ -1052,25 +821,11 @@ function AdminSupport({
                   ))}
                 </div>
               )
-            ) : !error ? (
-              <div className="support-empty-state">
-                <h3>
-                  {ticketSearch
-                    ? `No matching ${isComplaintsTab ? 'complaints' : 'support tickets'}`
-                    : `No ${isComplaintsTab ? 'complaints' : 'support tickets'} found`}
-                </h3>
-                <p>
-                  {ticketSearch
-                    ? 'Try another search or adjust the filters.'
-                    : `${isComplaintsTab ? 'Complaints' : 'Tickets'} matching these filters will appear here.`}
-                </p>
-                {(filters.status || filters.category || filters.priority || search) && (
-                  <button type="button" className="student-button student-button--secondary" onClick={resetFilters} style={{ marginTop: '12px' }}>
-                    Reset all filters
-                  </button>
-                )}
-              </div>
-            ) : null}
+            ) : !error ? <div className="support-empty-state"><h3>{ticketSearch
+              ? `No matching ${isComplaintsTab ? 'complaints' : 'support tickets'}`
+              : `No ${isComplaintsTab ? 'complaints' : 'support tickets'} found`}</h3><p>{ticketSearch
+              ? 'Try another search or adjust the filters.'
+              : `${isComplaintsTab ? 'Complaints' : 'Tickets'} matching these filters will appear here.`}</p></div> : null}
           </>
         )}
         </div>

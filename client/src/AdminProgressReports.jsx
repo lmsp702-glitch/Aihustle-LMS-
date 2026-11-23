@@ -177,80 +177,7 @@ function CourseCertificateCard({ certificate, onView, onDownload }) {
   )
 }
 
-function SubmissionEvaluationForm({ submission, saving, onSave }) {
-  const [error, setError] = useState('')
-
-  async function handleSubmit(event) {
-    event.preventDefault()
-    setError('')
-    const formData = new FormData(event.currentTarget)
-    const marksObtained = Number(formData.get('marksObtained'))
-    const maximumMarks = Number(submission.maximumMarks)
-    if (!Number.isFinite(maximumMarks) || maximumMarks < 0) {
-      setError('A valid maximum mark is not available for this submission.')
-      return
-    }
-    if (!Number.isFinite(marksObtained) || marksObtained < 0 || marksObtained > maximumMarks) {
-      setError(`Enter marks from 0 to ${maximumMarks}.`)
-      return
-    }
-    try {
-      await onSave(submission, {
-        marksObtained,
-        feedback: String(formData.get('feedback') || ''),
-        correctness: String(formData.get('correctness') || ''),
-        evaluationStatus: String(formData.get('evaluationStatus') || 'evaluated'),
-      })
-    } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : 'The evaluation could not be saved.')
-    }
-  }
-
-  return (
-    <form className="admin-progress-evaluation-form" onSubmit={handleSubmit}>
-      <h5>{submission.evaluationHistory?.length ? 'Update evaluation' : 'Evaluate submission'}</h5>
-      {submission.maximumMarks !== null && submission.maximumMarks !== undefined ? (
-        <label>
-          Marks obtained (maximum {submission.maximumMarks})
-          <input
-            type="number"
-            name="marksObtained"
-            min="0"
-            max={submission.maximumMarks}
-            step="any"
-            required
-            defaultValue={submission.marksObtained ?? ''}
-          />
-        </label>
-      ) : <p className="admin-progress-empty">Evaluation is unavailable because the maximum marks are not configured.</p>}
-      <label>
-        Correction result
-        <select name="correctness" defaultValue={submission.correctness || 'partially_correct'}>
-          <option value="correct">Correct</option>
-          <option value="partially_correct">Partially Correct</option>
-          <option value="incorrect">Incorrect</option>
-        </select>
-      </label>
-      <label>
-        Evaluation status
-        <select name="evaluationStatus" defaultValue={submission.evaluationStatus === 're_evaluation_required' ? 're_evaluation_required' : 'evaluated'}>
-          <option value="evaluated">Evaluated</option>
-          <option value="re_evaluation_required">Re-evaluation Required</option>
-        </select>
-      </label>
-      <label>
-        Correction comments and feedback
-        <textarea name="feedback" rows="3" maxLength="5000" defaultValue={submission.feedback || ''} />
-      </label>
-      {error && <p className="admin-progress-error" role="alert">{error}</p>}
-      <button type="submit" className="admin-button admin-button--primary" disabled={saving || submission.maximumMarks == null}>
-        {saving ? 'Saving…' : 'Save evaluation'}
-      </button>
-    </form>
-  )
-}
-
-function AssignmentSubmissionCard({ submission, saving, onSaveEvaluation, onOpenFile }) {
+function AssignmentSubmissionCard({ submission, onOpenFile }) {
   const supportsInlinePreview = ['application/pdf', 'text/plain'].includes(submission.contentType)
   return (
     <article className="admin-progress-submission">
@@ -281,9 +208,85 @@ function AssignmentSubmissionCard({ submission, saving, onSaveEvaluation, onOpen
       )}
       <div className="admin-progress-submission__result">
         <span>Marks: <strong>{formatMarks(submission.marksObtained, submission.maximumMarks)}</strong></span>
+        {['Passed', 'Failed'].includes(submission.academicStatus) && (
+          <span className={`admin-progress-academic-result is-${submission.academicStatus.toLowerCase()}`}>
+            <span aria-hidden="true">{submission.academicStatus === 'Passed' ? '✓' : '!'}</span>
+            Academic result: <strong>{submission.academicStatus}</strong>
+          </span>
+        )}
         {submission.correctness && <span>Result: <strong>{submission.correctness.replace(/_/g, ' ')}</strong></span>}
         {submission.feedback && <p><strong>Feedback:</strong> {submission.feedback}</p>}
       </div>
+      {submission.gradingStatus && (
+        <p className="admin-progress-empty">
+          AI evaluation status: {submission.gradingStatus}.
+          {submission.humanReviewRequest?.reason
+            ? ` Student’s reason for human re-evaluation: ${submission.humanReviewRequest.reason}`
+            : submission.aiEvaluation
+              ? ' Human evaluation is available only in the student-requested review queue.'
+              : ' No AI marks are available; retry AI grading from the student assignment page.'}
+        </p>
+      )}
+      {submission.attemptState && (
+        <div className="admin-progress-attempt-state">
+          <strong>Attempt {submission.attemptNumber || submission.attemptState.currentAttemptNumber || '—'} of {submission.attemptState.maxAttempts || 3}</strong>
+          <span>Academic failures in the current 24-hour window: {submission.attemptState.failedAttempts}</span>
+          <span>Remaining attempts: {submission.attemptState.remainingAttempts}</span>
+          {submission.attemptState.lockoutUntil && (
+            <span>Submissions unlock: {formatDate(submission.attemptState.lockoutUntil)}</span>
+          )}
+        </div>
+      )}
+      {submission.humanReviewRequest && (
+        <div className="admin-progress-human-review-request">
+          <strong>Student-requested human re-evaluation</strong>
+          {submission.humanReviewRequest.reasons?.length > 0
+            ? <ul>{submission.humanReviewRequest.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
+            : <p>{submission.humanReviewRequest.reason || 'No disagreement reason recorded.'}</p>}
+          {submission.humanReviewRequest.otherExplanation && (
+            <p><strong>Other explanation:</strong> {submission.humanReviewRequest.otherExplanation}</p>
+          )}
+          {submission.humanReviewRequest.comments && (
+            <p><strong>Additional comments:</strong> {submission.humanReviewRequest.comments}</p>
+          )}
+        </div>
+      )}
+      {submission.attemptHistory?.length > 0 && (
+        <details className="admin-progress-attempt-history">
+          <summary>Assignment attempt history ({submission.attemptHistory.length})</summary>
+          <ol>
+            {submission.attemptHistory.map((attempt, index) => {
+              const evaluation = attempt.humanEvaluation || attempt.aiEvaluation
+              const marks = attempt.finalMarks ?? attempt.marksObtained ?? attempt.aiEvaluation?.totalMarks
+              const maximumMarks = attempt.aiEvaluation?.maximumMarks ?? evaluation?.maximumMarks
+              return (
+                <li key={attempt.id || `${attempt.submittedAt}-${index}`}>
+                  <strong>Attempt {attempt.attemptNumber || '—'} · {formatMarks(marks, maximumMarks)}</strong>
+                  {['Passed', 'Failed'].includes(attempt.academicStatus) && (
+                    <span className={`admin-progress-academic-result is-${attempt.academicStatus.toLowerCase()}`}>
+                      <span aria-hidden="true">{attempt.academicStatus === 'Passed' ? '✓' : '!'}</span>
+                      {attempt.academicStatus}
+                    </span>
+                  )}
+                  <span>{attempt.gradingStatus || 'Submitted'} · {formatDate(attempt.submittedAt)}</span>
+                  {attempt.aiEvaluation?.criteria?.length > 0 && (
+                    <ul>
+                      {attempt.aiEvaluation.criteria.map((criterion, criterionIndex) => (
+                        <li key={`${attempt.id}-${criterion.name}-${criterionIndex}`}>
+                          <strong>{criterion.name}: {criterion.marks} / {criterion.maximumMarks}</strong>
+                          {criterion.feedback && <p>{criterion.feedback}</p>}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {attempt.aiEvaluation?.overallFeedback && <p><strong>AI feedback:</strong> {attempt.aiEvaluation.overallFeedback}</p>}
+                  {attempt.finalFeedback && <p><strong>Human feedback:</strong> {attempt.finalFeedback}</p>}
+                </li>
+              )
+            })}
+          </ol>
+        </details>
+      )}
       {submission.evaluationHistory?.length > 0 && (
         <details className="admin-progress-evaluation-history">
           <summary>Evaluation history ({submission.evaluationHistory.length})</summary>
@@ -300,27 +303,164 @@ function AssignmentSubmissionCard({ submission, saving, onSaveEvaluation, onOpen
           </ol>
         </details>
       )}
-      <SubmissionEvaluationForm submission={submission} saving={saving} onSave={onSaveEvaluation} />
     </article>
+  )
+}
+
+function groupVideoAttentionResponses(responses) {
+  const grouped = new Map()
+  responses.forEach((entry) => {
+    const courseId = String(entry.courseId?._id || entry.courseId || '')
+    const group = grouped.get(courseId) || {
+      courseId,
+      courseName: entry.courseId?.title || 'Unknown course',
+      responses: [],
+    }
+    group.responses.push(entry)
+    grouped.set(courseId, group)
+  })
+  return [...grouped.values()]
+}
+
+function VideoAttentionResponseList({ responses }) {
+  const [expandedResponseIds, setExpandedResponseIds] = useState(() => new Set())
+  const allExpanded = responses.length > 0 && responses.every((entry) => expandedResponseIds.has(String(entry._id)))
+
+  const toggleAllResponses = () => {
+    setExpandedResponseIds(
+      allExpanded
+        ? new Set()
+        : new Set(responses.map((entry) => String(entry._id))),
+    )
+  }
+
+  const toggleResponse = (responseId) => {
+    setExpandedResponseIds((current) => {
+      const next = new Set(current)
+      if (next.has(responseId)) next.delete(responseId)
+      else next.add(responseId)
+      return next
+    })
+  }
+
+  return (
+    <div className="admin-attention-responses">
+      <div className="admin-attention-responses__toolbar">
+        <button type="button" onClick={toggleAllResponses}>
+          {allExpanded ? 'Hide all' : 'View all'}
+        </button>
+      </div>
+      {responses.map((entry) => {
+        const responseId = String(entry._id)
+        const isExpanded = expandedResponseIds.has(responseId)
+        const answer = (entry.selectedOptionIndices || [])
+          .map((index) => entry.options?.[index])
+          .filter(Boolean)
+          .join(', ') || (entry.status === 'presented' ? 'Not answered' : 'No response')
+        const hasResponded = entry.status === 'answered'
+        const correctness = entry.isCorrect === true ? 'Correct' : 'Incorrect'
+        const presentedAt = entry.presentedAt ? new Date(entry.presentedAt) : null
+        const presentedLabel = presentedAt && !Number.isNaN(presentedAt.getTime())
+          ? presentedAt.toLocaleString()
+          : '—'
+
+        return (
+          <article className="admin-attention-response" key={responseId}>
+            <button
+              type="button"
+              className="admin-attention-response__toggle"
+              aria-expanded={isExpanded}
+              aria-controls={`attention-response-${responseId}`}
+              onClick={() => toggleResponse(responseId)}
+            >
+              <div className="admin-attention-response__course">
+                <strong>{entry.lessonTitle || 'Lesson not available'}</strong>
+              </div>
+              <div className="admin-attention-response__outcome">
+                <span className={`admin-attention-response__result ${hasResponded ? 'is-responded' : 'is-not-responded'}`}>
+                  {hasResponded ? 'Responded' : 'Not responded'}
+                </span>
+                {hasResponded && (
+                  <span className={`admin-attention-response__correctness is-${correctness.toLowerCase()}`}>
+                    {correctness}
+                  </span>
+                )}
+              </div>
+              <span className="admin-attention-response__chevron" aria-hidden="true" />
+            </button>
+            <div
+              className="admin-attention-response__content"
+              id={`attention-response-${responseId}`}
+              hidden={!isExpanded}
+            >
+              <div className="admin-attention-response__answers">
+                <section>
+                  <h4>Question</h4>
+                  <p>{entry.questionPrompt || 'Not available'}</p>
+                </section>
+                <section>
+                  <h4>Response</h4>
+                  <p>{answer}</p>
+                </section>
+              </div>
+              <dl className="admin-attention-response__details">
+                <div>
+                  <dt>Response time</dt>
+                  <dd>{Number.isFinite(entry.responseTimeMs) ? `${(entry.responseTimeMs / 1000).toFixed(1)} s` : '—'}</dd>
+                </div>
+                <div>
+                  <dt>Video position</dt>
+                  <dd>{Number.isFinite(entry.videoPositionSeconds) ? `${Math.floor(entry.videoPositionSeconds)} s` : '—'}</dd>
+                </div>
+                <div>
+                  <dt>Presented</dt>
+                  <dd>{presentedLabel}</dd>
+                </div>
+              </dl>
+            </div>
+          </article>
+        )
+      })}
+    </div>
+  )
+}
+
+function VideoAttentionResponseSection({ responses }) {
+  return (
+    <section className="admin-progress-course-section">
+      <h5>Video attention responses</h5>
+      {responses.length
+        ? <VideoAttentionResponseList responses={responses} />
+        : <p className="admin-progress-empty">No video attention responses are recorded for this course.</p>}
+    </section>
   )
 }
 
 function StudentProgressDialog({
   student,
   report,
+  videoAttentionResponses,
+  videoAttentionLoading,
+  videoAttentionError,
   loading,
   error,
   onClose,
   onPrint,
-  onSaveEvaluation,
   onOpenSubmissionFile,
-  savingEvaluationIds,
   onViewCertificate,
   onDownloadCertificate,
 }) {
   const unassignedCertificates = report
     ? getUnassignedCertificates(report.certificates, report.courseProgress)
     : []
+  const groupedAttentionResponses = groupVideoAttentionResponses(videoAttentionResponses)
+  const attentionResponsesByCourseId = new Map(
+    groupedAttentionResponses.map((group) => [group.courseId, group.responses]),
+  )
+  const activeCourseIds = new Set((report?.courseProgress || []).map((course) => String(course.courseId || '')))
+  const otherCourseAttentionResponses = groupedAttentionResponses.filter(
+    (group) => !activeCourseIds.has(group.courseId),
+  )
 
   return (
     <div className="admin-progress-dialog-backdrop" role="presentation" onMouseDown={(event) => {
@@ -341,6 +481,8 @@ function StudentProgressDialog({
         {error && <p className="admin-progress-error" role="alert">{error}</p>}
         {!loading && report && (
           <div className="admin-progress-dialog__body">
+            {videoAttentionLoading && <p className="admin-progress-empty" role="status">Loading video attention responses…</p>}
+            {videoAttentionError && <p className="admin-progress-error" role="alert">{videoAttentionError}</p>}
             <section className="admin-progress-detail-summary" aria-label="Course progress summary">
               <div><span>Enrolled courses</span><strong>{report.summary.enrolledCourses}</strong></div>
               <div><span>Completed</span><strong>{report.summary.completedCourses}</strong></div>
@@ -356,6 +498,7 @@ function StudentProgressDialog({
                   {report.courseProgress.map((course) => {
                     const lessons = getCourseLessons(course)
                     const courseCertificates = getCourseCertificates(report.certificates, course.courseId)
+                    const courseAttentionResponses = attentionResponsesByCourseId.get(String(course.courseId || '')) || []
                     const completionPercent = Number.isFinite(course.completionPercent)
                       ? Math.min(100, Math.max(0, course.completionPercent))
                       : null
@@ -366,6 +509,13 @@ function StudentProgressDialog({
                           <div>
                             <h4>{course.courseName}</h4>
                             <span>Course ID: {course.courseId} · Enrolled {formatDate(course.enrolledAt)}</span>
+                            {!videoAttentionLoading && !videoAttentionError && (
+                              <span>
+                                {courseAttentionResponses.length
+                                  ? `${courseAttentionResponses.length} video attention response${courseAttentionResponses.length === 1 ? '' : 's'}`
+                                  : 'No video attention responses'}
+                              </span>
+                            )}
                           </div>
                           <span className="admin-progress-course__view">View Details</span>
                         </div>
@@ -394,7 +544,7 @@ function StudentProgressDialog({
                           <h5>Course overview</h5>
                           <div className="admin-progress-course__metrics">
                             <span>Progress <strong>{course.completionPercent === null ? 'Not tracked' : `${course.completionPercent}%`}</strong></span>
-                            <span>Lessons <strong>{course.completedLessonCount} completed · {course.pendingLessonCount} pending</strong></span>
+                            <span>Activities <strong>{course.completedActivityCount} of {course.totalActivityCount} completed</strong></span>
                             <span>Marks <strong>{formatMarkSummary(course.marksSummary)}</strong></span>
                             <span>Status <strong>{String(course.status || 'not_started').replace(/_/g, ' ')}</strong></span>
                             <span>Assignments <strong>{course.assignmentSummary
@@ -417,6 +567,12 @@ function StudentProgressDialog({
                             </ul>
                           ) : <p className="admin-progress-empty">No lesson progress is recorded.</p>}
                         </section>
+
+                        {!videoAttentionLoading && !videoAttentionError && (
+                          <VideoAttentionResponseSection
+                            responses={courseAttentionResponses}
+                          />
+                        )}
 
                         <section className="admin-progress-course-section">
                           <h5>Quizzes and marks</h5>
@@ -464,8 +620,6 @@ function StudentProgressDialog({
                             <AssignmentSubmissionCard
                               key={submission.id}
                               submission={submission}
-                              saving={Boolean(savingEvaluationIds[submission.id])}
-                              onSaveEvaluation={onSaveEvaluation}
                               onOpenFile={onOpenSubmissionFile}
                             />
                           )) : <p className="admin-progress-empty">No assignment or practical submissions are recorded for this course.</p>}
@@ -497,6 +651,32 @@ function StudentProgressDialog({
                 </div>
               ) : <p className="admin-progress-empty">No active course enrollments are recorded for this student.</p>}
             </section>
+
+            {!videoAttentionLoading && !videoAttentionError && otherCourseAttentionResponses.length > 0 && (
+              <section className="admin-progress-detail-section">
+                <h3>Video attention responses for other courses</h3>
+                <div className="admin-progress-course-list">
+                  {otherCourseAttentionResponses.map((group) => (
+                    <details className="admin-progress-course" key={group.courseId || group.courseName}>
+                      <summary className="admin-progress-course__summary">
+                        <div className="admin-progress-course__header">
+                          <div>
+                            <h4>{group.courseName}</h4>
+                            <span>
+                              {group.responses.length} video attention response{group.responses.length === 1 ? '' : 's'}
+                            </span>
+                          </div>
+                          <span className="admin-progress-course__view">View Details</span>
+                        </div>
+                      </summary>
+                      <div className="admin-progress-course__details">
+                        <VideoAttentionResponseSection responses={group.responses} />
+                      </div>
+                    </details>
+                  ))}
+                </div>
+              </section>
+            )}
 
             {report.certificateRecordsAvailable && unassignedCertificates.length > 0 && (
               <section className="admin-progress-detail-section">
@@ -532,9 +712,11 @@ export default function AdminProgressReports({ onLogout }) {
   const [isLoadingSummary, setIsLoadingSummary] = useState(false)
   const [selectedStudent, setSelectedStudent] = useState(null)
   const [progressReport, setProgressReport] = useState(null)
+  const [videoAttentionResponses, setVideoAttentionResponses] = useState([])
+  const [videoAttentionError, setVideoAttentionError] = useState('')
+  const [isLoadingVideoAttention, setIsLoadingVideoAttention] = useState(false)
   const [progressError, setProgressError] = useState('')
   const [isLoadingProgress, setIsLoadingProgress] = useState(false)
-  const [savingEvaluationIds, setSavingEvaluationIds] = useState({})
 
   const loadStudents = useCallback(async (page, append = false, signal) => {
     setIsLoadingStudents(true)
@@ -587,19 +769,41 @@ export default function AdminProgressReports({ onLogout }) {
   const openProgressReport = async (student) => {
     setSelectedStudent(student)
     setProgressReport(null)
+    setVideoAttentionResponses([])
     setProgressError('')
+    setVideoAttentionError('')
     setIsLoadingProgress(true)
-    try {
-      const report = await requestAdminJson(
-        `/admin/reports/progress/${encodeURIComponent(student.studentType)}/${encodeURIComponent(student._id)}`,
-        onLogout,
-      )
-      setProgressReport(report)
-    } catch (error) {
-      setProgressError(error instanceof Error ? error.message : 'Unable to load student progress.')
-    } finally {
-      setIsLoadingProgress(false)
-    }
+    setIsLoadingVideoAttention(true)
+    const reportRequest = requestAdminJson(
+      `/admin/reports/progress/${encodeURIComponent(student.studentType)}/${encodeURIComponent(student._id)}`,
+      onLogout,
+    )
+      .then(setProgressReport)
+      .catch((error) => {
+        setProgressError(error instanceof Error ? error.message : 'Unable to load student progress.')
+      })
+      .finally(() => setIsLoadingProgress(false))
+    const attentionParams = new URLSearchParams({
+      studentId: String(student._id),
+      studentType: String(student.studentType),
+    })
+    const attentionRequest = requestAdminJson(
+      `/admin/video-attention-responses?${attentionParams}`,
+      onLogout,
+    )
+      .then((result) => {
+        if (!Array.isArray(result.responses)) {
+          throw new Error('The server returned invalid video attention response data.')
+        }
+        setVideoAttentionResponses(result.responses)
+      })
+      .catch((error) => {
+        setVideoAttentionError(error instanceof Error
+          ? error.message
+          : 'Unable to load video attention responses.')
+      })
+      .finally(() => setIsLoadingVideoAttention(false))
+    await Promise.all([reportRequest, attentionRequest])
   }
 
   const openCertificate = async (certificate, action) => {
@@ -634,33 +838,6 @@ export default function AdminProgressReports({ onLogout }) {
     } catch (error) {
       viewWindow?.close()
       setProgressError(error instanceof Error ? error.message : 'The certificate could not be loaded.')
-    }
-  }
-
-  const saveEvaluation = async (submission, evaluation) => {
-    setSavingEvaluationIds((current) => ({ ...current, [submission.id]: true }))
-    try {
-      const result = await requestAdminJson(
-        `/admin/reports/progress/submissions/${encodeURIComponent(submission.id)}/evaluation`,
-        onLogout,
-        undefined,
-        { method: 'PUT', body: evaluation },
-      )
-      const updatedSubmission = result.submission || result
-      if (!updatedSubmission.id || !Array.isArray(updatedSubmission.evaluationHistory)) {
-        throw new Error('The server did not confirm the saved evaluation history.')
-      }
-      setProgressReport((current) => current && ({
-        ...current,
-        courseProgress: current.courseProgress.map((course) => ({
-          ...course,
-          submissions: (course.submissions || []).map((item) => (
-            item.id === submission.id ? updatedSubmission : item
-          )),
-        })),
-      }))
-    } finally {
-      setSavingEvaluationIds((current) => ({ ...current, [submission.id]: false }))
     }
   }
 
@@ -699,11 +876,7 @@ export default function AdminProgressReports({ onLogout }) {
 
   return (
     <div className="admin-progress-reports">
-      <div className="admin-progress-reports__toolbar">
-        <div>
-          <h2>Student progress</h2>
-          <p>Progress from independent and college student enrollment records.</p>
-        </div>
+      <div className="admin-progress-reports__toolbar admin-progress-reports__toolbar--actions-only">
         <button
           type="button"
           className="admin-button admin-button--secondary"
@@ -775,18 +948,21 @@ export default function AdminProgressReports({ onLogout }) {
         <StudentProgressDialog
           student={selectedStudent}
           report={progressReport}
+          videoAttentionResponses={videoAttentionResponses}
+          videoAttentionLoading={isLoadingVideoAttention}
+          videoAttentionError={videoAttentionError}
           loading={isLoadingProgress}
           error={progressError}
-          savingEvaluationIds={savingEvaluationIds}
           onPrint={() => window.print()}
-          onSaveEvaluation={saveEvaluation}
           onOpenSubmissionFile={openSubmissionFile}
           onViewCertificate={(certificate) => openCertificate(certificate, 'view')}
           onDownloadCertificate={(certificate) => openCertificate(certificate, 'download')}
           onClose={() => {
             setSelectedStudent(null)
             setProgressReport(null)
+            setVideoAttentionResponses([])
             setProgressError('')
+            setVideoAttentionError('')
           }}
         />
       )}

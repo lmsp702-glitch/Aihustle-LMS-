@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from 'react'
+import React, { useState } from 'react'
 import { isInvalidSessionResponse } from './auth-session.js'
+import AdminAssignmentReviews from './AdminAssignmentReviews.jsx'
 import './AdminCertificateManagement.css'
 
 const API_BASE_URL = (
@@ -42,80 +43,27 @@ async function adminCertificateRequest(path, onLogout, { method = 'GET', body } 
 }
 
 export default function AdminCertificateManagement({ onBack, onLogout }) {
-  const [submissions, setSubmissions] = useState([])
-  const [reviewComments, setReviewComments] = useState({})
-  const [isLoading, setIsLoading] = useState(true)
-  const [activeReview, setActiveReview] = useState('')
-  const [error, setError] = useState('')
-  const [notice, setNotice] = useState('')
+  const [recentAssignments, setRecentAssignments] = useState([])
+  const [isLoadingRecentAssignments, setIsLoadingRecentAssignments] = useState(false)
+  const [showRecentAssignments, setShowRecentAssignments] = useState(false)
+  const [recentAssignmentsError, setRecentAssignmentsError] = useState('')
 
-  async function loadManagement() {
-    setIsLoading(true)
-    setError('')
+  async function toggleRecentAssignments() {
+    if (showRecentAssignments) {
+      setShowRecentAssignments(false)
+      return
+    }
+
+    setShowRecentAssignments(true)
+    setIsLoadingRecentAssignments(true)
+    setRecentAssignmentsError('')
     try {
-      const submissionResult = await adminCertificateRequest('/admin/assignment-submissions', onLogout)
-      setSubmissions(submissionResult.submissions || [])
+      const result = await adminCertificateRequest('/admin/assignment-submissions?scope=all', onLogout)
+      setRecentAssignments(result.submissions || [])
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : 'Assignment reviews could not be loaded.')
+      setRecentAssignmentsError(loadError instanceof Error ? loadError.message : 'Recent assignments could not be loaded.')
     } finally {
-      setIsLoading(false)
-    }
-  }
-
-  useEffect(() => { loadManagement() }, [])
-
-  async function downloadSubmission(submission) {
-    setError('')
-    try {
-      let auth
-      try {
-        auth = JSON.parse(sessionStorage.getItem('lms.auth') || 'null')
-      } catch {
-        onLogout()
-        throw new Error('Your saved administrator session is invalid. Please sign in again.')
-      }
-      if (auth?.user?.role !== 'main_admin' || typeof auth.token !== 'string') {
-        onLogout()
-        throw new Error('Your administrator session has ended.')
-      }
-      const response = await fetch(`${API_BASE_URL}/admin/assignment-submissions/${encodeURIComponent(submission.id)}/download`, {
-        headers: { Authorization: `Bearer ${auth.token}` },
-      })
-      if (!response.ok) {
-        const result = await response.json().catch(() => ({}))
-        if (isInvalidSessionResponse(response, result)) onLogout()
-        throw new Error(result.message || 'The assignment file could not be downloaded.')
-      }
-      const objectUrl = URL.createObjectURL(await response.blob())
-      const link = document.createElement('a')
-      link.href = objectUrl
-      link.download = submission.fileName
-      document.body.append(link)
-      link.click()
-      link.remove()
-      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000)
-    } catch (downloadError) {
-      setError(downloadError instanceof Error ? downloadError.message : 'The assignment file could not be downloaded.')
-    }
-  }
-
-  async function reviewSubmission(submission, reviewStatus) {
-    setActiveReview(submission.id)
-    setError('')
-    setNotice('')
-    try {
-      await adminCertificateRequest(`/admin/assignment-submissions/${encodeURIComponent(submission.id)}/review`, onLogout, {
-        method: 'PATCH',
-        body: { reviewStatus, reviewComment: reviewComments[submission.id] || '' },
-      })
-      setSubmissions((current) => current.filter((entry) => entry.id !== submission.id))
-      setNotice(reviewStatus === 'approved'
-        ? `Approved ${submission.assignmentName}. Certificate eligibility was updated.`
-        : `Rejected ${submission.assignmentName}. The student must submit the assignment again.`)
-    } catch (reviewError) {
-      setError(reviewError instanceof Error ? reviewError.message : 'The assignment review could not be saved.')
-    } finally {
-      setActiveReview('')
+      setIsLoadingRecentAssignments(false)
     }
   }
 
@@ -126,53 +74,86 @@ export default function AdminCertificateManagement({ onBack, onLogout }) {
           <div>
             <p className="ac-eyebrow">COURSE MANAGEMENT</p>
             <h1>Assignment reviews</h1>
-            <p>Review required assignment submissions that affect certificate eligibility.</p>
+            <p>AI grades submissions automatically. Admin action is needed only for student-requested human re-evaluations.</p>
           </div>
           <button type="button" className="ac-button ac-button--gold" onClick={onBack}>← Course management</button>
         </div>
-        {notice && <p className="ac-success" role="status">{notice}</p>}
-        {error && <p className="ac-inline-error" role="alert">{error}</p>}
-
-        <section className="ac-certificate-panel" aria-labelledby="ac-assignment-review-title">
-          <div className="ac-certificate-review-heading">
-            <div>
-              <p className="ac-eyebrow">REQUIRED ASSIGNMENTS</p>
-              <h2 id="ac-assignment-review-title">Submissions awaiting review <span>{submissions.length}</span></h2>
-              <p>Approving a submission completes that required assignment for certificate eligibility.</p>
-            </div>
-            <button type="button" className="ac-button ac-button--outline" onClick={loadManagement} disabled={isLoading}>
-              {isLoading ? 'Loading…' : 'Refresh'}
+        <AdminAssignmentReviews onLogout={onLogout} />
+        <section className="ac-certificate-panel" aria-label="Assignment submission history">
+          {showRecentAssignments && (
+            <section className="ac-recent-assignments" aria-labelledby="ac-recent-assignments-title">
+              <div className="ac-recent-assignments__heading">
+                <div>
+                  <p className="ac-eyebrow">SUBMISSION HISTORY</p>
+                  <h3 id="ac-recent-assignments-title">All submitted assignments</h3>
+                </div>
+                {!isLoadingRecentAssignments && !recentAssignmentsError && (
+                  <span>{recentAssignments.length} submissions</span>
+                )}
+              </div>
+              {recentAssignmentsError
+                ? <p className="ac-inline-error" role="alert">{recentAssignmentsError}</p>
+                : isLoadingRecentAssignments
+                  ? <div className="ac-empty-state"><span className="ac-spinner" />Loading submitted assignments…</div>
+                  : recentAssignments.length
+                    ? (
+                      <div className="ac-recent-assignments__list">
+                        {recentAssignments.map((submission) => (
+                          <article className="ac-recent-assignment" key={submission.id}>
+                            <strong>{submission.assignmentName}</strong>
+                            <span>{submission.studentName}{submission.studentEmail ? ` · ${submission.studentEmail}` : ''}</span>
+                            <span>{submission.courseName}</span>
+                            <span>Submitted {new Date(submission.submittedAt).toLocaleString()}</span>
+                            <span>Attempt {submission.attemptNumber || '—'} of {submission.attemptState?.maxAttempts || 3}</span>
+                            <span className={`ac-recent-assignment__status is-${(submission.gradingStatus || submission.reviewStatus || 'pending').toLowerCase().replace(/[^a-z0-9]+/g, '-')}`}>
+                              {submission.gradingStatus || submission.reviewStatus || 'pending'}
+                            </span>
+                            {submission.academicStatus && <strong>Academic result: {submission.academicStatus}</strong>}
+                            {submission.attemptState && (
+                              <span>
+                                {submission.attemptState.remainingAttempts} attempts remaining
+                                {submission.attemptState.lockoutUntil
+                                  ? ` · next submission ${new Date(submission.attemptState.lockoutUntil).toLocaleString()}`
+                                  : ''}
+                              </span>
+                            )}
+                            {submission.finalMarks !== undefined && submission.finalMarks !== null
+                              ? <span>Final result: {submission.finalMarks} / {submission.aiEvaluation?.maximumMarks ?? '—'}</span>
+                              : submission.aiEvaluation && <span>AI result: {submission.aiEvaluation.totalMarks} / {submission.aiEvaluation.maximumMarks}</span>}
+                            {submission.aiEvaluation?.overallFeedback && <span>AI feedback: {submission.aiEvaluation.overallFeedback}</span>}
+                            {submission.humanReviewRequest?.reasons?.length > 0 && (
+                              <span>Human review reasons: {submission.humanReviewRequest.reasons.join(' · ')}</span>
+                            )}
+                            {submission.humanReviewRequest?.otherExplanation && (
+                              <span>Other explanation: {submission.humanReviewRequest.otherExplanation}</span>
+                            )}
+                            {submission.humanReviewRequest?.comments && (
+                              <span>Student comments: {submission.humanReviewRequest.comments}</span>
+                            )}
+                            {submission.attemptHistory?.length > 1 && (
+                              <details>
+                                <summary>Attempt history ({submission.attemptHistory.length})</summary>
+                                {submission.attemptHistory.map((attempt) => (
+                                  <span key={attempt._id || attempt.id}>
+                                    Attempt {attempt.attemptNumber || '—'} · {attempt.academicStatus || attempt.gradingStatus}
+                                    {' · '}{attempt.finalMarks ?? attempt.aiEvaluation?.totalMarks ?? attempt.marksObtained ?? 'No marks'}
+                                    {attempt.aiEvaluation?.overallFeedback ? ` · ${attempt.aiEvaluation.overallFeedback}` : ''}
+                                  </span>
+                                ))}
+                              </details>
+                            )}
+                          </article>
+                        ))}
+                      </div>
+                    )
+                    : <p className="ac-recent-assignments__empty">No assignment submissions have been recorded.</p>}
+            </section>
+          )}
+          <div className="ac-recent-assignments__action">
+            <button type="button" className="ac-button ac-button--outline" onClick={toggleRecentAssignments}>
+              {showRecentAssignments ? 'Hide Recent Assignments' : 'Recent Assignments'}
             </button>
           </div>
-          {isLoading ? <div className="ac-empty-state"><span className="ac-spinner" />Loading assignment submissions…</div>
-            : submissions.length === 0 ? <div className="ac-empty-state"><span aria-hidden="true">✓</span><strong>No submissions awaiting review</strong><p>New assignment submissions will appear here.</p></div>
-              : <div className="ac-certificate-submissions">
-                {submissions.map((submission) => (
-                  <article className="ac-certificate-submission" key={submission.id}>
-                    <div className="ac-certificate-submission__details">
-                      <strong>{submission.assignmentName}</strong>
-                      <span>{submission.studentName}{submission.studentEmail ? ` · ${submission.studentEmail}` : ''}</span>
-                      <span>{submission.courseName} · Submitted {new Date(submission.submittedAt).toLocaleString()}</span>
-                      <button type="button" className="ac-text-button" onClick={() => downloadSubmission(submission)}>
-                        Download {submission.fileName}
-                      </button>
-                    </div>
-                    <label className="ac-field">
-                      <span>Feedback (optional)</span>
-                      <textarea
-                        rows="2"
-                        maxLength="1000"
-                        value={reviewComments[submission.id] || ''}
-                        onChange={(event) => setReviewComments((current) => ({ ...current, [submission.id]: event.target.value }))}
-                      />
-                    </label>
-                    <div className="ac-certificate-submission__actions">
-                      <button type="button" className="ac-button ac-button--outline" disabled={activeReview === submission.id} onClick={() => reviewSubmission(submission, 'rejected')}>Reject</button>
-                      <button type="button" className="ac-button ac-button--gold" disabled={activeReview === submission.id} onClick={() => reviewSubmission(submission, 'approved')}>{activeReview === submission.id ? 'Saving…' : 'Approve'}</button>
-                    </div>
-                  </article>
-                ))}
-              </div>}
         </section>
       </div>
     </div>
