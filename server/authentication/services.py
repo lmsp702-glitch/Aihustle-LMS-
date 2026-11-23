@@ -12,6 +12,7 @@ from django.contrib.auth.hashers import check_password, make_password
 from django.core.mail import BadHeaderError, send_mail
 from pymongo.errors import DuplicateKeyError
 
+from authentication.approval import external_user_access_error
 from core.mongodb import collection
 
 
@@ -33,6 +34,10 @@ class EmailVerificationRateLimitError(Exception):
     def __init__(self, retry_after_seconds):
         self.retry_after_seconds = retry_after_seconds
         super().__init__("Please wait before requesting another verification code.")
+
+
+class ExternalUserAccessDenied(ValueError):
+    pass
 
 
 def create_user(
@@ -71,7 +76,8 @@ def create_user(
         "accountType": "external",
         "studentType": "independent",
         "is_active": True,
-        "status": "active",
+        "status": "pending",
+        "approvalStatus": "pending",
         "email_verified": True,
         "created_at": datetime.now(timezone.utc),
     }
@@ -111,9 +117,11 @@ def authenticate_user(email, password):
     user = collection("users").find_one(
         {"$or": [{"email": identifier}, {"username": identifier}]}
     )
-    if not user or not user.get("is_active", True):
+    if not user:
         return None
     if not check_password(password, user.get("password_hash", "")):
+        return None
+    if not user.get("is_active", True) and not external_user_access_error(user):
         return None
     return user
 
@@ -140,8 +148,9 @@ def get_or_create_google_user(identity):
 
     if user.get("role") != "student" or user.get("accountType") != "external":
         raise ValueError("This Google account is not linked to an External User account.")
-    if not user.get("is_active", True):
-        raise ValueError("This Google account is inactive.")
+    access_error = external_user_access_error(user)
+    if access_error:
+        raise ValueError(access_error)
     return user
 
 
@@ -308,6 +317,9 @@ def issue_token(user, token_type, expires_at):
 
 
 def issue_token_pair(user):
+    access_error = external_user_access_error(user)
+    if access_error:
+        raise ExternalUserAccessDenied(access_error)
     now = datetime.now(timezone.utc)
     access_expiry = now + timedelta(minutes=settings.JWT_ACCESS_TOKEN_MINUTES)
     refresh_expiry = now + timedelta(days=settings.JWT_REFRESH_TOKEN_DAYS)
@@ -330,5 +342,7 @@ def refresh_access_token(token):
     user = collection("users").find_one({"_id": user_id})
     if not user or not user.get("is_active", True):
         raise jwt.InvalidTokenError("The user account is unavailable.")
+    if external_user_access_error(user):
+        raise jwt.InvalidTokenError("The External User account is not approved.")
     expiry = datetime.now(timezone.utc) + timedelta(minutes=settings.JWT_ACCESS_TOKEN_MINUTES)
     return issue_token(user, "access", expiry)

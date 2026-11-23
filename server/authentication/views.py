@@ -19,6 +19,7 @@ from authentication.serializers import (
     DashboardSessionSerializer,
     RegistrationEmailCodeSerializer,
     RegistrationEmailSerializer,
+    RegistrationPendingSerializer,
     ReferralCodeSerializer,
     UsernameAvailabilitySerializer,
 )
@@ -35,7 +36,9 @@ from authentication.services import (
     EmailVerificationConfigurationError,
     EmailVerificationDeliveryError,
     EmailVerificationRateLimitError,
+    ExternalUserAccessDenied,
 )
+from authentication.approval import external_user_access_error
 from authentication.permissions import IsMainAdmin
 from core.mongo import serialize_document
 from core.mongodb import collection
@@ -58,7 +61,10 @@ class RegisterView(GenericAPIView):
     authentication_classes = []
     permission_classes = [AllowAny]
 
-    @extend_schema(request=RegisterSerializer, responses={201: TokenPairSerializer})
+    @extend_schema(
+        request=RegisterSerializer,
+        responses={201: RegistrationPendingSerializer},
+    )
     def post(self, request):
         serializer = RegisterSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -98,17 +104,10 @@ class RegisterView(GenericAPIView):
             return Response({"message": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         except EmailVerificationDeliveryError as exc:
             return Response({"message": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
-        pair = issue_token_pair(user)
         return Response(
             {
-                "message": "Your account was created successfully.",
+                "message": "Your account was created and is awaiting administrator approval.",
                 "user": public_user(user),
-                "token": pair["access"],
-                "access": pair["access"],
-                "refresh": pair["refresh"],
-                "tokenType": pair.get("token_type", "Bearer"),
-                "token_type": pair.get("token_type", "Bearer"),
-                "expiresIn": pair.get("expires_in", 0),
             },
             status=status.HTTP_201_CREATED,
         )
@@ -138,7 +137,13 @@ class LoginView(GenericAPIView):
                 {"message": "Invalid username/email or password."},
                 status=status.HTTP_401_UNAUTHORIZED,
             )
-        pair = issue_token_pair(user)
+        approval_error = external_user_access_error(user)
+        if approval_error:
+            return Response({"message": approval_error}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            pair = issue_token_pair(user)
+        except ExternalUserAccessDenied as exc:
+            return Response({"message": str(exc)}, status=status.HTTP_403_FORBIDDEN)
         return Response(
             {
                 "user": public_user(user),
@@ -189,7 +194,13 @@ class GoogleLoginView(GenericAPIView):
         except ValueError as exc:
             return Response({"message": str(exc)}, status=status.HTTP_403_FORBIDDEN)
 
-        pair = issue_token_pair(user)
+        approval_error = external_user_access_error(user)
+        if approval_error:
+            return Response({"message": approval_error}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            pair = issue_token_pair(user)
+        except ExternalUserAccessDenied as exc:
+            return Response({"message": str(exc)}, status=status.HTTP_403_FORBIDDEN)
         return Response(
             {
                 "user": public_user(user),
@@ -230,6 +241,11 @@ class RefreshView(GenericAPIView):
             )
         if not user:
             return Response({"detail": "Invalid or expired refresh token."}, status=status.HTTP_401_UNAUTHORIZED)
+        if external_user_access_error(user):
+            return Response(
+                {"detail": "Invalid or expired refresh token."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
         return Response(
             {
                 "user": public_user(user),
@@ -397,6 +413,7 @@ def public_user(user):
             "accountType": getattr(user, "account_type", None),
             "studentType": getattr(user, "student_type", None),
             "status": getattr(user, "status", "active"),
+            "approvalStatus": getattr(user, "approval_status", None),
             "isActive": getattr(user, "is_active", True),
             "username": getattr(user, "username", None),
             "collegeId": getattr(user, "college_id", None),
@@ -412,6 +429,7 @@ def public_user(user):
         "accountType": document.get("accountType"),
         "studentType": document.get("studentType"),
         "status": document.get("status", "active"),
+        "approvalStatus": document.get("approvalStatus"),
         "isActive": document.get("isActive", document.get("is_active", True)),
         "collegeId": document.get("collegeId") or document.get("college_id"),
     }

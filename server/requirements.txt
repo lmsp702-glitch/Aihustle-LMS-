@@ -5,3 +5,4 @@ pymongo>=4.13,<5.0
 PyJWT[crypto]>=2.10,<3.0
 python-dotenv>=1.1,<2.0
 drf-spectacular>=0.28,<1.0
+cloudinary>=1.44,<2.0

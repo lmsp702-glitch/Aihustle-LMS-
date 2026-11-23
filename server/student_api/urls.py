@@ -13,6 +13,7 @@ from student_api.views import (
     StudentCertificatesView,
     StudentCertificatePdfView,
     StudentCourseListView,
+    StudentCourseListNoSlashView,
     StudentCourseResourceFileView,
     StudentLearningActivityView,
     StudentLearningSummaryView,
@@ -21,6 +22,7 @@ from student_api.views import (
     StudentQuizAttemptView,
     StudentReferralsView,
     StudentAttentionCheckView,
+    StudentProfileAvatarView,
 )
 
 urlpatterns = [
@@ -38,7 +40,7 @@ urlpatterns = [
         name="student-enrollment-learning-activity",
     ),
     path("courses/recommendations", CourseRecommendationsView.as_view(), name="student-course-recommendations"),
-    path("courses", StudentCourseListView.as_view(), name="student-course-list-no-slash"),
+    path("courses", StudentCourseListNoSlashView.as_view(), name="student-course-list-no-slash"),
     path("courses/", StudentCourseListView.as_view(), name="student-course-list"),
     path(
         "courses/<str:course_id>/learning-content",
@@ -47,6 +49,7 @@ urlpatterns = [
     ),
     path("learning/summary", StudentLearningSummaryView.as_view(), name="student-learning-summary"),
     path("learning/activity", StudentLearningActivityView.as_view(), name="student-learning-activity"),
+    path("student/profile/avatar", StudentProfileAvatarView.as_view(), name="student-profile-avatar"),
     path("certificates", StudentCertificatesView.as_view(), name="student-certificates"),
     path(
         "certificates/<str:certificate_id>/pdf",

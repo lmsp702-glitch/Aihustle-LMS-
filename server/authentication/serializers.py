@@ -108,6 +108,11 @@ class TokenPairSerializer(serializers.Serializer):
     expires_in = serializers.IntegerField()
 
 
+class RegistrationPendingSerializer(serializers.Serializer):
+    message = serializers.CharField()
+    user = serializers.DictField()
+
+
 class AccessTokenSerializer(serializers.Serializer):
     access = serializers.CharField()
     token_type = serializers.CharField()

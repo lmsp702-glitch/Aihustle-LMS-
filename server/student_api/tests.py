@@ -1,6 +1,7 @@
 import jwt
 from bson import ObjectId
 from django.conf import settings
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import SimpleTestCase
 from rest_framework.test import APIClient
 from unittest.mock import MagicMock, patch
@@ -16,6 +17,8 @@ class StudentApiTests(SimpleTestCase):
             "name": "External Learner",
             "role": "student",
             "accountType": "external",
+            "status": "approved",
+            "approvalStatus": "approved",
             "is_active": True,
         }
         token = jwt.encode(
@@ -82,6 +85,20 @@ class StudentApiTests(SimpleTestCase):
 
         self.assertEqual(response.status_code, 401)
         self.assertTrue(response["Content-Type"].startswith("application/json"))
+
+    def test_main_admin_can_load_own_notifications_without_being_logged_out(self):
+        self.user_document["role"] = "main_admin"
+        token = jwt.encode(
+            {"sub": str(self.user_id), "role": "main_admin", "type": "access"},
+            settings.SECRET_KEY,
+            algorithm="HS256",
+        )
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+
+        response = self._request("get", "/api/notifications/me")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"notifications": [], "unreadCount": 0})
 
     def test_unmatched_api_route_returns_json_404(self):
         self.client.credentials()
@@ -320,3 +337,90 @@ class StudentApiTests(SimpleTestCase):
 
         self.assertEqual(response.status_code, 429)
         codes.insert_one.assert_not_called()
+
+    @patch(
+        "student_api.views.upload_media",
+        return_value={
+            "secureUrl": "https://res.cloudinary.com/test-cloud/raw/upload/submission.pdf",
+            "publicId": "aihustle-lms/assignment_submission/asset",
+            "resourceType": "raw",
+            "format": "pdf",
+            "bytes": 12,
+            "originalName": "answer.pdf",
+        },
+    )
+    def test_assignment_pdf_is_saved_as_cloudinary_metadata_not_file_data(self, upload):
+        course_id = ObjectId()
+        assignment_id = ObjectId()
+        course = {
+            "_id": course_id,
+            "assignments": [{"_id": assignment_id, "title": "Assignment"}],
+        }
+        self._collection("courses").find_one.return_value = course
+        self._collection("enrollments").find_one.return_value = {
+            "_id": ObjectId(),
+            "studentId": str(self.user_id),
+            "courseId": str(course_id),
+        }
+        submissions = self._collection("submissions")
+        submissions.insert_one.return_value.inserted_id = ObjectId()
+        pdf = SimpleUploadedFile(
+            "answer.pdf",
+            b"%PDF-1.4 test document",
+            content_type="application/pdf",
+        )
+
+        response = self._request(
+            "post",
+            f"/api/courses/{course_id}/assignments/{assignment_id}/submissions",
+            {"file": pdf},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        document = submissions.insert_one.call_args.args[0]
+        self.assertEqual(document["fileUrl"], upload.return_value["secureUrl"])
+        self.assertEqual(document["filePublicId"], upload.return_value["publicId"])
+        self.assertNotIn("fileId", document)
+        self.assertNotIn("fileContent", document)
+        upload.assert_called_once()
+        self.assertEqual(upload.call_args.args[1], "assignment_submission")
+        self.assertEqual(upload.call_args.kwargs["owner_id"], str(self.user_id))
+        self.assertEqual(upload.call_args.kwargs["course_id"], str(course_id))
+        self.assertEqual(upload.call_args.args[0].name, "answer.pdf")
+
+    @patch(
+        "student_api.views.upload_media",
+        return_value={
+            "secureUrl": "https://res.cloudinary.com/test-cloud/image/upload/avatar.png",
+            "publicId": "aihustle-lms/profile_image/user/avatar",
+            "resourceType": "image",
+            "format": "png",
+            "bytes": 12,
+            "originalName": "avatar.png",
+            "width": 1,
+            "height": 1,
+        },
+    )
+    def test_profile_avatar_upload_updates_user_cloudinary_fields(self, upload):
+        users = self._collection("users")
+        users.update_one.return_value.matched_count = 1
+        avatar = SimpleUploadedFile(
+            "avatar.png",
+            b"\x89PNG\r\n\x1a\nmore",
+            content_type="image/png",
+        )
+
+        response = self._request(
+            "post",
+            "/api/student/profile/avatar",
+            {"avatar": avatar},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["avatarUrl"], upload.return_value["secureUrl"])
+        update = users.update_one.call_args.args[1]["$set"]
+        self.assertEqual(update["avatarPublicId"], upload.return_value["publicId"])
+        self.assertNotIn("file", update)
+        upload.assert_called_once()

@@ -7,6 +7,7 @@ from django.conf import settings
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 
+from authentication.approval import external_user_access_error
 from core.mongodb import collection
 
 
@@ -21,6 +22,7 @@ class AuthenticatedUser:
     student_type: str = None
     status: str = "active"
     college_id: str = None
+    approval_status: str = None
     is_active: bool = True
     is_authenticated: bool = True
 
@@ -46,6 +48,9 @@ class JWTAuthentication(BaseAuthentication):
             raise AuthenticationFailed("User account is unavailable.")
         if payload.get("role") != document.get("role"):
             raise AuthenticationFailed("Token role is no longer valid.")
+        approval_error = external_user_access_error(document)
+        if approval_error:
+            raise AuthenticationFailed(approval_error)
         user = AuthenticatedUser(
             id=str(document["_id"]),
             email=document["email"],
@@ -55,6 +60,7 @@ class JWTAuthentication(BaseAuthentication):
             account_type=document.get("accountType"),
             student_type=document.get("studentType"),
             status=document.get("status", "active"),
+            approval_status=document.get("approvalStatus"),
             college_id=(
                 str(document.get("collegeId") or document.get("college_id"))
                 if document.get("collegeId") or document.get("college_id")

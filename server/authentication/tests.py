@@ -24,6 +24,7 @@ from authentication.services import (
     create_user,
     get_or_create_google_user,
     issue_token_pair,
+    refresh_access_token,
     send_registration_email_code,
     verify_registration_email_code,
 )
@@ -132,6 +133,30 @@ class AuthenticationTests(SimpleTestCase):
         )
 
     @patch("authentication.services.collection")
+    def test_rejected_external_account_can_return_approval_status_after_password_check(
+        self, collection
+    ):
+        user = {
+            "_id": ObjectId(),
+            "email": "student@example.com",
+            "role": "student",
+            "accountType": "external",
+            "approvalStatus": "rejected",
+            "status": "rejected",
+            "is_active": False,
+            "password_hash": make_password("secure-password"),
+        }
+        collection.return_value.find_one.return_value = user
+
+        self.assertIs(
+            authenticate_user("student@example.com", "secure-password"),
+            user,
+        )
+        self.assertIsNone(
+            authenticate_user("student@example.com", "wrong-password")
+        )
+
+    @patch("authentication.services.collection")
     def test_create_user_marks_account_as_external(self, collection):
         users = collection.return_value
         users.insert_one.return_value.inserted_id = ObjectId()
@@ -148,6 +173,8 @@ class AuthenticationTests(SimpleTestCase):
         self.assertEqual(user["studentType"], "independent")
         self.assertEqual(stored_user["accountType"], "external")
         self.assertEqual(stored_user["username"], "external.learner")
+        self.assertEqual(stored_user["approvalStatus"], "pending")
+        self.assertEqual(stored_user["status"], "pending")
 
     @patch("authentication.services.collection")
     @patch("authentication.services.create_user")
@@ -161,6 +188,8 @@ class AuthenticationTests(SimpleTestCase):
             "accountType": "external",
             "studentType": "independent",
             "is_active": True,
+            "status": "pending",
+            "approvalStatus": "pending",
         }
         create.return_value = created_user
 
@@ -195,6 +224,8 @@ class AuthenticationTests(SimpleTestCase):
             "accountType": "external",
             "studentType": "independent",
             "is_active": True,
+            "status": "approved",
+            "approvalStatus": "approved",
         }
         collection.return_value.find_one.return_value = existing_user
 
@@ -318,6 +349,8 @@ class AuthenticationTests(SimpleTestCase):
             "accountType": "external",
             "studentType": "independent",
             "is_active": True,
+            "status": "approved",
+            "approvalStatus": "approved",
         }
         authenticate.return_value = user
         issue_tokens.return_value = {"access": "access", "refresh": "refresh"}
@@ -350,6 +383,8 @@ class AuthenticationTests(SimpleTestCase):
             "accountType": "external",
             "studentType": "independent",
             "is_active": True,
+            "status": "approved",
+            "approvalStatus": "approved",
         }
         collection.return_value.find_one.return_value = user
         pair = issue_token_pair(user)
@@ -378,6 +413,7 @@ class AuthenticationTests(SimpleTestCase):
             "studentType": "independent",
             "is_active": True,
             "status": "active",
+            "approvalStatus": "approved",
         }
         collection.return_value.find_one.return_value = user
         pair = issue_token_pair(user)
@@ -410,6 +446,127 @@ class AuthenticationTests(SimpleTestCase):
         )
 
         self.assertEqual(response.status_code, 403)
+
+    @patch("authentication.views.issue_token_pair")
+    @patch("authentication.views.consume_registration_email_verification", return_value=True)
+    @patch("authentication.views.create_user")
+    @patch("authentication.views.collection")
+    def test_registration_creates_pending_external_account_without_tokens(
+        self, collection, create_user, consume_verification, issue_tokens
+    ):
+        collection.return_value.find_one.return_value = None
+        user = {
+            "_id": ObjectId(),
+            "name": "External Learner",
+            "email": "learner@example.com",
+            "username": "external.learner",
+            "role": "student",
+            "accountType": "external",
+            "studentType": "independent",
+            "status": "pending",
+            "approvalStatus": "pending",
+            "is_active": True,
+        }
+        create_user.return_value = user
+
+        response = self.client.post(
+            "/api/auth/register/",
+            {
+                "fullName": "External Learner",
+                "email": "learner@example.com",
+                "username": "external.learner",
+                "password": "secure-password",
+                "confirmPassword": "secure-password",
+                "emailVerificationToken": "verified-token",
+                "role": "student",
+                "accountType": "independent",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["user"]["id"], str(user["_id"]))
+        self.assertEqual(response.json()["user"]["approvalStatus"], "pending")
+        self.assertIn("awaiting administrator approval", response.json()["message"])
+        self.assertNotIn("token", response.json())
+        self.assertNotIn("access", response.json())
+        self.assertNotIn("refresh", response.json())
+        consume_verification.assert_called_once_with("learner@example.com", "verified-token")
+        issue_tokens.assert_not_called()
+
+    @patch("authentication.views.issue_token_pair")
+    @patch("authentication.views.authenticate_user")
+    def test_pending_and_rejected_external_users_cannot_log_in(
+        self, authenticate, issue_tokens
+    ):
+        for approval_status, account_status, expected_message in (
+            ("pending", "pending", "pending administrator approval"),
+            ("rejected", "rejected", "registration was rejected"),
+        ):
+            authenticate.return_value = {
+                "_id": ObjectId(),
+                "email": "learner@example.com",
+                "role": "student",
+                "accountType": "external",
+                "approvalStatus": approval_status,
+                "status": account_status,
+                "is_active": True,
+            }
+            response = self.client.post(
+                "/api/auth/login/",
+                {"identifier": "learner@example.com", "password": "secure-password", "role": "student"},
+                format="json",
+            )
+
+            self.assertEqual(response.status_code, 403)
+            self.assertIn(expected_message, response.json()["message"])
+        issue_tokens.assert_not_called()
+
+    @patch("authentication.services.collection")
+    def test_refresh_rejects_external_user_after_approval_is_revoked(self, collection):
+        user = {
+            "_id": ObjectId(),
+            "email": "learner@example.com",
+            "role": "student",
+            "accountType": "external",
+            "approvalStatus": "approved",
+            "status": "approved",
+            "is_active": True,
+        }
+        pair = issue_token_pair(user)
+        collection.return_value.find_one.return_value = {
+            **user,
+            "approvalStatus": "rejected",
+            "status": "rejected",
+        }
+
+        with self.assertRaises(jwt.InvalidTokenError):
+            refresh_access_token(pair["refresh"])
+
+    @patch("authentication.jwt.collection")
+    def test_access_token_is_rejected_after_external_approval_is_revoked(self, collection):
+        user = {
+            "_id": ObjectId(),
+            "email": "learner@example.com",
+            "role": "student",
+            "accountType": "external",
+            "approvalStatus": "approved",
+            "status": "approved",
+            "is_active": True,
+        }
+        pair = issue_token_pair(user)
+        collection.return_value.find_one.return_value = {
+            **user,
+            "approvalStatus": "rejected",
+            "status": "rejected",
+        }
+
+        response = self.client.get(
+            "/api/auth/me/",
+            HTTP_AUTHORIZATION=f"Bearer {pair['access']}",
+        )
+
+        self.assertEqual(response.status_code, 401)
 
     @patch("authentication.views.collection")
     def test_username_availability_returns_suggestions_for_taken_name(self, collection):
@@ -544,6 +701,8 @@ class GoogleLoginTests(SimpleTestCase):
             "role": "student",
             "accountType": "external",
             "studentType": "independent",
+            "status": "approved",
+            "approvalStatus": "approved",
         }
         authenticate_code.return_value = identity
         get_user.return_value = user
@@ -577,6 +736,38 @@ class GoogleLoginTests(SimpleTestCase):
         )
         get_user.assert_called_once_with(identity)
         issue_tokens.assert_called_once_with(user)
+
+    @patch("authentication.views.issue_token_pair")
+    @patch("authentication.views.get_or_create_google_user")
+    @patch("authentication.views.authenticate_google_authorization_code")
+    def test_google_registration_creates_pending_account_without_tokens(
+        self, authenticate_code, get_user, issue_tokens
+    ):
+        authenticate_code.return_value = {
+            "email": "new-learner@example.com",
+            "name": "New Learner",
+        }
+        get_user.return_value = {
+            "_id": ObjectId(),
+            "email": "new-learner@example.com",
+            "role": "student",
+            "accountType": "external",
+            "status": "pending",
+            "approvalStatus": "pending",
+            "is_active": True,
+        }
+
+        response = self.client.post(
+            "/api/auth/google",
+            {"code": "authorization-code", "role": "student"},
+            format="json",
+            **self.headers,
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("pending administrator approval", response.json()["message"])
+        self.assertNotIn("token", response.json())
+        issue_tokens.assert_not_called()
 
     @patch("authentication.views.authenticate_google_authorization_code")
     def test_google_login_rejects_untrusted_origin(self, authenticate_code):

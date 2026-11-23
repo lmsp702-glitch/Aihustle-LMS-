@@ -1,22 +1,36 @@
+import logging
 import secrets
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 from bson import ObjectId
 from bson.errors import InvalidId
-from django.http import FileResponse
+from drf_spectacular.utils import extend_schema
+from django.http import FileResponse, HttpResponseRedirect
 from gridfs import GridFSBucket
 from gridfs.errors import NoFile
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
+from pymongo.errors import PyMongoError
 from rest_framework import status
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from core.cloudinary_storage import (
+    CloudinaryConfigurationError,
+    CloudinaryStorageError,
+    MediaValidationError,
+    delete_media,
+    is_cloudinary_delivery_url,
+    upload_media,
+)
 from core.mongo import serialize_document
 from core.mongodb import collection, get_database
+
+
+logger = logging.getLogger(__name__)
 
 
 def _id_value(value):
@@ -513,12 +527,18 @@ class CourseRecommendationsView(StudentAPIView):
 class StudentCourseListView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(operation_id="student_courses_list")
     def get(self, request):
         documents = list(collection("courses").find().limit(100))
         if request.user.role != "student":
             return Response([serialize_document(item) for item in documents])
         courses = [_public_course(item) for item in documents if _is_published(item)]
         return Response({"courses": courses})
+
+
+@extend_schema(exclude=True)
+class StudentCourseListNoSlashView(StudentCourseListView):
+    pass
 
 
 class StudentLearningSummaryView(StudentAPIView):
@@ -603,6 +623,96 @@ class StudentLearningActivityView(StudentAPIView):
         for day in days.values():
             day["videosWatched"] = len(day.pop("_lessons"))
         return Response({"days": list(days.values())})
+
+
+@extend_schema(exclude=True)
+class StudentProfileAvatarView(StudentAPIView):
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        uploaded_file = request.FILES.get("avatar")
+        if uploaded_file is None:
+            return Response({"message": "Choose a profile image to upload."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            metadata = upload_media(
+                uploaded_file,
+                "profile_image",
+                owner_id=request.user.id,
+            )
+        except MediaValidationError as exc:
+            return Response({"message": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except (CloudinaryConfigurationError, CloudinaryStorageError) as exc:
+            return Response({"message": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        users = collection("users")
+        try:
+            previous = users.find_one({"_id": _object_id(request.user.id)})
+            updated = users.update_one(
+                {"_id": _object_id(request.user.id)},
+                {"$set": {
+                    "avatarUrl": metadata["secureUrl"],
+                    "avatarPublicId": metadata["publicId"],
+                    "avatarResourceType": metadata["resourceType"],
+                    "avatarFormat": metadata["format"],
+                    "avatarBytes": metadata["bytes"],
+                    "avatarOriginalName": metadata["originalName"],
+                    "avatarWidth": metadata.get("width"),
+                    "avatarHeight": metadata.get("height"),
+                }},
+            )
+        except (PyMongoError, RuntimeError):
+            try:
+                delete_media(metadata["publicId"], metadata["resourceType"])
+            except (CloudinaryConfigurationError, CloudinaryStorageError, MediaValidationError):
+                logger.warning("Unable to clean up an unlinked Cloudinary profile image.")
+            raise
+        cleanup_warning = False
+        if not updated.matched_count:
+            try:
+                delete_media(metadata["publicId"], metadata["resourceType"])
+            except (CloudinaryConfigurationError, CloudinaryStorageError, MediaValidationError):
+                logger.warning("Unable to clean up an unlinked Cloudinary profile image.")
+                cleanup_warning = True
+            return Response(
+                {"message": "User account not found.", "cleanupWarning": cleanup_warning},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        previous_public_id = previous.get("avatarPublicId") if previous else None
+        if previous_public_id and previous_public_id != metadata["publicId"]:
+            try:
+                delete_media(previous_public_id, "image")
+            except (CloudinaryConfigurationError, CloudinaryStorageError, MediaValidationError):
+                cleanup_warning = True
+        return Response({
+            "avatarUrl": metadata["secureUrl"],
+            "avatarPublicId": metadata["publicId"],
+            "cleanupWarning": cleanup_warning,
+        })
+
+    def delete(self, request):
+        users = collection("users")
+        user_id = _object_id(request.user.id)
+        previous = users.find_one({"_id": user_id})
+        if previous is None:
+            return Response({"message": "User account not found."}, status=status.HTTP_404_NOT_FOUND)
+        users.update_one(
+            {"_id": user_id},
+            {"$unset": {
+                "avatarPublicId": "",
+                "avatarResourceType": "",
+                "avatarFormat": "",
+                "avatarBytes": "",
+                "avatarOriginalName": "",
+                "avatarWidth": "",
+                "avatarHeight": "",
+            }, "$set": {"avatarUrl": ""}},
+        )
+        public_id = previous.get("avatarPublicId")
+        if public_id:
+            try:
+                delete_media(public_id, "image")
+            except (CloudinaryConfigurationError, CloudinaryStorageError, MediaValidationError):
+                return Response({"avatarUrl": "", "cleanupWarning": True})
+        return Response({"avatarUrl": "", "cleanupWarning": False})
 
 
 class CourseLearningContentView(StudentAPIView):
@@ -770,6 +880,11 @@ class StudentCertificatePdfView(StudentAPIView):
         certificate = collection("certificates").find_one(query)
         if not certificate:
             return Response({"message": "Certificate not found."}, status=status.HTTP_404_NOT_FOUND)
+        media_url = certificate.get("secureUrl") or certificate.get("fileUrl") or certificate.get("file_url")
+        if media_url:
+            if not is_cloudinary_delivery_url(media_url):
+                return Response({"message": "Certificate PDF is unavailable."}, status=status.HTTP_404_NOT_FOUND)
+            return HttpResponseRedirect(media_url)
         file_id = certificate.get("fileId") or certificate.get("file_id")
         if file_id:
             gridfs_id = _object_id(file_id)
@@ -787,7 +902,19 @@ class StudentCertificatePdfView(StudentAPIView):
         return Response({"message": "Certificate PDF is unavailable."}, status=status.HTTP_404_NOT_FOUND)
 
 
-class StudentNotificationsView(StudentAPIView):
+class NotificationsAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        if request.user.role not in {"student", "main_admin"}:
+            self.permission_denied(
+                request,
+                message="Student or main administrator access is required.",
+            )
+
+
+class StudentNotificationsView(NotificationsAPIView):
     def get(self, request):
         records = collection("notifications").find(_user_query(request.user)).sort(
             "createdAt", -1
@@ -804,7 +931,7 @@ class StudentNotificationsView(StudentAPIView):
         })
 
 
-class StudentNotificationActionView(StudentAPIView):
+class StudentNotificationActionView(NotificationsAPIView):
     def patch(self, request, notification_id=None):
         now = datetime.now(timezone.utc)
         query = _user_query(request.user)
@@ -956,34 +1083,44 @@ class StudentAssignmentSubmissionView(StudentAPIView):
         uploaded_file = request.FILES.get("file")
         if uploaded_file is None:
             return Response({"message": "Choose a file to submit."}, status=status.HTTP_400_BAD_REQUEST)
-        extension = Path(uploaded_file.name).suffix.lower()
-        if extension not in {".pdf", ".docx", ".txt"}:
-            return Response({"message": "Only PDF, DOCX, and TXT files can be submitted."}, status=status.HTTP_400_BAD_REQUEST)
-        if uploaded_file.size > 10 * 1024 * 1024:
-            return Response({"message": "The assignment file must be 10 MB or smaller."}, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+        try:
+            metadata = upload_media(
+                uploaded_file,
+                "assignment_submission",
+                owner_id=request.user.id,
+                course_id=course_id,
+            )
+        except MediaValidationError as exc:
+            return Response({"message": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except (CloudinaryConfigurationError, CloudinaryStorageError) as exc:
+            return Response({"message": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         now = datetime.now(timezone.utc)
-        bucket = GridFSBucket(get_database())
-        file_id = bucket.upload_from_stream(
-            Path(uploaded_file.name).name,
-            uploaded_file,
-            metadata={"ownerId": request.user.id, "courseId": str(course_id)},
-        )
         submission = {
             "student_id": request.user.id,
             "studentId": request.user.id,
             "courseId": str(course_id),
             "assignment_id": str(assignment_id),
             "assignmentId": str(assignment_id),
-            "fileId": str(file_id),
-            "fileName": Path(uploaded_file.name).name,
+            "fileUrl": metadata["secureUrl"],
+            "filePublicId": metadata["publicId"],
+            "fileResourceType": metadata["resourceType"],
+            "fileFormat": metadata["format"],
+            "fileName": metadata["originalName"],
             "fileType": uploaded_file.content_type or "application/octet-stream",
-            "fileSize": uploaded_file.size,
+            "fileSize": metadata["bytes"],
             "status": "submitted",
             "submittedAt": now,
             "created_at": now,
             "createdAt": now,
         }
-        result = collection("submissions").insert_one(submission)
+        try:
+            result = collection("submissions").insert_one(submission)
+        except (PyMongoError, RuntimeError):
+            try:
+                delete_media(metadata["publicId"], metadata["resourceType"])
+            except (CloudinaryConfigurationError, CloudinaryStorageError, MediaValidationError):
+                logger.warning("Unable to clean up an unlinked Cloudinary assignment file.")
+            raise
         submission["_id"] = result.inserted_id
         return Response(
             {"submission": _document(submission)},
@@ -1034,6 +1171,10 @@ class StudentAssignmentDownloadView(StudentAPIView):
         submission = collection("submissions").find_one(
             _combine(_user_query(request.user), {"_id": object_id})
         ) if object_id else None
+        if submission and submission.get("fileUrl"):
+            if not is_cloudinary_delivery_url(submission["fileUrl"]):
+                return Response({"message": "Assignment file not found."}, status=status.HTTP_404_NOT_FOUND)
+            return HttpResponseRedirect(submission["fileUrl"])
         file_id = _object_id(submission.get("fileId")) if submission else None
         if file_id is None:
             return Response({"message": "Assignment file not found."}, status=status.HTTP_404_NOT_FOUND)
@@ -1363,6 +1504,9 @@ class StudentCourseResourceFileView(StudentAPIView):
         resource = _find_resource(course, target_ids)
         if resource is None:
             return Response({"message": "Course resource not found."}, status=status.HTTP_404_NOT_FOUND)
+        media_url = resource.get("secureUrl") or resource.get("url")
+        if media_url and is_cloudinary_delivery_url(media_url):
+            return HttpResponseRedirect(media_url)
         file_id = _object_id(resource.get("fileId") or resource.get("file_id"))
         if file_id is None:
             return Response({"message": "This resource file is not stored in the LMS database."}, status=status.HTTP_404_NOT_FOUND)
