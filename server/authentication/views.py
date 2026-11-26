@@ -354,6 +354,7 @@ class RegistrationEmailSendView(GenericAPIView):
             {
                 "message": "A verification code has been sent to your email.",
                 "retryAfterSeconds": retry_after,
+                "resendAfterSeconds": retry_after,
             }
         )
 

@@ -70,14 +70,24 @@ CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME", "").strip()
 CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY", "").strip()
 CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET", "").strip()
 
+_gmail_user = os.getenv("GMAIL_USER", "").strip()
+_gmail_app_password = os.getenv("GMAIL_APP_PASSWORD", "")
+_email_from = os.getenv("EMAIL_FROM", "").strip()
+_configured_email_host = os.getenv("EMAIL_HOST", "").strip()
+
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
-EMAIL_HOST = os.getenv("EMAIL_HOST", "").strip()
-EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
+EMAIL_HOST = _configured_email_host or (
+    "smtp.gmail.com" if _gmail_user and _gmail_app_password else ""
+)
+EMAIL_PORT = int((os.getenv("EMAIL_PORT") or "587").strip())
 EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "True").lower() in {"1", "true", "yes"}
 EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "False").lower() in {"1", "true", "yes"}
-EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "").strip()
-EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
-DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", EMAIL_HOST_USER).strip()
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "").strip() or _gmail_user
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "") or _gmail_app_password
+DEFAULT_FROM_EMAIL = (
+    os.getenv("DEFAULT_FROM_EMAIL", "").strip() or _email_from or EMAIL_HOST_USER
+)
+EMAIL_TIMEOUT = int((os.getenv("EMAIL_TIMEOUT") or "15").strip())
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [

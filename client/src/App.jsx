@@ -88,6 +88,26 @@ async function readApiResponse(response) {
   return result
 }
 
+function extractApiErrorMessage(result, fallback) {
+  if (typeof result?.message === 'string' && result.message.trim()) {
+    return result.message
+  }
+  if (typeof result?.detail === 'string' && result.detail.trim()) {
+    return result.detail
+  }
+  if (result && typeof result === 'object') {
+    for (const value of Object.values(result)) {
+      if (Array.isArray(value) && typeof value[0] === 'string' && value[0].trim()) {
+        return value[0]
+      }
+      if (typeof value === 'string' && value.trim()) {
+        return value
+      }
+    }
+  }
+  return fallback
+}
+
 async function registerAccount(payload) {
   const response = await fetch(`${API_BASE_URL}/auth/register/`, {
     method: 'POST',
@@ -411,12 +431,14 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
         if (typeof result.retryAfterSeconds === 'number') {
           setRegistrationEmailResendCountdown(result.retryAfterSeconds)
         }
-        throw new Error(result.message || 'A verification code could not be sent.')
+        throw new Error(extractApiErrorMessage(result, 'A verification code could not be sent.'))
       }
       setRegistrationEmailChallengeAddress(email)
       setRegistrationEmailCode('')
       setRegistrationEmailVerificationToken('')
-      setRegistrationEmailResendCountdown(result.resendAfterSeconds || 60)
+      setRegistrationEmailResendCountdown(
+        result.resendAfterSeconds ?? result.retryAfterSeconds ?? 60,
+      )
       setRegistrationEmailStatus(result.message || 'Verification code sent.')
     } catch (error) {
       setRegistrationEmailError(error instanceof TypeError
@@ -444,7 +466,9 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
         body: JSON.stringify({ email, code: registrationEmailCode }),
       })
       const result = await readApiResponse(response)
-      if (!response.ok) throw new Error(result.message || 'The verification code could not be checked.')
+      if (!response.ok) {
+        throw new Error(extractApiErrorMessage(result, 'The verification code could not be checked.'))
+      }
       if (typeof result.emailVerificationToken !== 'string') {
         throw new Error('The server did not confirm email verification. Please try again.')
       }
@@ -561,11 +585,20 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
           break
         }
         if (!isRegistering && response.status === 401) continue
-        throw new Error(
-          typeof result.message === 'string'
-            ? result.message
-            : `${isRegistering ? 'Registration' : 'Login'} failed. Please try again.`,
+        const errorMessage = extractApiErrorMessage(
+          result,
+          `${isRegistering ? 'Registration' : 'Login'} failed. Please try again.`,
         )
+        if (
+          isRegistering &&
+          response.status === 400 &&
+          /verify this email/i.test(errorMessage)
+        ) {
+          setRegistrationEmailVerificationToken('')
+          setRegistrationEmailStatus('')
+          setRegistrationEmailError(errorMessage)
+        }
+        throw new Error(errorMessage)
       }
 
       if (!response.ok) {
@@ -1010,9 +1043,12 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
                   pattern="\d{6}"
                   maxLength={6}
                   value={registrationEmailCode}
-                  onChange={(event) => setRegistrationEmailCode(
-                    event.currentTarget.value.replace(/\D/g, '').slice(0, 6),
-                  )}
+                  onChange={(event) => {
+                    setRegistrationEmailError('')
+                    setRegistrationEmailCode(
+                      event.currentTarget.value.replace(/\D/g, '').slice(0, 6),
+                    )
+                  }}
                   aria-describedby="registration-email-message"
                 />
                 <div className="registration-email-actions">

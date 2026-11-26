@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import hashlib
 import re
+import smtplib
 
 import jwt
 from bson import ObjectId
@@ -22,6 +23,9 @@ from authentication.google_oauth import (
     authenticate_google_authorization_code,
 )
 from authentication.services import (
+    EmailVerificationConfigurationError,
+    EmailVerificationDeliveryError,
+    EmailVerificationRateLimitError,
     GoogleHustlerAccountConflict,
     HustlerAccessDenied,
     HustlerAccountNotFound,
@@ -658,7 +662,321 @@ class AuthenticationTests(SimpleTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["retryAfterSeconds"], 60)
+        self.assertEqual(response.json()["resendAfterSeconds"], 60)
         send_code.assert_called_once_with("learner@example.com")
+
+    @override_settings(EMAIL_HOST="", DEFAULT_FROM_EMAIL="")
+    def test_registration_email_send_reports_missing_configuration(self):
+        response = self.client.post(
+            "/api/auth/registration/email/send",
+            {"email": "learner@example.com"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.json()["message"],
+            "Email verification is not configured on the server.",
+        )
+
+    @override_settings(
+        EMAIL_HOST="smtp.gmail.com",
+        EMAIL_HOST_USER="sender@gmail.com",
+        EMAIL_HOST_PASSWORD="",
+        DEFAULT_FROM_EMAIL="sender@gmail.com",
+    )
+    def test_registration_email_send_requires_gmail_credentials(self):
+        with self.assertRaises(EmailVerificationConfigurationError):
+            send_registration_email_code("learner@example.com")
+
+    @override_settings(
+        EMAIL_HOST="smtp.gmail.com",
+        EMAIL_HOST_USER="sender@gmail.com",
+        EMAIL_HOST_PASSWORD="app-password",
+        DEFAULT_FROM_EMAIL="sender@gmail.com",
+        EMAIL_USE_TLS=True,
+        EMAIL_USE_SSL=False,
+    )
+    @patch(
+        "authentication.services.send_mail",
+        side_effect=smtplib.SMTPAuthenticationError(535, b"Invalid credentials"),
+    )
+    @patch("authentication.services.collection")
+    def test_registration_email_send_handles_smtp_failure_gracefully(
+        self, collection, send_mail
+    ):
+        users, challenges = collection.side_effect = (MagicMock(), MagicMock())
+        users.find_one.return_value = None
+        challenges.find_one.return_value = None
+
+        response = self.client.post(
+            "/api/auth/registration/email/send",
+            {"email": "learner@example.com"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(
+            response.json()["message"],
+            "The verification email could not be sent.",
+        )
+        challenges.delete_one.assert_called_once()
+
+    @override_settings(
+        EMAIL_HOST="smtp.gmail.com",
+        EMAIL_HOST_USER="sender@gmail.com",
+        EMAIL_HOST_PASSWORD="app-password",
+        DEFAULT_FROM_EMAIL="sender@gmail.com",
+        EMAIL_USE_TLS=True,
+        EMAIL_USE_SSL=False,
+    )
+    @patch("authentication.services.send_mail", return_value=1)
+    @patch("authentication.services.collection")
+    def test_registration_email_resend_enforces_cooldown_and_resets_attempts(
+        self, collection, send_mail
+    ):
+        now = datetime.now(timezone.utc)
+        users, challenges = collection.side_effect = (MagicMock(), MagicMock())
+        users.find_one.return_value = None
+        challenges.find_one.return_value = {"sent_at": now - timedelta(seconds=20)}
+
+        response = self.client.post(
+            "/api/auth/registration/email/send",
+            {"email": "learner@example.com"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 429)
+        self.assertGreaterEqual(response.json()["retryAfterSeconds"], 1)
+        send_mail.assert_not_called()
+
+        users2, challenges2 = collection.side_effect = (MagicMock(), MagicMock())
+        users2.find_one.return_value = None
+        challenges2.find_one.return_value = {
+            "sent_at": now - timedelta(seconds=75),
+            "attempts": 5,
+        }
+
+        retry_after = send_registration_email_code("learner@example.com")
+        self.assertEqual(retry_after, 60)
+        stored = challenges2.update_one.call_args.args[1]["$set"]
+        self.assertEqual(stored["attempts"], 0)
+        send_mail.assert_called_once()
+
+    @patch("authentication.services.collection")
+    def test_registration_email_verify_rejects_expired_and_invalid_codes(self, collection):
+        challenges = collection.return_value
+        challenges.find_one.return_value = None
+
+        response = self.client.post(
+            "/api/auth/registration/email/verify",
+            {"email": "learner@example.com", "code": "123456"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("invalid or expired", response.json()["message"])
+
+        challenges.find_one.return_value = {
+            "_id": ObjectId(),
+            "code_hash": make_password("654321"),
+            "attempts": 1,
+            "expires_at": datetime.now(timezone.utc) - timedelta(seconds=5),
+        }
+        with self.assertRaisesRegex(ValueError, "invalid or expired"):
+            verify_registration_email_code("learner@example.com", "654321")
+
+        challenges.find_one.return_value = {
+            "_id": ObjectId(),
+            "code_hash": make_password("654321"),
+            "attempts": 1,
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+        }
+        with self.assertRaisesRegex(ValueError, "invalid or expired"):
+            verify_registration_email_code("learner@example.com", "000000")
+        challenges.update_one.assert_called_once()
+
+        challenges.find_one.return_value = {
+            "_id": ObjectId(),
+            "code_hash": make_password("654321"),
+            "attempts": 5,
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+        }
+        with self.assertRaisesRegex(ValueError, "Too many incorrect codes"):
+            verify_registration_email_code("learner@example.com", "654321")
+
+    @patch("authentication.views.create_user")
+    @patch("authentication.views.consume_registration_email_verification", return_value=False)
+    @patch("authentication.views.collection")
+    def test_registration_blocks_unverified_or_expired_email_token(
+        self, collection, consume_verification, create_user
+    ):
+        collection.return_value.find_one.return_value = None
+        response = self.client.post(
+            "/api/auth/register/",
+            {
+                "fullName": "Hustler Learner",
+                "email": "learner@example.com",
+                "username": "external.learner",
+                "password": "secure-password",
+                "confirmPassword": "secure-password",
+                "emailVerificationToken": "expired-or-invalid-token",
+                "role": "student",
+                "accountType": "hustler",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["message"],
+            "Verify this email address before creating an account.",
+        )
+        create_user.assert_not_called()
+
+    @override_settings(
+        EMAIL_HOST="smtp.gmail.com",
+        EMAIL_PORT=587,
+        EMAIL_USE_TLS=True,
+        EMAIL_USE_SSL=False,
+        EMAIL_HOST_USER="sender@gmail.com",
+        EMAIL_HOST_PASSWORD="app-password",
+        DEFAULT_FROM_EMAIL="sender@gmail.com",
+    )
+    @patch("authentication.services.send_mail", return_value=1)
+    def test_complete_email_verification_and_registration_flow(self, send_mail):
+        users_store = {}
+        challenges_store = {}
+
+        class FakeUsersCollection:
+            def create_index(self, *args, **kwargs):
+                return "idx"
+
+            def find_one(self, query):
+                for doc in users_store.values():
+                    if "email" in query and doc.get("email") == query["email"]:
+                        return doc
+                    if "username" in query and doc.get("username") == query["username"]:
+                        return doc
+                return None
+
+            def insert_one(self, doc):
+                oid = ObjectId()
+                stored = {**doc, "_id": oid}
+                users_store[oid] = stored
+                return SimpleNamespace(inserted_id=oid)
+
+        class FakeChallengesCollection:
+            def create_index(self, *args, **kwargs):
+                return "idx"
+
+            def find_one(self, query):
+                doc = challenges_store.get(query.get("email"))
+                if not doc:
+                    return None
+                if "expires_at" in query and "$gt" in query["expires_at"]:
+                    if doc["expires_at"] <= query["expires_at"]["$gt"]:
+                        return None
+                return dict(doc)
+
+            def update_one(self, query, update, upsert=False):
+                doc = None
+                if "email" in query:
+                    doc = challenges_store.get(query["email"])
+                elif "_id" in query:
+                    for candidate in challenges_store.values():
+                        if candidate["_id"] == query["_id"]:
+                            doc = candidate
+                            break
+                if doc is None:
+                    if not upsert:
+                        return SimpleNamespace(modified_count=0)
+                    doc = {"_id": ObjectId()}
+                if "attempts" in query and "$lt" in query["attempts"]:
+                    if doc.get("attempts", 0) >= query["attempts"]["$lt"]:
+                        return SimpleNamespace(modified_count=0)
+                if "$set" in update:
+                    doc.update(update["$set"])
+                if "$unset" in update:
+                    for key in update["$unset"]:
+                        doc.pop(key, None)
+                if "$inc" in update:
+                    for key, delta in update["$inc"].items():
+                        doc[key] = doc.get(key, 0) + delta
+                challenges_store[doc["email"]] = doc
+                return SimpleNamespace(modified_count=1)
+
+            def delete_one(self, query):
+                email = query.get("email")
+                doc = challenges_store.get(email)
+                if not doc:
+                    return SimpleNamespace(deleted_count=0)
+                for key, val in query.items():
+                    if key == "verified_token_hash" and doc.get(key) != val:
+                        return SimpleNamespace(deleted_count=0)
+                    if key == "verified_until" and "$gt" in val:
+                        if not doc.get("verified_until") or doc["verified_until"] <= val["$gt"]:
+                            return SimpleNamespace(deleted_count=0)
+                challenges_store.pop(email, None)
+                return SimpleNamespace(deleted_count=1)
+
+        fake_users = FakeUsersCollection()
+        fake_challenges = FakeChallengesCollection()
+
+        def fake_collection(name):
+            if name == "users":
+                return fake_users
+            if name == "email_verifications":
+                return fake_challenges
+            raise AssertionError(f"Unexpected collection: {name}")
+
+        with (
+            patch("authentication.services.collection", side_effect=fake_collection),
+            patch("authentication.views.collection", side_effect=fake_collection),
+        ):
+            send_response = self.client.post(
+                "/api/auth/registration/email/send",
+                {"email": "Student@Example.com"},
+                format="json",
+            )
+            self.assertEqual(send_response.status_code, 200)
+            self.assertEqual(send_response.json()["retryAfterSeconds"], 60)
+            sent_code = re.search(r"\b(\d{6})\b", send_mail.call_args.args[1]).group(1)
+
+            bad_verify = self.client.post(
+                "/api/auth/registration/email/verify",
+                {"email": "student@example.com", "code": "000000"},
+                format="json",
+            )
+            if sent_code != "000000":
+                self.assertEqual(bad_verify.status_code, 400)
+
+            verify_response = self.client.post(
+                "/api/auth/registration/email/verify",
+                {"email": "Student@Example.com", "code": sent_code},
+                format="json",
+            )
+            self.assertEqual(verify_response.status_code, 200)
+            token = verify_response.json()["emailVerificationToken"]
+            self.assertTrue(token)
+
+            register_response = self.client.post(
+                "/api/auth/register/",
+                {
+                    "fullName": "Test Student",
+                    "email": "student@example.com",
+                    "username": "test.student",
+                    "password": "secure-password",
+                    "confirmPassword": "secure-password",
+                    "emailVerificationToken": token,
+                    "role": "student",
+                    "accountType": "hustler",
+                },
+                format="json",
+            )
+            self.assertEqual(register_response.status_code, 201)
+            self.assertEqual(register_response.json()["user"]["email"], "student@example.com")
+            self.assertEqual(register_response.json()["user"]["accountType"], "hustler")
+            self.assertEqual(len(challenges_store), 0)
 
     @patch(
         "authentication.views.verify_registration_email_code",

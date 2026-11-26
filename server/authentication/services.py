@@ -200,7 +200,7 @@ def _google_username(users, email):
     raise ValueError("A unique username could not be generated for this Google account.")
 
 
-def send_registration_email_code(email):
+def _validate_email_configuration():
     if not settings.EMAIL_HOST or not settings.DEFAULT_FROM_EMAIL:
         raise EmailVerificationConfigurationError(
             "Email verification is not configured on the server."
@@ -209,6 +209,23 @@ def send_registration_email_code(email):
         raise EmailVerificationConfigurationError(
             "Email server TLS settings are inconsistent."
         )
+    email_host = settings.EMAIL_HOST.strip().lower()
+    has_user = bool(getattr(settings, "EMAIL_HOST_USER", "").strip())
+    has_password = bool(getattr(settings, "EMAIL_HOST_PASSWORD", ""))
+    if has_user != has_password:
+        raise EmailVerificationConfigurationError(
+            "Email verification is not configured on the server."
+        )
+    if email_host in {"smtp.gmail.com", "smtp.googlemail.com"} and not (
+        has_user and has_password
+    ):
+        raise EmailVerificationConfigurationError(
+            "Email verification is not configured on the server."
+        )
+
+
+def send_registration_email_code(email):
+    _validate_email_configuration()
 
     normalized_email = email.strip().lower()
     users = collection("users")
@@ -281,6 +298,7 @@ def send_registration_email_code(email):
 
 def verify_registration_email_code(email, code):
     normalized_email = email.strip().lower()
+    normalized_code = str(code).strip()
     now = datetime.now(timezone.utc)
     challenges = collection("email_verifications")
     challenge = challenges.find_one(
@@ -288,9 +306,15 @@ def verify_registration_email_code(email, code):
     )
     if not challenge or not challenge.get("code_hash"):
         raise ValueError("The verification code is invalid or expired.")
+    expires_at = challenge.get("expires_at")
+    if expires_at is not None:
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at <= now:
+            raise ValueError("The verification code is invalid or expired.")
     if challenge.get("attempts", 0) >= EMAIL_VERIFICATION_MAX_ATTEMPTS:
         raise ValueError("Too many incorrect codes. Request a new verification email.")
-    if not check_password(code, challenge["code_hash"]):
+    if not check_password(normalized_code, challenge["code_hash"]):
         challenges.update_one(
             {
                 "_id": challenge["_id"],
