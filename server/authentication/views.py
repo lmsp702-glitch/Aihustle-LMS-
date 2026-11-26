@@ -25,7 +25,8 @@ from authentication.serializers import (
 )
 from authentication.services import (
     authenticate_user,
-    get_or_create_google_user,
+    get_google_hustler,
+    register_google_hustler,
     create_user,
     consume_registration_email_verification,
     issue_token_pair,
@@ -37,6 +38,8 @@ from authentication.services import (
     EmailVerificationDeliveryError,
     EmailVerificationRateLimitError,
     HustlerAccessDenied,
+    HustlerAccountNotFound,
+    GoogleHustlerAccountConflict,
 )
 from authentication.approval import hustler_access_error, normalize_account_type
 from authentication.permissions import IsMainAdmin
@@ -157,46 +160,54 @@ class LoginView(GenericAPIView):
         )
 
 
-class GoogleLoginView(GenericAPIView):
+class GoogleOAuthView(GenericAPIView):
     serializer_class = GoogleLoginSerializer
     authentication_classes = []
     permission_classes = [AllowAny]
 
-    @extend_schema(request=GoogleLoginSerializer, responses=TokenPairSerializer)
-    def post(self, request):
+    def _verified_identity(self, request):
         if request.headers.get("X-Requested-With", "").lower() != "xmlhttprequest":
-            return Response(
+            return None, Response(
                 {"message": "Google sign-in request could not be verified."},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
         origin = request.headers.get("Origin", "")
         if origin not in settings.CORS_ALLOWED_ORIGINS:
-            return Response(
+            return None, Response(
                 {"message": "Google sign-in origin is not allowed."},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        serializer = GoogleLoginSerializer(data=request.data)
+        serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
             identity = authenticate_google_authorization_code(
                 serializer.validated_data["code"],
                 redirect_uri=origin,
             )
-            user = get_or_create_google_user(identity)
         except GoogleOAuthConfigurationError as exc:
-            return Response({"message": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            return None, Response({"message": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         except GoogleOAuthError as exc:
-            return Response({"message": str(exc)}, status=status.HTTP_401_UNAUTHORIZED)
+            return None, Response({"message": str(exc)}, status=status.HTTP_401_UNAUTHORIZED)
         except GoogleOAuthProviderError as exc:
-            return Response({"message": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
-        except ValueError as exc:
+            return None, Response({"message": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+        return identity, None
+
+
+class GoogleLoginView(GoogleOAuthView):
+    @extend_schema(request=GoogleLoginSerializer, responses=TokenPairSerializer)
+    def post(self, request):
+        identity, error_response = self._verified_identity(request)
+        if error_response:
+            return error_response
+        try:
+            user = get_google_hustler(identity)
+        except HustlerAccountNotFound as exc:
+            return Response({"message": str(exc)}, status=status.HTTP_404_NOT_FOUND)
+        except (HustlerAccessDenied, GoogleHustlerAccountConflict) as exc:
             return Response({"message": str(exc)}, status=status.HTTP_403_FORBIDDEN)
 
-        approval_error = hustler_access_error(user)
-        if approval_error:
-            return Response({"message": approval_error}, status=status.HTTP_403_FORBIDDEN)
         try:
             pair = issue_token_pair(user)
         except HustlerAccessDenied as exc:
@@ -211,6 +222,32 @@ class GoogleLoginView(GenericAPIView):
                 "token_type": pair.get("token_type", "Bearer"),
                 "expiresIn": pair.get("expires_in", 0),
             }
+        )
+
+
+class GoogleRegistrationView(GoogleOAuthView):
+    @extend_schema(
+        request=GoogleLoginSerializer,
+        responses={201: RegistrationPendingSerializer},
+    )
+    def post(self, request):
+        identity, error_response = self._verified_identity(request)
+        if error_response:
+            return error_response
+        try:
+            user = register_google_hustler(identity)
+        except HustlerAccessDenied as exc:
+            return Response({"message": str(exc)}, status=status.HTTP_403_FORBIDDEN)
+        except GoogleHustlerAccountConflict as exc:
+            return Response({"message": str(exc)}, status=status.HTTP_409_CONFLICT)
+        except ValueError as exc:
+            return Response({"message": str(exc)}, status=status.HTTP_409_CONFLICT)
+        return Response(
+            {
+                "message": "Your Hustler account was created and is awaiting administrator approval.",
+                "user": public_user(user),
+            },
+            status=status.HTTP_201_CREATED,
         )
 
 

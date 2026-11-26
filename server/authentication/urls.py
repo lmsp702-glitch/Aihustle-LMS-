@@ -3,6 +3,7 @@ from django.urls import path, re_path
 from authentication.views import (
     CollegeAdminCreateView,
     GoogleLoginView,
+    GoogleRegistrationView,
     LoginView,
     MeView,
     RefreshView,
@@ -28,6 +29,7 @@ urlpatterns = [
         name="registration-email-verify",
     ),
     path("dashboard/<str:role>", DashboardSessionView.as_view(), name="dashboard-session"),
+    path("google/register", GoogleRegistrationView.as_view(), name="google-register"),
     re_path(r"^google/?$", GoogleLoginView.as_view(), name="google-login"),
     path("refresh/", RefreshView.as_view(), name="refresh"),
     path("me/", MeView.as_view(), name="auth-me"),

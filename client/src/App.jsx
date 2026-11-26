@@ -335,7 +335,7 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
   }, [isRegistering, registrationEmailResendCountdown])
 
   useEffect(() => {
-    if (isRegistering || isAdministrativeRole || !GOOGLE_CLIENT_ID) return undefined
+    if (isAdministrativeRole || !GOOGLE_CLIENT_ID) return undefined
 
     let cancelled = false
     loadGoogleIdentityServices()
@@ -375,7 +375,7 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
       cancelled = true
       googleCodeClient.current = null
     }
-  }, [isRegistering, isAdministrativeRole])
+  }, [isAdministrativeRole])
 
   function updateRegistrationEmail(value) {
     const normalizedEmail = value.trim().toLowerCase()
@@ -743,7 +743,10 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
       }
 
       try {
-        const response = await fetch(`${API_BASE_URL}/auth/google`, {
+        const googleEndpoint = attempt.isRegistration
+          ? '/auth/google/register'
+          : '/auth/google'
+        const response = await fetch(`${API_BASE_URL}${googleEndpoint}`, {
           method: 'POST',
           credentials: 'include',
           headers: {
@@ -767,6 +770,22 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
               ? result.message
               : 'Google sign-in failed. Please try again.',
           )
+        }
+
+        if (attempt.isRegistration) {
+          if (
+            response.status !== 201 ||
+            typeof result.user?.id !== 'string' ||
+            result.user.accountType !== 'hustler' ||
+            result.user.approvalStatus !== 'pending'
+          ) {
+            throw new Error('The server could not confirm your Hustler registration. Please try again.')
+          }
+          attempt.active = false
+          onRegistrationSuccess(
+            result.message || 'Your Hustler account was created and is awaiting administrator approval.',
+          )
+          return
         }
 
         if (result.requiresTwoFactor === true) {
@@ -810,7 +829,7 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
         setIsGoogleSubmitting(false)
       }
     }
-  }, [onMessage])
+  }, [onMessage, onRegistrationSuccess])
 
   function handleGoogleSignIn() {
     if (!GOOGLE_CLIENT_ID) {
@@ -827,6 +846,7 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
     onMessage('')
     googleAttempt.current = {
       role: roleKey,
+      isRegistration: isRegistering,
       active: true,
       codeReceived: false,
       timeoutId: window.setTimeout(() => {
@@ -1282,7 +1302,7 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
         {!isSubmitting && <span aria-hidden="true">→</span>}
       </button>
 
-      {!isRegistering && !isAdministrativeRole && (
+      {!isAdministrativeRole && (
         <>
           <div className="separator"><span>or</span></div>
           <button
@@ -1298,7 +1318,9 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
               <path fill="#FBBC05" d="M4.38 11.86a6 6 0 0 1 0-3.72v-2.6H1.04a10 10 0 0 0 0 8.92l3.34-2.6Z" />
               <path fill="#EA4335" d="M10 3.96c1.47 0 2.78.5 3.82 1.5l2.86-2.86C14.96.99 12.7 0 10 0a10 10 0 0 0-8.96 5.54l3.34 2.6C5.17 5.72 7.39 3.96 10 3.96Z" />
             </svg>
-            {isGoogleSubmitting ? 'Connecting to Google...' : 'Continue with Google'}
+            {isGoogleSubmitting
+              ? 'Connecting to Google...'
+              : isRegistering ? 'Sign up with Google' : 'Continue with Google'}
           </button>
         </>
       )}

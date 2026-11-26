@@ -22,11 +22,15 @@ from authentication.google_oauth import (
     authenticate_google_authorization_code,
 )
 from authentication.services import (
+    GoogleHustlerAccountConflict,
+    HustlerAccessDenied,
+    HustlerAccountNotFound,
     authenticate_user,
     consume_registration_email_verification,
     create_user,
-    get_or_create_google_user,
+    get_google_hustler,
     issue_token_pair,
+    register_google_hustler,
     refresh_access_token,
     send_registration_email_code,
     verify_registration_email_code,
@@ -206,29 +210,58 @@ class AuthenticationTests(SimpleTestCase):
         self.assertEqual(stored_user["status"], "pending")
 
     @patch("authentication.services.collection")
-    @patch("authentication.services.create_user")
-    def test_google_creates_a_hustler_for_a_new_email(self, create, collection):
+    def test_google_login_does_not_create_an_account_for_a_new_email(self, collection):
         users = collection.return_value
         users.find_one.return_value = None
-        created_user = {
+        with self.assertRaisesRegex(HustlerAccountNotFound, "Account not found. Please sign up."):
+            get_google_hustler({"email": "new-google@example.com"})
+        users.insert_one.assert_not_called()
+        users.update_one.assert_not_called()
+
+    @patch("authentication.services.collection")
+    @patch("authentication.services.create_user")
+    def test_google_registration_creates_a_pending_hustler(self, create, collection):
+        users = collection.return_value
+        users.find_one.side_effect = (None, None)
+        pending_user = {
             "_id": ObjectId(),
             "email": "new-google@example.com",
             "role": "student",
             "accountType": "hustler",
             "studentType": "independent",
-            "is_active": True,
             "status": "pending",
             "approvalStatus": "pending",
         }
-        create.return_value = created_user
+        create.return_value = pending_user
 
-        result = get_or_create_google_user(
-            {"email": "new-google@example.com", "name": "Google Learner"}
-        )
+        result = register_google_hustler({
+            "email": "new-google@example.com",
+            "name": "Google Learner",
+        })
 
-        self.assertIs(result, created_user)
+        self.assertIs(result, pending_user)
         self.assertEqual(create.call_args.kwargs["role"], "student")
         self.assertEqual(create.call_args.kwargs["username"], "new-google")
+
+    @patch("authentication.services.collection")
+    @patch("authentication.services.create_user")
+    def test_google_registration_rejects_an_existing_approved_hustler(
+        self, create, collection
+    ):
+        existing_user = {
+            "_id": ObjectId(),
+            "email": "existing@example.com",
+            "role": "student",
+            "accountType": "hustler",
+            "status": "approved",
+            "approvalStatus": "approved",
+        }
+        collection.return_value.find_one.return_value = existing_user
+
+        with self.assertRaisesRegex(GoogleHustlerAccountConflict, "Please log in"):
+            register_google_hustler({"email": "existing@example.com"})
+
+        create.assert_not_called()
 
     @patch("authentication.services.collection")
     def test_google_does_not_convert_existing_non_hustler_account(self, collection):
@@ -241,8 +274,8 @@ class AuthenticationTests(SimpleTestCase):
         }
         collection.return_value.find_one.return_value = existing_user
 
-        with self.assertRaisesRegex(ValueError, "not linked to a Hustler"):
-            get_or_create_google_user({"email": "institutional@example.com"})
+        with self.assertRaisesRegex(GoogleHustlerAccountConflict, "not linked to a Hustler"):
+            get_google_hustler({"email": "institutional@example.com"})
 
     @patch("authentication.services.collection")
     def test_google_logs_in_existing_legacy_external_account_without_rewriting_it(self, collection):
@@ -258,7 +291,7 @@ class AuthenticationTests(SimpleTestCase):
         }
         collection.return_value.find_one.return_value = existing_user
 
-        result = get_or_create_google_user({"email": "external@example.com"})
+        result = get_google_hustler({"email": "external@example.com"})
 
         self.assertIs(result, existing_user)
         collection.return_value.update_one.assert_not_called()
@@ -713,7 +746,7 @@ class GoogleLoginTests(SimpleTestCase):
         )
 
     @patch("authentication.views.issue_token_pair")
-    @patch("authentication.views.get_or_create_google_user")
+    @patch("authentication.views.get_google_hustler")
     @patch("authentication.views.authenticate_google_authorization_code")
     def test_google_login_returns_frontend_token_response(
         self, authenticate_code, get_user, issue_tokens
@@ -767,24 +800,14 @@ class GoogleLoginTests(SimpleTestCase):
         issue_tokens.assert_called_once_with(user)
 
     @patch("authentication.views.issue_token_pair")
-    @patch("authentication.views.get_or_create_google_user")
+    @patch("authentication.views.get_google_hustler", side_effect=HustlerAccountNotFound(
+        "Account not found. Please sign up."
+    ))
     @patch("authentication.views.authenticate_google_authorization_code")
-    def test_google_registration_creates_pending_hustler_without_tokens(
+    def test_google_login_missing_account_asks_user_to_sign_up(
         self, authenticate_code, get_user, issue_tokens
     ):
-        authenticate_code.return_value = {
-            "email": "new-learner@example.com",
-            "name": "New Learner",
-        }
-        get_user.return_value = {
-            "_id": ObjectId(),
-            "email": "new-learner@example.com",
-            "role": "student",
-            "accountType": "hustler",
-            "status": "pending",
-            "approvalStatus": "pending",
-            "is_active": True,
-        }
+        authenticate_code.return_value = {"email": "new-user@example.com"}
 
         response = self.client.post(
             "/api/auth/google",
@@ -793,9 +816,77 @@ class GoogleLoginTests(SimpleTestCase):
             **self.headers,
         )
 
-        self.assertEqual(response.status_code, 403)
-        self.assertIn("pending administrator approval", response.json()["message"])
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["message"], "Account not found. Please sign up.")
+        get_user.assert_called_once_with({"email": "new-user@example.com"})
+        issue_tokens.assert_not_called()
+
+    @patch("authentication.views.issue_token_pair")
+    @patch("authentication.views.get_google_hustler")
+    @patch("authentication.views.authenticate_google_authorization_code")
+    def test_google_login_denies_pending_and_rejected_accounts(
+        self, authenticate_code, get_user, issue_tokens
+    ):
+        authenticate_code.return_value = {"email": "learner@example.com"}
+        for message in (
+            "Your Hustler account is pending administrator approval.",
+            "This Hustler registration was rejected. Contact an administrator for assistance.",
+        ):
+            get_user.side_effect = HustlerAccessDenied(message)
+
+            response = self.client.post(
+                "/api/auth/google",
+                {"code": "authorization-code", "role": "student"},
+                format="json",
+                **self.headers,
+            )
+
+            self.assertEqual(response.status_code, 403)
+            self.assertEqual(response.json()["message"], message)
+        issue_tokens.assert_not_called()
+
+    @patch("authentication.views.issue_token_pair")
+    @patch("authentication.views.register_google_hustler")
+    @patch("authentication.views.authenticate_google_authorization_code")
+    def test_google_registration_creates_pending_hustler_without_tokens(
+        self, authenticate_code, register_user, issue_tokens
+    ):
+        authenticate_code.return_value = {
+            "email": "new-learner@example.com",
+            "name": "New Learner",
+        }
+        register_user.return_value = {
+            "_id": ObjectId(),
+            "email": "new-learner@example.com",
+            "role": "student",
+            "accountType": "hustler",
+            "studentType": "independent",
+            "status": "pending",
+            "approvalStatus": "pending",
+            "is_active": True,
+        }
+
+        response = self.client.post(
+            "/api/auth/google/register",
+            {"code": "authorization-code", "role": "student"},
+            format="json",
+            **self.headers,
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(
+            response.json()["message"],
+            "Your Hustler account was created and is awaiting administrator approval.",
+        )
+        self.assertEqual(response.json()["user"]["accountType"], "hustler")
+        self.assertEqual(response.json()["user"]["approvalStatus"], "pending")
         self.assertNotIn("token", response.json())
+        self.assertNotIn("access", response.json())
+        self.assertNotIn("refresh", response.json())
+        register_user.assert_called_once_with({
+            "email": "new-learner@example.com",
+            "name": "New Learner",
+        })
         issue_tokens.assert_not_called()
 
     @patch("authentication.views.authenticate_google_authorization_code")

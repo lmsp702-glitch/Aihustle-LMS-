@@ -40,6 +40,14 @@ class HustlerAccessDenied(ValueError):
     pass
 
 
+class HustlerAccountNotFound(LookupError):
+    pass
+
+
+class GoogleHustlerAccountConflict(ValueError):
+    pass
+
+
 def create_user(
     name,
     email,
@@ -126,32 +134,58 @@ def authenticate_user(email, password):
     return user
 
 
-def get_or_create_google_user(identity):
+def get_google_hustler(identity):
     email = identity["email"].strip().lower()
     users = collection("users")
     user = users.find_one({"email": email})
     if user is None:
-        name = identity.get("name") or email.split("@", 1)[0]
-        username = _google_username(users, email)
-        try:
-            return create_user(
-                name=name,
-                email=email,
-                password=secrets.token_urlsafe(32),
-                username=username,
-                role="student",
-            )
-        except ValueError:
-            user = users.find_one({"email": email})
-            if user is None:
-                raise
+        raise HustlerAccountNotFound("Account not found. Please sign up.")
 
     if not is_hustler_account(user):
-        raise ValueError("This Google account is not linked to a Hustler account.")
+        raise GoogleHustlerAccountConflict(
+            "This Google account is not linked to a Hustler account."
+        )
     access_error = hustler_access_error(user)
     if access_error:
-        raise ValueError(access_error)
+        raise HustlerAccessDenied(access_error)
     return user
+
+
+def register_google_hustler(identity):
+    email = identity["email"].strip().lower()
+    users = collection("users")
+    existing_user = users.find_one({"email": email})
+    if existing_user is not None:
+        _raise_google_registration_conflict(existing_user)
+
+    name = identity.get("name") or email.split("@", 1)[0]
+    username = _google_username(users, email)
+    try:
+        return create_user(
+            name=name,
+            email=email,
+            password=secrets.token_urlsafe(32),
+            username=username,
+            role="student",
+        )
+    except ValueError:
+        existing_user = users.find_one({"email": email})
+        if existing_user is not None:
+            _raise_google_registration_conflict(existing_user)
+        raise
+
+
+def _raise_google_registration_conflict(user):
+    if is_hustler_account(user):
+        access_error = hustler_access_error(user)
+        if access_error:
+            raise HustlerAccessDenied(access_error)
+        raise GoogleHustlerAccountConflict(
+            "A Hustler account already exists. Please log in."
+        )
+    raise GoogleHustlerAccountConflict(
+        "This Google email is already linked to another account."
+    )
 
 
 def _google_username(users, email):
