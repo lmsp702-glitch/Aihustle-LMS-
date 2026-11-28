@@ -55,6 +55,35 @@ export function parseSrtTranscript(source) {
   return cues.sort((left, right) => left.startTimeMs - right.startTimeMs)
 }
 
+export function parseManualTranscript(source) {
+  if (typeof source !== 'string' || !source.trim()) {
+    throw new Error('The transcript is empty.')
+  }
+
+  const normalizedSource = source
+    .replace(/^\uFEFF/, '')
+    .replace(/\r\n?/g, '\n')
+    .trim()
+  if (new Blob([normalizedSource]).size > maxTranscriptBytes) {
+    throw new Error('Choose a transcript up to 2 MB.')
+  }
+
+  const containsTimestampCue = /^\s*(?:\d+\s*\n)?\d+:[^\n]*(?:-->|->)/m.test(normalizedSource)
+  if (containsTimestampCue) {
+    return {
+      format: 'srt',
+      transcriptText: '',
+      transcriptCues: parseSrtTranscript(normalizedSource),
+    }
+  }
+
+  return {
+    format: 'text',
+    transcriptText: normalizedSource,
+    transcriptCues: [],
+  }
+}
+
 export function formatTranscriptTime(milliseconds) {
   const totalSeconds = Math.floor(milliseconds / 1000)
   const hours = Math.floor(totalSeconds / 3600)

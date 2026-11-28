@@ -88,6 +88,11 @@ urlpatterns = [
         name="student-quiz-start",
     ),
     path(
+        "courses/<str:course_id>/quizzes/<str:quiz_id>/attempts/<str:attempt_id>/answers",
+        StudentQuizAttemptView.as_view(),
+        name="student-quiz-answer",
+    ),
+    path(
         "courses/<str:course_id>/quizzes/<str:quiz_id>/attempts/<str:attempt_id>/submit",
         StudentQuizAttemptView.as_view(),
         name="student-quiz-submit",

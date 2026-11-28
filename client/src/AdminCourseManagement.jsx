@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { isInvalidSessionResponse } from './auth-session.js'
 import { API_BASE_URL } from './api-base-url.js'
+import { parseManualTranscript } from './srt-transcript.js'
 import AdminCertificateManagement from './AdminCertificateManagement.jsx'
 import './AdminCourseManagement.css'
 
@@ -31,6 +32,32 @@ const difficultyLabels = {
   'all-levels': 'All levels',
 }
 const stepLabels = ['Course Details', 'Course Content', 'Settings', 'Review & Publish']
+const CLOUDINARY_VIDEO_CHUNK_BYTES = 20 * 1024 * 1024
+const CLOUDINARY_VIDEO_CHUNK_TIMEOUT_MS = 30 * 60 * 1000
+
+function formatSrtTimestamp(milliseconds) {
+  const totalMilliseconds = Math.floor(milliseconds)
+  const hours = Math.floor(totalMilliseconds / 3600000)
+  const minutes = Math.floor((totalMilliseconds % 3600000) / 60000)
+  const seconds = Math.floor((totalMilliseconds % 60000) / 1000)
+  const remainder = totalMilliseconds % 1000
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')},${String(remainder).padStart(3, '0')}`
+}
+
+function formatTranscriptCuesAsSrt(cues) {
+  return (Array.isArray(cues) ? cues : [])
+    .map((cue, index) => (
+      `${index + 1}\n${formatSrtTimestamp(cue.startTimeMs)} --> ${formatSrtTimestamp(cue.endTimeMs)}\n${cue.text}`
+    ))
+    .join('\n\n')
+}
+
+function formatManualTranscriptEditorValue(lesson) {
+  if (lesson.transcriptSource === 'manual' && lesson.transcriptFormat === 'text') {
+    return lesson.transcriptText || ''
+  }
+  return formatTranscriptCuesAsSrt(lesson.transcriptCues)
+}
 
 function normalizeLessons(lessons) {
   if (Array.isArray(lessons)) return lessons
@@ -126,6 +153,20 @@ function localKey() {
   return globalThis.crypto?.randomUUID?.() || `course-item-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
+function formatUploadBytes(value) {
+  const megabytes = Math.max(0, value || 0) / (1024 * 1024)
+  return `${megabytes.toFixed(megabytes >= 100 ? 0 : 1)} MB`
+}
+
+function formatUploadDuration(milliseconds) {
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return '—'
+  const seconds = Math.round(milliseconds / 1000)
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const remainingSeconds = seconds % 60
+  return `${minutes}m ${String(remainingSeconds).padStart(2, '0')}s`
+}
+
 function newMongoId() {
   const bytes = globalThis.crypto?.getRandomValues
     ? globalThis.crypto.getRandomValues(new Uint8Array(12))
@@ -202,7 +243,7 @@ function emptyContentItem(type) {
   return {
     ...(type === 'video-lesson' ? { _id: newMongoId() } : {}),
     type,
-    title: type === 'video-lesson' ? 'New lesson' : type === 'assignment' ? 'New assignment' : 'New note',
+    title: type === 'video-lesson' ? 'New lesson' : type === 'assignment' ? 'New assignment' : 'New learning resource',
     description: '',
     content: '',
     videoUrl: '',
@@ -216,18 +257,20 @@ function emptyContentItem(type) {
     transcriptFileName: '',
     transcriptFormat: '',
     transcriptBytes: 0,
+    transcriptSource: '',
+    transcriptText: '',
     transcriptCues: [],
     requiredForCertificate: true,
     resources: [],
     ...(type === 'video-lesson' ? { attentionCheck: emptyAttentionCheck() } : {}),
     dueDate: '',
     points: type === 'assignment' ? 100 : 0,
-    ...(type === 'assignment' ? { rubric: [] } : {}),
+    ...(type === 'assignment' ? { passingMarks: '', rubric: [] } : {}),
   }
 }
 
 function emptyLesson() {
-  return { title: '', description: '', content: '', videoUrl: '', videoPublicId: '', durationSeconds: 0, transcriptCues: [], resources: [], attentionCheck: emptyAttentionCheck() }
+  return { _id: newMongoId(), title: '', description: '', content: '', videoUrl: '', videoPublicId: '', durationSeconds: 0, transcriptCues: [], resources: [], attentionCheck: emptyAttentionCheck() }
 }
 
 function emptyQuestion() {
@@ -277,7 +320,8 @@ function courseFromServer(course) {
     practicalBenefits: course.practicalBenefits || [],
     assignments: (course.assignments || []).map((assignment) => ({
       ...assignment,
-      points: assignment.points ?? 100,
+      points: assignment.points ?? assignment.maximumMarks ?? assignment.maximum_marks ?? 100,
+      passingMarks: assignment.passingMarks ?? assignment.passing_marks ?? '',
       requiredForCertificate: assignment.requiredForCertificate !== false,
     })),
     quizzes: (course.quizzes || []).map((quiz) => ({
@@ -310,14 +354,17 @@ function courseFromServer(course) {
         contentItems: (module.contentItems?.length ? module.contentItems : legacyItems).map((item) => ({
           ...item,
           _localId: item._id || localKey(),
-          points: item.points ?? (item.type === 'assignment' ? 100 : 0),
+          points: item.points ?? item.maximumMarks ?? item.maximum_marks ?? (item.type === 'assignment' ? 100 : 0),
+          ...(item.type === 'assignment' ? {
+            passingMarks: item.passingMarks ?? item.passing_marks ?? '',
+          } : {}),
           ...(item.type === 'assignment' ? { rubric: (item.rubric || []).map((criterion) => ({ ...criterion })) } : {}),
           requiredForCertificate: item.requiredForCertificate !== false && item.quiz?.requiredForCertificate !== false,
           ...(item.type === 'video-lesson' ? {
             attentionCheck: attentionCheckDraft(item.attentionCheck),
             transcriptCues: [...(item.transcriptCues || [])],
             videoStored: Boolean(item.videoUrl && item.videoPublicId),
-            transcriptStored: Boolean(item.transcriptUrl && item.transcriptPublicId),
+            transcriptStored: Boolean((item.transcriptUrl && item.transcriptPublicId) || item.transcriptSource === 'manual'),
           } : {}),
           resources: (item.resources || []).map((resource) => ({ ...resource, _localId: resource._id || localKey() })),
           quiz: item.quiz ? {
@@ -356,6 +403,9 @@ function serializeCourse(course, status = course.status) {
       description: assignment.description || '',
       dueDate: apiDateValue(assignment.dueDate),
       points: assignment.points === undefined ? 100 : Number(assignment.points) || 0,
+      ...(assignment.passingMarks === '' || assignment.passingMarks == null
+        ? {}
+        : { passingMarks: Number(assignment.passingMarks) }),
       rubric: (assignment.rubric || []).map((criterion) => ({
         name: criterion.name,
         description: criterion.description || '',
@@ -374,8 +424,12 @@ function serializeCourse(course, status = course.status) {
       questions: (quiz.questions || []).map((question) => ({
         ...(question._id ? { _id: question._id } : {}),
         prompt: question.prompt,
+        type: question.type || 'multiple-choice',
         options: question.options || [],
-        correctOptionIndex: question.correctOptionIndex,
+        correctOptionIndices: Array.isArray(question.correctOptionIndices) && question.correctOptionIndices.length
+          ? question.correctOptionIndices
+          : Number.isInteger(question.correctOptionIndex) ? [question.correctOptionIndex] : [],
+        marks: Number(question.marks) || 1,
         explanation: question.explanation || '',
       })),
     })),
@@ -400,6 +454,8 @@ function serializeCourse(course, status = course.status) {
         transcriptFileName: lesson.transcriptFileName || '',
         transcriptFormat: lesson.transcriptFormat || '',
         transcriptBytes: Number(lesson.transcriptBytes) || 0,
+        transcriptSource: lesson.transcriptSource || '',
+        transcriptText: lesson.transcriptText || '',
         transcriptCues: (lesson.transcriptCues || []).map((cue) => ({
           startTimeMs: cue.startTimeMs,
           endTimeMs: cue.endTimeMs,
@@ -448,6 +504,9 @@ function serializeCourse(course, status = course.status) {
         dueDate: apiDateValue(item.dueDate),
         points: item.points === undefined ? (item.type === 'assignment' ? 100 : 0) : Number(item.points) || 0,
         ...(item.type === 'assignment' ? {
+          ...(item.passingMarks === '' || item.passingMarks == null
+            ? {}
+            : { passingMarks: Number(item.passingMarks) }),
           rubric: (item.rubric || []).map((criterion) => ({
             name: criterion.name,
             description: criterion.description || '',
@@ -460,6 +519,8 @@ function serializeCourse(course, status = course.status) {
           transcriptFileName: item.transcriptFileName || '',
           transcriptFormat: item.transcriptFormat || '',
           transcriptBytes: Number(item.transcriptBytes) || 0,
+          transcriptSource: item.transcriptSource || '',
+          transcriptText: item.transcriptText || '',
           transcriptCues: (item.transcriptCues || []).map((cue) => ({
             startTimeMs: cue.startTimeMs,
             endTimeMs: cue.endTimeMs,
@@ -492,7 +553,30 @@ function serializeModuleQuiz(quiz, requiredForCertificate = quiz.requiredForCert
     })),
   }
 }
-async function adminCourseRequest(path, onLogout, { method = 'GET', body } = {}) {
+
+function firstErrorMessage(value, field = '') {
+  if (typeof value === 'string') return field ? `${field}: ${value}` : value
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const message = firstErrorMessage(item, field)
+      if (message) return message
+    }
+  } else if (value && typeof value === 'object') {
+    for (const [key, item] of Object.entries(value)) {
+      const message = firstErrorMessage(item, field ? `${field}.${key}` : key)
+      if (message) return message
+    }
+  }
+  return ''
+}
+
+function apiErrorMessage(result) {
+  if (typeof result?.message === 'string' && result.message) return result.message
+  if (typeof result?.detail === 'string' && result.detail) return result.detail
+  return firstErrorMessage(result)
+}
+
+async function adminCourseRequest(path, onLogout, { method = 'GET', body, signal } = {}) {
   let auth
   try {
     auth = JSON.parse(sessionStorage.getItem('lms.auth') || 'null')
@@ -511,6 +595,7 @@ async function adminCourseRequest(path, onLogout, { method = 'GET', body } = {})
       ...(body ? { 'Content-Type': 'application/json' } : {}),
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
+    ...(signal ? { signal } : {}),
   })
   const text = await response.text()
   let result
@@ -520,7 +605,11 @@ async function adminCourseRequest(path, onLogout, { method = 'GET', body } = {})
     throw new Error('The server returned an invalid response.')
   }
   if (isInvalidSessionResponse(response, result)) onLogout()
-  if (!response.ok) throw new Error(result.message || 'The course request could not be completed.')
+  if (!response.ok) {
+    const requestError = new Error(apiErrorMessage(result) || 'The course request could not be completed.')
+    requestError.status = response.status
+    throw requestError
+  }
   return result
 }
 
@@ -539,7 +628,7 @@ function adminToken(onLogout) {
   return auth.token
 }
 
-function uploadWithProgress(path, file, onLogout, onProgress, fields = {}) {
+function uploadWithProgress(path, file, onLogout, onProgress, fields = {}, timeout = 10 * 60 * 1000) {
   return new Promise((resolve, reject) => {
     let token
     try {
@@ -552,12 +641,21 @@ function uploadWithProgress(path, file, onLogout, onProgress, fields = {}) {
     formData.append('file', file)
     for (const [name, value] of Object.entries(fields)) formData.append(name, value)
     const request = new XMLHttpRequest()
-    request.open('POST', `${API_BASE_URL}${path}`)
+    const uploadUrl = `${API_BASE_URL}${path}`
+    const isCourseVideoUpload = /\/media\/video\/?$/.test(path)
+    const logVideoStage = (stage, details = {}) => {
+      if (isCourseVideoUpload) console.info('[course-video-upload]', { stage, ...details })
+    }
+    request.open('POST', uploadUrl)
     request.setRequestHeader('Authorization', `Bearer ${token}`)
     request.upload.addEventListener('progress', (event) => {
-      if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100))
+      if (event.lengthComputable) {
+        onProgress(Math.round((event.loaded / event.total) * 100))
+        if (event.loaded === event.total) logVideoStage('browser_request_body_sent', { bytes: event.total })
+      }
     })
     request.addEventListener('load', () => {
+      logVideoStage('server_response_received', { status: request.status })
       let result
       try {
         result = request.responseText ? JSON.parse(request.responseText) : {}
@@ -567,17 +665,347 @@ function uploadWithProgress(path, file, onLogout, onProgress, fields = {}) {
       }
       if (isInvalidSessionResponse({ status: request.status }, result)) onLogout()
       if (request.status < 200 || request.status >= 300) {
-        reject(new Error(result.message || `The upload failed (HTTP ${request.status || 'unknown'}).`))
+        reject(new Error(apiErrorMessage(result) || `The upload failed (HTTP ${request.status || 'unknown'}).`))
         return
       }
       resolve(result)
     })
-    request.addEventListener('error', () => reject(new Error('The upload connection failed. Check your connection and try again.')))
+    request.addEventListener('error', () => {
+      logVideoStage('network_error')
+      reject(new Error('The upload connection failed. Check your connection and try again.'))
+    })
     request.addEventListener('abort', () => reject(new Error('The upload was cancelled.')))
-    request.addEventListener('timeout', () => reject(new Error('The upload timed out before the server confirmed it. Retry the upload.')))
-    request.timeout = 10 * 60 * 1000
+    request.addEventListener('timeout', () => {
+      logVideoStage('request_timeout', { timeout_ms: timeout })
+      reject(new Error('The upload timed out before the server confirmed it. Retry the upload.'))
+    })
+    request.timeout = timeout
+    logVideoStage('request_started', { url: uploadUrl, bytes: file.size })
     request.send(formData)
   })
+}
+
+function assertVideoUploadActive(operation) {
+  if (operation.cancelled) throw new Error('The video upload was cancelled.')
+}
+
+function uploadCloudinaryVideoRequest(signature, file, operation, onProgress, onStatus, onMetrics, chunk) {
+  return new Promise((resolve, reject) => {
+    let request
+    let settled = false
+    let requestStartedAt = 0
+    let uploadCompletedAt = null
+    const finish = (callback, value) => {
+      if (settled) return
+      settled = true
+      if (operation.request === request) operation.request = null
+      callback(value)
+    }
+
+    try {
+      assertVideoUploadActive(operation)
+      const formData = new FormData()
+      formData.append('file', file, signature.filenameOverride)
+      formData.append('api_key', signature.apiKey)
+      formData.append('timestamp', String(signature.timestamp))
+      formData.append('public_id', signature.publicId)
+      formData.append('filename_override', signature.filenameOverride)
+      formData.append('overwrite', signature.overwrite)
+      formData.append('type', signature.type)
+      formData.append('signature', signature.signature)
+
+      request = new XMLHttpRequest()
+      operation.request = request
+      request.open(
+        'POST',
+        `https://api.cloudinary.com/v1_1/${encodeURIComponent(signature.cloudName)}/video/upload`,
+      )
+      request.timeout = CLOUDINARY_VIDEO_CHUNK_TIMEOUT_MS
+      if (chunk) {
+        if (chunk.chunked) {
+          request.setRequestHeader('Content-Range', `bytes ${chunk.start}-${chunk.end - 1}/${chunk.total}`)
+          request.setRequestHeader('X-Unique-Upload-Id', chunk.uploadId)
+        }
+      }
+      request.upload.addEventListener('progress', (event) => {
+        if (event.lengthComputable) {
+          const fraction = event.total > 0 ? event.loaded / event.total : 0
+          const chunkBytesSent = Math.min(file.size, Math.floor(file.size * fraction))
+          const uploadedBytes = Math.min(
+            chunk?.total || file.size,
+            (chunk?.start || 0) + chunkBytesSent,
+          )
+          const completedBodyMs = operation.completedBodyMs || 0
+          const currentBodyMs = performance.now() - requestStartedAt
+          const measuredBodyMs = completedBodyMs + currentBodyMs
+          const bytesPerSecond = measuredBodyMs > 0 ? uploadedBytes / (measuredBodyMs / 1000) : 0
+          const remainingBytes = Math.max(0, (chunk?.total || file.size) - uploadedBytes)
+          const completedChunks = operation.completedChunks || 0
+          const averageCloudinaryWaitMs = completedChunks > 0
+            ? (operation.completedCloudinaryWaitMs || 0) / completedChunks
+            : 0
+          const remainingChunks = Math.max(0, (chunk?.count || 1) - completedChunks - 1)
+          const metrics = {
+            uploadedBytes,
+            totalBytes: chunk?.total || file.size,
+            currentChunk: chunk?.index || 1,
+            totalChunks: chunk?.count || 1,
+            bytesPerSecond,
+            remainingSeconds: bytesPerSecond > 0
+              ? (remainingBytes / bytesPerSecond) + (remainingChunks * averageCloudinaryWaitMs / 1000)
+              : null,
+            cloudinaryWaitMs: operation.completedCloudinaryWaitMs || 0,
+            verificationMs: 0,
+            completed: false,
+          }
+          onProgress(Math.min(99, Math.floor((uploadedBytes / (chunk?.total || file.size)) * 100)))
+          onMetrics(metrics)
+        }
+      })
+      request.upload.addEventListener('load', () => {
+        uploadCompletedAt = performance.now()
+        onStatus?.(
+          chunk?.index === chunk?.count
+            ? 'Video bytes sent; waiting for Cloudinary to finish processing…'
+            : `Chunk ${chunk?.index || 1} sent; waiting for Cloudinary response…`,
+        )
+      })
+      request.addEventListener('load', () => {
+        const requestCompletedAt = performance.now()
+        const uploadFinishedAt = uploadCompletedAt ?? requestCompletedAt
+        const timing = {
+          bytes: file.size,
+          transferMs: Math.max(0, uploadFinishedAt - requestStartedAt),
+          cloudinaryWaitMs: Math.max(0, requestCompletedAt - uploadFinishedAt),
+          totalMs: Math.max(0, requestCompletedAt - requestStartedAt),
+          status: request.status,
+        }
+        console.info('[course-video-upload] chunk_completed', {
+          chunk: `${chunk?.index || 1}/${chunk?.count || 1}`,
+          bytes: timing.bytes,
+          transfer_ms: Math.round(timing.transferMs),
+          cloudinary_response_wait_ms: Math.round(timing.cloudinaryWaitMs),
+          total_ms: Math.round(timing.totalMs),
+          transfer_bytes_per_second: timing.transferMs > 0
+            ? Math.round(timing.bytes / (timing.transferMs / 1000))
+            : 0,
+          status: timing.status,
+        })
+        operation.completedBodyMs = (operation.completedBodyMs || 0) + timing.transferMs
+        operation.completedCloudinaryWaitMs = (
+          operation.completedCloudinaryWaitMs || 0
+        ) + timing.cloudinaryWaitMs
+        operation.completedChunks = (operation.completedChunks || 0) + 1
+        let result
+        try {
+          result = request.responseText ? JSON.parse(request.responseText) : {}
+        } catch {
+          finish(reject, new Error(`Cloudinary returned an invalid response (HTTP ${request.status || 'unknown'}).`))
+          return
+        }
+        if (request.status < 200 || request.status >= 300 || result.error) {
+          const detail = result.error?.message
+          const message = detail || `Cloudinary rejected the upload (HTTP ${request.status || 'unknown'}).`
+          if (request.status === 401 || request.status === 403 || /signature.*(invalid|expired)|timestamp.*expired/i.test(message)) {
+            finish(reject, new Error(`${message} Request a fresh upload signature and retry.`))
+            return
+          }
+          finish(reject, new Error(message))
+          return
+        }
+        finish(resolve, { result, timing })
+      })
+      request.addEventListener('error', () => {
+        console.warn('[course-video-upload] chunk_failed', {
+          chunk: `${chunk?.index || 1}/${chunk?.count || 1}`,
+          bytes: file.size,
+          elapsed_ms: Math.round(performance.now() - requestStartedAt),
+          phase: uploadCompletedAt === null ? 'transfer' : 'cloudinary_response',
+        })
+        finish(reject, new Error('The connection to Cloudinary failed. Check your connection and retry the video upload.'))
+      })
+      request.addEventListener('abort', () => {
+        finish(reject, new Error('The video upload was cancelled.'))
+      })
+      request.addEventListener('timeout', () => {
+        console.warn('[course-video-upload] chunk_timed_out', {
+          chunk: `${chunk?.index || 1}/${chunk?.count || 1}`,
+          bytes: file.size,
+          elapsed_ms: Math.round(performance.now() - requestStartedAt),
+          phase: uploadCompletedAt === null ? 'transfer' : 'cloudinary_response',
+        })
+        finish(reject, new Error('A Cloudinary upload chunk timed out. Retry the upload.'))
+      })
+      onStatus?.(`Sending chunk ${chunk?.index || 1} of ${chunk?.count || 1} to Cloudinary…`)
+      requestStartedAt = performance.now()
+      request.send(formData)
+    } catch (error) {
+      finish(reject, error instanceof Error ? error : new Error('The Cloudinary upload could not be started.'))
+    }
+  })
+}
+
+function validateCourseVideoSignature(signature) {
+  if (
+    !signature
+    || signature.resourceType !== 'video'
+    || typeof signature.cloudName !== 'string'
+    || !signature.cloudName
+    || typeof signature.apiKey !== 'string'
+    || typeof signature.publicId !== 'string'
+    || typeof signature.filenameOverride !== 'string'
+    || typeof signature.signature !== 'string'
+    || !Number.isInteger(signature.timestamp)
+    || signature.overwrite !== 'false'
+    || signature.type !== 'upload'
+    || typeof signature.uploadId !== 'string'
+  ) {
+    throw new Error('The server returned incomplete video upload authorization.')
+  }
+  const expiresAt = Date.parse(signature.expiresAt)
+  if (!Number.isFinite(expiresAt) || Date.now() >= expiresAt) {
+    throw new Error('The video upload authorization has expired. Select the file again to request a fresh signature.')
+  }
+}
+
+async function uploadDirectVideoToCloudinary(signature, file, operation, onProgress, onStatus, onMetrics) {
+  validateCourseVideoSignature(signature)
+  const useChunks = file.size > CLOUDINARY_VIDEO_CHUNK_BYTES
+  const chunkSize = useChunks ? CLOUDINARY_VIDEO_CHUNK_BYTES : file.size
+  const chunkCount = Math.ceil(file.size / chunkSize)
+  const uploadId = signature.uploadId
+  let cloudinaryResponse
+  let totalTransferMs = 0
+  let totalCloudinaryWaitMs = 0
+  let totalChunkRequestMs = 0
+  operation.completedBodyMs = 0
+  operation.completedCloudinaryWaitMs = 0
+  operation.completedChunks = 0
+  onMetrics({
+    uploadedBytes: 0,
+    totalBytes: file.size,
+    currentChunk: 0,
+    totalChunks: chunkCount,
+    bytesPerSecond: 0,
+    remainingSeconds: null,
+    cloudinaryWaitMs: 0,
+    verificationMs: 0,
+    completed: false,
+  })
+  console.info('[course-video-upload] upload_started', {
+    bytes: file.size,
+    chunk_bytes: chunkSize,
+    chunks: chunkCount,
+    mode: useChunks ? 'sequential_chunks' : 'single_request',
+  })
+
+  for (let index = 0; index < chunkCount; index += 1) {
+    assertVideoUploadActive(operation)
+    const start = index * chunkSize
+    const end = Math.min(start + chunkSize, file.size)
+    const isLastChunk = index === chunkCount - 1
+    const payload = useChunks ? file.slice(start, end) : file
+    const chunk = {
+      start,
+      end,
+      total: file.size,
+      uploadId,
+      index: index + 1,
+      count: chunkCount,
+      chunked: useChunks,
+    }
+    const uploadResult = await uploadCloudinaryVideoRequest(
+      signature,
+      payload,
+      operation,
+      onProgress,
+      onStatus,
+      onMetrics,
+      chunk,
+    )
+    cloudinaryResponse = uploadResult.result
+    totalTransferMs += uploadResult.timing.transferMs
+    totalCloudinaryWaitMs += uploadResult.timing.cloudinaryWaitMs
+    totalChunkRequestMs += uploadResult.timing.totalMs
+    operation.completedBodyMs = totalTransferMs
+    operation.completedCloudinaryWaitMs = totalCloudinaryWaitMs
+    operation.completedChunks = index + 1
+    const uploadedBytes = end
+    const bytesPerSecond = totalTransferMs > 0 ? uploadedBytes / (totalTransferMs / 1000) : 0
+    const remainingBytes = Math.max(0, file.size - uploadedBytes)
+    const averageWaitMs = operation.completedChunks > 0
+      ? totalCloudinaryWaitMs / operation.completedChunks
+      : 0
+    onMetrics({
+      uploadedBytes,
+      totalBytes: file.size,
+      currentChunk: index + 1,
+      totalChunks: chunkCount,
+      bytesPerSecond,
+      remainingSeconds: bytesPerSecond > 0
+        ? (remainingBytes / bytesPerSecond) + ((chunkCount - index - 1) * averageWaitMs / 1000)
+        : null,
+      cloudinaryWaitMs: totalCloudinaryWaitMs,
+      verificationMs: 0,
+      completed: false,
+    })
+    if (useChunks && !isLastChunk && cloudinaryResponse.done === true) {
+      throw new Error('Cloudinary ended the video upload before all chunks were sent.')
+    }
+    if (useChunks && isLastChunk && cloudinaryResponse.done !== true) {
+      throw new Error('Cloudinary has not confirmed completion of the final video chunk.')
+    }
+  }
+
+  if (
+    cloudinaryResponse?.public_id !== signature.publicId
+    || cloudinaryResponse?.resource_type !== 'video'
+    || typeof cloudinaryResponse?.secure_url !== 'string'
+    || !cloudinaryResponse.secure_url.startsWith('https://')
+  ) {
+    throw new Error('Cloudinary did not confirm the expected video asset. The lesson was not updated.')
+  }
+  operation.verifying = true
+  onProgress(100)
+  console.info('[course-video-upload] cloudinary_upload_completed', {
+    bytes: file.size,
+    chunks: chunkCount,
+    transfer_ms: Math.round(totalTransferMs),
+    cloudinary_response_wait_ms: Math.round(totalCloudinaryWaitMs),
+    total_request_ms: Math.round(totalChunkRequestMs),
+  })
+  return {
+    ...cloudinaryResponse,
+    timings: {
+      transferMs: totalTransferMs,
+      cloudinaryWaitMs: totalCloudinaryWaitMs,
+      totalRequestMs: totalChunkRequestMs,
+      chunkCount,
+    },
+  }
+}
+
+function videoUploadAttemptKey(courseId, moduleId, lessonId, file) {
+  return JSON.stringify([
+    courseId,
+    moduleId,
+    lessonId,
+    file.name,
+    file.size,
+    file.lastModified,
+  ])
+}
+
+function requireVerifiedCourseVideo(result, expectedPublicId) {
+  if (
+    result?.verified !== true
+    || typeof result.url !== 'string'
+    || result.publicId !== expectedPublicId
+    || result.resourceType !== 'video'
+  ) {
+    throw new Error('The LMS did not verify and save this Cloudinary video. The lesson was not updated.')
+  }
+  return result
 }
 
 function collectCourseAssets(course) {
@@ -875,7 +1303,7 @@ function PreviewContent({ course, onBack, onEdit, onSave, isSaving, error }) {
             ]).map((item, itemIndex) => (
               <li key={item._localId || item._id || itemIndex}>
                 <span>{item.title}</span>
-                <span>{item.type === 'quiz' ? `Quiz · ${item.quiz?.questions?.length || 0} questions` : item.type === 'assignment' ? 'Assignment' : item.type === 'note' ? 'Notes / PDF' : 'Video lesson'}</span>
+                <span>{item.type === 'quiz' ? `Quiz · ${item.quiz?.questions?.length || 0} questions` : item.type === 'assignment' ? 'Assignment' : item.type === 'note' ? 'Learning resource' : 'Video lesson'}</span>
                 <span>{item.resources?.length || 0} resources</span>
               </li>
             ))}</ul>
@@ -895,6 +1323,8 @@ export default function AdminCourseManagement({ onLogout }) {
   const [isSaving, setIsSaving] = useState(false)
   const [isUploading, setIsUploading] = useState('')
   const [uploadProgress, setUploadProgress] = useState(0)
+  const [videoUploadStatus, setVideoUploadStatus] = useState('')
+  const [videoUploadMetrics, setVideoUploadMetrics] = useState(null)
   const [cloudinaryHealth, setCloudinaryHealth] = useState('checking')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -928,6 +1358,10 @@ export default function AdminCourseManagement({ onLogout }) {
   const [isGeneratingQuiz, setIsGeneratingQuiz] = useState(false)
   const [panelError, setPanelError] = useState('')
   const [transcriptUploadError, setTranscriptUploadError] = useState('')
+  const [manualTranscriptEditorOpen, setManualTranscriptEditorOpen] = useState(false)
+  const [manualTranscriptText, setManualTranscriptText] = useState('')
+  const [manualTranscriptError, setManualTranscriptError] = useState('')
+  const [manualTranscriptStatus, setManualTranscriptStatus] = useState('')
   const [reorderEnabled, setReorderEnabled] = useState(false)
   const [draggedModuleIndex, setDraggedModuleIndex] = useState(null)
   const [collapsedModules, setCollapsedModules] = useState({})
@@ -935,6 +1369,15 @@ export default function AdminCourseManagement({ onLogout }) {
   const originalAssets = useRef([])
   const pendingAssets = useRef([])
   const thumbnailPreviewUrl = useRef('')
+  const activeVideoUploadRef = useRef(null)
+  const pendingVideoVerificationsRef = useRef(new Map())
+
+  useEffect(() => {
+    setManualTranscriptEditorOpen(false)
+    setManualTranscriptText('')
+    setManualTranscriptError('')
+    setManualTranscriptStatus('')
+  }, [contentDraft?._id])
 
   async function loadCourses() {
     setError('')
@@ -1200,8 +1643,31 @@ export default function AdminCourseManagement({ onLogout }) {
     return { url: result.secure_url, publicId: result.public_id, duration: result.duration }
   }
 
-  async function uploadCourseMedia(file, assetType, module) {
+  function startVideoUpload() {
+    if (activeVideoUploadRef.current) return null
+    const operation = {
+      cancelled: false,
+      verifying: false,
+      request: null,
+      controller: new AbortController(),
+    }
+    activeVideoUploadRef.current = operation
+    return operation
+  }
+
+  function cancelVideoUpload() {
+    const operation = activeVideoUploadRef.current
+    if (!operation || operation.verifying) return
+    operation.cancelled = true
+    setVideoUploadStatus('Cancelling video upload…')
+    operation.controller.abort()
+    operation.request?.abort()
+  }
+
+  async function uploadCourseMedia(file, assetType, module, lessonId, videoOperation = null) {
     if (!editingId || !module?._id) throw new Error('Save course details and add a module before uploading lesson media.')
+    if (assetType === 'video' && !lessonId) throw new Error('Save the lesson details before uploading its video.')
+    if (!Number.isSafeInteger(file.size) || file.size <= 0) throw new Error('Choose a non-empty video or resource file.')
     const extension = file.name.split('.').pop()?.toLowerCase()
     const allowedVideo = new Map([
       ['mp4', ['video/mp4']], ['m4v', ['video/mp4', 'video/x-m4v']], ['mov', ['video/quicktime']],
@@ -1222,6 +1688,150 @@ export default function AdminCourseManagement({ onLogout }) {
       throw new Error(assetType === 'video' ? 'Choose an MP4, MOV, WebM, AVI, MKV, or OGV video file.' : 'Choose a PDF, PNG, JPEG, or WebP resource.')
     }
     if (file.size > limit) throw new Error(`This file exceeds the ${assetType === 'video' ? '2 GB' : '50 MB'} upload limit.`)
+    if (assetType === 'video') {
+      if (!videoOperation) throw new Error('The secure video upload could not be started. Please try again.')
+      const videoApiPath = (
+        `/admin/courses/${encodeURIComponent(editingId)}`
+        + `/modules/${encodeURIComponent(module._id)}`
+        + `/lessons/${encodeURIComponent(lessonId)}/media/video`
+      )
+      const attemptKey = videoUploadAttemptKey(editingId, module._id, lessonId, file)
+      const pendingVerification = pendingVideoVerificationsRef.current.get(attemptKey)
+      if (pendingVerification) {
+        videoOperation.verifying = true
+        setUploadProgress(100)
+        const verificationStartedAt = performance.now()
+        setVideoUploadStatus('Retrying LMS verification without re-uploading the video…')
+        try {
+          const result = await adminCourseRequest(`${videoApiPath}/verify`, onLogout, {
+            method: 'POST',
+            body: { uploadId: pendingVerification.uploadId },
+          })
+          requireVerifiedCourseVideo(result, pendingVerification.publicId)
+          pendingVideoVerificationsRef.current.delete(attemptKey)
+          pendingAssets.current.push({ publicId: result.publicId, resourceType: result.resourceType })
+          const verificationMs = performance.now() - verificationStartedAt
+          setVideoUploadMetrics((current) => ({
+            ...(current || {}),
+            totalBytes: file.size,
+            uploadedBytes: file.size,
+            verificationMs,
+            completed: true,
+          }))
+          console.info('[course-video-upload] verification_retry_completed', {
+            django_verification_ms: Math.round(verificationMs),
+            video_bytes_reuploaded: 0,
+          })
+          setVideoUploadStatus('Video uploaded and verified.')
+          return result
+        } catch (verificationError) {
+          setVideoUploadMetrics((current) => ({
+            ...(current || {}),
+            verificationMs: performance.now() - verificationStartedAt,
+            completed: false,
+          }))
+          if ([400, 404, 410].includes(verificationError.status)) {
+            pendingVideoVerificationsRef.current.delete(attemptKey)
+          }
+          throw verificationError
+        }
+      }
+      let courseSaveMs = 0
+      let signatureRequestMs = 0
+      setVideoUploadStatus('Requesting secure Cloudinary upload authorization…')
+      let signature
+      const requestSignature = async () => {
+        const startedAt = performance.now()
+        try {
+          return await adminCourseRequest(`${videoApiPath}/signature`, onLogout, {
+            method: 'POST',
+            body: { fileName: file.name, fileSize: file.size },
+            signal: videoOperation.controller.signal,
+          })
+        } finally {
+          signatureRequestMs += performance.now() - startedAt
+        }
+      }
+      try {
+        signature = await requestSignature()
+      } catch (signatureError) {
+        if (signatureError.status !== 404) throw signatureError
+        setVideoUploadStatus('Saving the new course module before requesting upload authorization…')
+        const courseSaveStartedAt = performance.now()
+        await adminCourseRequest(`/admin/courses/${encodeURIComponent(editingId)}`, onLogout, {
+          method: 'PUT',
+          body: serializeCourse(course, course.status),
+          signal: videoOperation.controller.signal,
+        })
+        courseSaveMs = performance.now() - courseSaveStartedAt
+        assertVideoUploadActive(videoOperation)
+        setVideoUploadStatus('Requesting secure Cloudinary upload authorization…')
+        signature = await requestSignature()
+      }
+      assertVideoUploadActive(videoOperation)
+      setUploadProgress(0)
+      const uploadedAsset = await uploadDirectVideoToCloudinary(
+        signature,
+        file,
+        videoOperation,
+        setUploadProgress,
+        setVideoUploadStatus,
+        (metrics) => setVideoUploadMetrics({
+          ...metrics,
+          courseSaveMs,
+          signatureRequestMs,
+          transferMs: metrics.transferMs || 0,
+          cloudinaryWaitMs: metrics.cloudinaryWaitMs || 0,
+          verificationMs: metrics.verificationMs || 0,
+        }),
+      )
+      assertVideoUploadActive(videoOperation)
+      pendingVideoVerificationsRef.current.set(attemptKey, {
+        uploadId: signature.uploadId,
+        publicId: signature.publicId,
+      })
+      videoOperation.verifying = true
+      setVideoUploadStatus('Verifying the Cloudinary video and saving lesson metadata…')
+      let result
+      const verificationStartedAt = performance.now()
+      try {
+        result = await adminCourseRequest(`${videoApiPath}/verify`, onLogout, {
+          method: 'POST',
+          body: { uploadId: signature.uploadId },
+        })
+        requireVerifiedCourseVideo(result, signature.publicId)
+      } catch (verificationError) {
+        if ([400, 404, 410].includes(verificationError.status)) {
+          pendingVideoVerificationsRef.current.delete(attemptKey)
+        }
+        throw verificationError
+      } finally {
+        const verificationMs = performance.now() - verificationStartedAt
+        setVideoUploadMetrics((current) => ({
+          ...(current || {}),
+          courseSaveMs,
+          signatureRequestMs,
+          transferMs: uploadedAsset.timings.transferMs,
+          cloudinaryWaitMs: uploadedAsset.timings.cloudinaryWaitMs,
+          totalCloudinaryRequestMs: uploadedAsset.timings.totalRequestMs,
+          verificationMs,
+        }))
+        console.info('[course-video-upload] stage_timings', {
+          course_save_ms: Math.round(courseSaveMs),
+          signature_request_ms: Math.round(signatureRequestMs),
+          file_transfer_ms: Math.round(uploadedAsset.timings.transferMs),
+          cloudinary_response_wait_ms: Math.round(uploadedAsset.timings.cloudinaryWaitMs),
+          cloudinary_total_request_ms: Math.round(uploadedAsset.timings.totalRequestMs),
+          django_verification_ms: Math.round(verificationMs),
+          chunks: uploadedAsset.timings.chunkCount,
+        })
+      }
+      pendingVideoVerificationsRef.current.delete(attemptKey)
+      pendingAssets.current.push({ publicId: result.publicId, resourceType: result.resourceType })
+      setVideoUploadMetrics((current) => ({ ...current, completed: true }))
+      setVideoUploadStatus('Video uploaded and verified.')
+      return result
+    }
     setUploadProgress(0)
     const result = await uploadWithProgress(
       `/admin/courses/${encodeURIComponent(editingId)}/modules/${encodeURIComponent(module._id)}/media/${assetType}`,
@@ -1258,6 +1868,7 @@ export default function AdminCourseManagement({ onLogout }) {
     const draft = existing
       ? {
         ...existing,
+        ...(type === 'video-lesson' ? { _id: existing._id || newMongoId() } : {}),
         resources: [...(existing.resources || [])],
         ...(type === 'video-lesson' ? { attentionCheck: attentionCheckDraft(existing.attentionCheck) } : {}),
         quiz: existing.quiz ? { ...existing.quiz, questions: existing.quiz.questions.map((question) => ({ ...question, options: [...question.options], correctOptionIndices: [...question.correctOptionIndices] })) } : undefined,
@@ -1282,6 +1893,20 @@ export default function AdminCourseManagement({ onLogout }) {
     if (contentDraft.type === 'video-lesson' && (!contentDraft.videoUrl?.trim() || !contentDraft.videoPublicId)) {
       setPanelError('Upload a video to Cloudinary before saving this lesson.')
       return
+    }
+    if (contentDraft.type === 'assignment') {
+      const maximumMarks = Number(contentDraft.points)
+      const passingMarks = Number(contentDraft.passingMarks)
+      if (
+        !Number.isFinite(maximumMarks)
+        || maximumMarks <= 0
+        || !Number.isFinite(passingMarks)
+        || passingMarks <= 0
+        || passingMarks > maximumMarks
+      ) {
+        setPanelError('Set passing marks above zero and no higher than the total marks.')
+        return
+      }
     }
     if (contentDraft.type === 'quiz') {
       const questions = contentDraft.quiz.questions.filter((question) => question.prompt.trim())
@@ -1459,10 +2084,29 @@ export default function AdminCourseManagement({ onLogout }) {
     const file = typeof File !== 'undefined' && fileOrEvent instanceof File ? fileOrEvent : fileOrEvent.currentTarget.files?.[0]
     if (fileOrEvent.currentTarget) fileOrEvent.currentTarget.value = ''
     if (!file || !activeContentEditor) return
+    const operation = startVideoUpload()
+    if (!operation) return
     setIsUploading('video')
     setPanelError('')
+    setVideoUploadStatus('Preparing secure video upload…')
+    setVideoUploadMetrics({
+      uploadedBytes: 0,
+      totalBytes: file.size,
+      currentChunk: 0,
+      totalChunks: 0,
+      bytesPerSecond: 0,
+      remainingSeconds: null,
+      verificationMs: 0,
+      completed: false,
+    })
     try {
-      const result = await uploadCourseMedia(file, 'video', course.modules[activeContentEditor.moduleIndex])
+      const result = await uploadCourseMedia(
+        file,
+        'video',
+        course.modules[activeContentEditor.moduleIndex],
+        contentDraft._id,
+        operation,
+      )
       setContentDraft((current) => ({
         ...current,
         videoUrl: result.url,
@@ -1471,11 +2115,16 @@ export default function AdminCourseManagement({ onLogout }) {
         videoFormat: result.format,
         videoBytes: result.bytes,
         durationSeconds: result.duration ? Math.round(result.duration) : current.durationSeconds,
-        videoStored: false,
+        videoStored: true,
       }))
     } catch (uploadError) {
-      setPanelError(uploadError instanceof Error ? uploadError.message : 'The video could not be uploaded.')
+      const message = operation.cancelled
+        ? 'Video upload cancelled. You can select the file again to retry.'
+        : uploadError instanceof Error ? uploadError.message : 'The video could not be uploaded.'
+      setVideoUploadStatus(operation.cancelled ? 'Video upload cancelled.' : '')
+      setPanelError(message)
     } finally {
+      if (activeVideoUploadRef.current === operation) activeVideoUploadRef.current = null
       setIsUploading('')
       setUploadProgress(0)
     }
@@ -1486,6 +2135,8 @@ export default function AdminCourseManagement({ onLogout }) {
     event.currentTarget.value = ''
     if (!file || !activeContentEditor || contentDraft?.type !== 'video-lesson') return
     setTranscriptUploadError('')
+    setManualTranscriptError('')
+    setManualTranscriptStatus('')
     if (!file.name.toLowerCase().endsWith('.srt')) {
       setTranscriptUploadError('Choose a file with the .srt extension.')
       return
@@ -1529,16 +2180,85 @@ export default function AdminCourseManagement({ onLogout }) {
         transcriptFileName: result.transcriptFileName,
         transcriptFormat: result.transcriptFormat,
         transcriptBytes: result.transcriptBytes,
+        transcriptSource: 'srt',
+        transcriptText: '',
         transcriptCues: result.transcriptCues,
         transcriptStored: true,
         videoStored: true,
       }))
+      setManualTranscriptStatus('')
       if (result.cleanupWarning) setTranscriptUploadError('Transcript saved, but the previous SRT file could not be removed from Cloudinary.')
     } catch (transcriptError) {
       setTranscriptUploadError(transcriptError instanceof Error ? transcriptError.message : 'The transcript could not be uploaded.')
     } finally {
       setIsUploading('')
       setUploadProgress(0)
+    }
+  }
+
+  async function saveManualTranscript() {
+    if (!activeContentEditor || !contentDraft || contentDraft.type !== 'video-lesson') return
+    if (!manualTranscriptText.trim()) {
+      setManualTranscriptError('Enter a transcript before saving.')
+      return
+    }
+    if (!editingId || !course.modules[activeContentEditor.moduleIndex]?._id || !contentDraft._id) {
+      setManualTranscriptError('Save the course details and add a module before saving a transcript.')
+      return
+    }
+    if (!contentDraft.videoUrl || !contentDraft.videoPublicId) {
+      setManualTranscriptError('Upload a video before attaching its transcript.')
+      return
+    }
+
+    let parsedTranscript
+    try {
+      parsedTranscript = parseManualTranscript(manualTranscriptText)
+    } catch (validationError) {
+      setManualTranscriptError(validationError instanceof Error ? validationError.message : 'Enter a valid transcript.')
+      return
+    }
+
+    const module = course.modules[activeContentEditor.moduleIndex]
+    setIsUploading('manual-transcript')
+    setTranscriptUploadError('')
+    setManualTranscriptError('')
+    setManualTranscriptStatus('')
+    try {
+      const result = await adminCourseRequest(
+        `/admin/courses/${encodeURIComponent(editingId)}/modules/${encodeURIComponent(module._id)}/lessons/${encodeURIComponent(contentDraft._id)}/media/transcript`,
+        onLogout,
+        {
+          method: 'PUT',
+          body: { lesson: contentDraft, transcript: manualTranscriptText },
+        },
+      )
+      if (
+        result.saved !== true
+        || result.transcriptSource !== 'manual'
+        || result.transcriptFormat !== parsedTranscript.format
+        || !Array.isArray(result.transcriptCues)
+        || typeof result.transcriptText !== 'string'
+      ) {
+        throw new Error('The server did not confirm that the manual transcript was saved. Retry the save.')
+      }
+      setContentDraft((current) => ({
+        ...current,
+        transcriptUrl: result.transcriptUrl || '',
+        transcriptPublicId: result.transcriptPublicId || '',
+        transcriptFileName: result.transcriptFileName,
+        transcriptFormat: result.transcriptFormat,
+        transcriptBytes: result.transcriptBytes,
+        transcriptSource: result.transcriptSource,
+        transcriptText: result.transcriptText,
+        transcriptCues: result.transcriptCues,
+        transcriptStored: true,
+      }))
+      setManualTranscriptStatus('Manual transcript saved.')
+    } catch (saveError) {
+      setManualTranscriptError(saveError instanceof Error ? saveError.message : 'The manual transcript could not be saved.')
+    } finally {
+      setIsUploading('')
     }
   }
 
@@ -1563,9 +2283,14 @@ export default function AdminCourseManagement({ onLogout }) {
         transcriptFileName: '',
         transcriptFormat: '',
         transcriptBytes: 0,
+        transcriptSource: '',
+        transcriptText: '',
         transcriptCues: [],
         transcriptStored: false,
       }))
+      setManualTranscriptText('')
+      setManualTranscriptStatus('')
+      setManualTranscriptError('')
     } catch (transcriptError) {
       setTranscriptUploadError(transcriptError instanceof Error ? transcriptError.message : 'The transcript could not be removed.')
     } finally {
@@ -1632,14 +2357,38 @@ export default function AdminCourseManagement({ onLogout }) {
       : fileOrEvent.currentTarget.files?.[0]
     if (fileOrEvent.currentTarget) fileOrEvent.currentTarget.value = ''
     if (!file) return
+    const operation = startVideoUpload()
+    if (!operation) return
     setIsUploading('video')
     setPanelError('')
+    setVideoUploadStatus('Preparing secure video upload…')
+    setVideoUploadMetrics({
+      uploadedBytes: 0,
+      totalBytes: file.size,
+      currentChunk: 0,
+      totalChunks: 0,
+      bytesPerSecond: 0,
+      remainingSeconds: null,
+      verificationMs: 0,
+      completed: false,
+    })
     try {
-      const result = await uploadCourseMedia(file, 'video', course.modules[lessonTarget?.moduleIndex])
-      setLessonDraft((current) => ({ ...current, videoUrl: result.url, videoPublicId: result.publicId, videoFormat: result.format, videoBytes: result.bytes, durationSeconds: result.duration ? Math.round(result.duration) : current.durationSeconds }))
+      const result = await uploadCourseMedia(
+        file,
+        'video',
+        course.modules[lessonTarget?.moduleIndex],
+        lessonDraft._id,
+        operation,
+      )
+      setLessonDraft((current) => ({ ...current, videoUrl: result.url, videoPublicId: result.publicId, videoFormat: result.format, videoBytes: result.bytes, durationSeconds: result.duration ? Math.round(result.duration) : current.durationSeconds, videoStored: true }))
     } catch (uploadError) {
-      setPanelError(uploadError instanceof Error ? uploadError.message : 'The video could not be uploaded.')
+      const message = operation.cancelled
+        ? 'Video upload cancelled. You can select the file again to retry.'
+        : uploadError instanceof Error ? uploadError.message : 'The video could not be uploaded.'
+      setVideoUploadStatus(operation.cancelled ? 'Video upload cancelled.' : '')
+      setPanelError(message)
     } finally {
+      if (activeVideoUploadRef.current === operation) activeVideoUploadRef.current = null
       setIsUploading('')
       setUploadProgress(0)
     }
@@ -1668,7 +2417,7 @@ export default function AdminCourseManagement({ onLogout }) {
   function openLessonEditor(moduleIndex, lessonIndex = -1) {
     const existing = lessonIndex >= 0 ? course.modules[moduleIndex].lessons[lessonIndex] : emptyLesson()
     setLessonTarget({ moduleIndex, lessonIndex })
-    setLessonDraft({ ...existing, resources: (existing.resources || []).map((resource) => ({ ...resource })) })
+    setLessonDraft({ ...existing, _id: existing._id || newMongoId(), resources: (existing.resources || []).map((resource) => ({ ...resource })) })
     setQuizTarget(null)
     setPanelError('')
   }
@@ -1739,6 +2488,19 @@ export default function AdminCourseManagement({ onLogout }) {
   }
 
   async function saveCourse(status) {
+    const invalidAssignmentThreshold = course.assignments.some((assignment) => {
+      const maximumMarks = Number(assignment.points)
+      const passingMarks = Number(assignment.passingMarks)
+      return !Number.isFinite(maximumMarks)
+        || maximumMarks <= 0
+        || !Number.isFinite(passingMarks)
+        || passingMarks <= 0
+        || passingMarks > maximumMarks
+    })
+    if (invalidAssignmentThreshold) {
+      setError('Each course-level assignment needs passing marks above zero and no higher than its total marks.')
+      return
+    }
     setIsSaving(true)
     setError('')
     try {
@@ -2000,7 +2762,7 @@ export default function AdminCourseManagement({ onLogout }) {
       'video-lesson': 'Video lesson',
       quiz: 'Quiz',
       assignment: 'Assignment',
-      note: 'Notes / PDF',
+      note: 'Learning resource',
     }
 
     return (
@@ -2069,7 +2831,7 @@ export default function AdminCourseManagement({ onLogout }) {
                     ))}
                   </div>
                   <div className="ac-add-content-actions" aria-label={`Add content to ${module.title}`}>
-                    {Object.entries(typeLabels).map(([type, label]) => <button type="button" className="ac-button ac-button--outline" key={type} onClick={() => openContentEditor(moduleIndex, type)}>＋ {type === 'video-lesson' ? 'Add Video' : type === 'note' ? 'Add Notes/PDF' : `Add ${label}`}</button>)}
+                    {Object.entries(typeLabels).map(([type, label]) => <button type="button" className="ac-button ac-button--outline" key={type} onClick={() => openContentEditor(moduleIndex, type)}>＋ {type === 'video-lesson' ? 'Add Video' : `Add ${label}`}</button>)}
                   </div>
                   {activeContentEditor?.moduleIndex === moduleIndex && contentDraft && (
                     <form className="ac-content-editor" onSubmit={saveContentItem}>
@@ -2087,8 +2849,38 @@ export default function AdminCourseManagement({ onLogout }) {
                       {contentDraft.type === 'video-lesson' && <>
                         <label className="ac-field"><span>Lesson description</span><textarea rows="3" maxLength="10000" value={contentDraft.description || ''} onChange={(event) => updateDraft('description', event.target.value)} placeholder="Briefly describe this lesson." /></label>
                         <label className="ac-field"><span>Lesson content</span><textarea rows="4" maxLength="20000" value={contentDraft.content || ''} onChange={(event) => updateDraft('content', event.target.value)} placeholder="Add the lesson text used to teach or explain this video." /></label>
-                        <label className="ac-resource-add ac-content-upload"><span aria-hidden="true">↑</span>{isUploading === 'video' ? `Uploading video · ${uploadProgress}%` : contentDraft.videoPublicId ? 'Replace uploaded video' : 'Upload video'}<input type="file" accept="video/mp4,video/quicktime,video/webm,video/x-msvideo,video/x-matroska,video/ogg,.m4v,.mkv,.avi,.ogv" onChange={uploadContentVideo} disabled={Boolean(isUploading)} /></label>
-                        {isUploading === 'video' && <><progress className="ac-content-progress" max="100" value={uploadProgress} aria-label={`Video upload ${uploadProgress}%`} /><small className="ac-content-uploaded">{uploadProgress >= 100 ? 'Finishing upload to Cloudinary…' : `Uploading to server · ${uploadProgress}%`}</small></>}
+                        <label className="ac-resource-add ac-content-upload"><span aria-hidden="true">↑</span>{isUploading === 'video' ? `Uploading to Cloudinary · ${uploadProgress}%` : contentDraft.videoPublicId ? 'Replace uploaded video' : 'Upload video'}<input type="file" accept="video/mp4,video/quicktime,video/webm,video/x-msvideo,video/x-matroska,video/ogg,.m4v,.mkv,.avi,.ogv" onChange={uploadContentVideo} disabled={Boolean(isUploading)} /></label>
+                        {isUploading === 'video' && <>
+                          <progress className="ac-content-progress" max="100" value={uploadProgress} aria-label={`Video upload ${uploadProgress}%`} />
+                          <small className="ac-content-uploaded">{videoUploadStatus}</small>
+                          <small className="ac-content-uploaded">
+                            {formatUploadBytes(videoUploadMetrics?.uploadedBytes)} / {formatUploadBytes(videoUploadMetrics?.totalBytes)}
+                            {videoUploadMetrics?.totalChunks
+                              ? ` · Chunk ${videoUploadMetrics.currentChunk || 1} of ${videoUploadMetrics.totalChunks}`
+                              : ''}
+                          </small>
+                          <small className="ac-content-uploaded">
+                            Speed: {videoUploadMetrics?.bytesPerSecond > 0
+                              ? `${(videoUploadMetrics.bytesPerSecond / (1024 * 1024)).toFixed(2)} MB/s`
+                              : 'Measuring…'}
+                            {Number.isFinite(videoUploadMetrics?.remainingSeconds)
+                              ? ` · Approx. ${formatUploadDuration(videoUploadMetrics.remainingSeconds * 1000)} remaining`
+                              : ''}
+                          </small>
+                          <button
+                            type="button"
+                            className="ac-text-button"
+                            onClick={cancelVideoUpload}
+                            disabled={videoUploadStatus.startsWith('Verifying')}
+                          >
+                            {videoUploadStatus.startsWith('Verifying') ? 'Verifying video…' : 'Cancel upload'}
+                          </button>
+                        </>}
+                        {videoUploadMetrics?.completed && <small className="ac-content-uploaded">
+                          Transfer {formatUploadDuration(videoUploadMetrics.transferMs)}
+                          {' · '}Cloudinary response {formatUploadDuration(videoUploadMetrics.cloudinaryWaitMs)}
+                          {' · '}Django verification {formatUploadDuration(videoUploadMetrics.verificationMs)}
+                        </small>}
                         <small className="ac-content-uploaded">
                           Video: {contentDraft.videoStored ? 'Uploaded' : contentDraft.videoPublicId ? 'Pending course save' : 'Not uploaded'}
                           {contentDraft.videoFileName ? ` · ${contentDraft.videoFileName}` : ''}
@@ -2097,7 +2889,7 @@ export default function AdminCourseManagement({ onLogout }) {
                           <span aria-hidden="true">↑</span>
                           {isUploading === 'transcript'
                             ? `Uploading transcript · ${uploadProgress}%`
-                            : contentDraft.transcriptStored || contentDraft.transcriptCues?.length ? 'Replace SRT transcript' : 'Upload SRT transcript'}
+                            : contentDraft.transcriptPublicId ? 'Replace SRT transcript' : 'Upload SRT transcript'}
                           <input
                             type="file"
                             accept=".srt"
@@ -2110,8 +2902,10 @@ export default function AdminCourseManagement({ onLogout }) {
                         {contentDraft.transcriptStored || contentDraft.transcriptCues?.length > 0 ? (
                           <div className="ac-resource-heading">
                             <small className="ac-content-uploaded">
-                              SRT transcript: {contentDraft.transcriptStored ? 'Uploaded' : 'Not uploaded'}
-                              {contentDraft.transcriptFileName ? ` · ${contentDraft.transcriptFileName}` : ''}
+                              {contentDraft.transcriptSource === 'manual'
+                                ? 'Manual transcript: Saved'
+                                : `SRT transcript: ${contentDraft.transcriptStored ? 'Uploaded' : 'Not uploaded'}`}
+                              {contentDraft.transcriptSource !== 'manual' && contentDraft.transcriptFileName ? ` · ${contentDraft.transcriptFileName}` : ''}
                               {contentDraft.transcriptCues?.length ? ` · ${contentDraft.transcriptCues.length} cues` : ''}
                             </small>
                             <button
@@ -2124,6 +2918,63 @@ export default function AdminCourseManagement({ onLogout }) {
                             </button>
                           </div>
                         ) : <small className="ac-content-uploaded">SRT transcript: Not uploaded</small>}
+                        <button
+                          type="button"
+                          className="ac-text-button"
+                          disabled={Boolean(isUploading)}
+                          onClick={() => {
+                            if (manualTranscriptEditorOpen) {
+                              setManualTranscriptEditorOpen(false)
+                            } else {
+                              setManualTranscriptText(formatManualTranscriptEditorValue(contentDraft))
+                              setTranscriptUploadError('')
+                              setManualTranscriptError('')
+                              setManualTranscriptStatus('')
+                              setManualTranscriptEditorOpen(true)
+                            }
+                          }}
+                        >
+                          {manualTranscriptEditorOpen
+                            ? 'Close Manual Transcript Editor'
+                            : contentDraft.transcriptSource === 'manual'
+                              ? 'Edit Manual Transcript'
+                              : 'Add Transcript Manually'}
+                        </button>
+                        {manualTranscriptEditorOpen && (
+                          <section className="ac-ai-quiz" aria-labelledby="ac-manual-transcript-title">
+                            <h5 id="ac-manual-transcript-title">Manual transcript</h5>
+                            <p className="ac-manual-quiz-help">
+                              Paste plain text, or use SRT timestamps to keep transcript playback synchronized.
+                            </p>
+                            <label className="ac-field">
+                              <span>Transcript text</span>
+                              <textarea
+                                rows={12}
+                                value={manualTranscriptText}
+                                onChange={(event) => {
+                                  setManualTranscriptText(event.target.value)
+                                  setManualTranscriptError('')
+                                  setManualTranscriptStatus('')
+                                }}
+                                placeholder="Type or paste the transcript here. SRT timestamps are optional."
+                                aria-label="Manual transcript text"
+                                disabled={Boolean(isUploading)}
+                              />
+                            </label>
+                            {manualTranscriptError && <p className="ac-inline-error" role="alert">{manualTranscriptError}</p>}
+                            {manualTranscriptStatus && <p className="ac-success" role="status">{manualTranscriptStatus}</p>}
+                            <div className="ac-panel-actions">
+                              <button
+                                type="button"
+                                className="ac-button ac-button--gold"
+                                onClick={saveManualTranscript}
+                                disabled={Boolean(isUploading) || !manualTranscriptText.trim()}
+                              >
+                                {isUploading === 'manual-transcript' ? 'Saving transcript…' : 'Save Manual Transcript'}
+                              </button>
+                            </div>
+                          </section>
+                        )}
                         <section className="ac-ai-quiz" aria-labelledby="ac-attention-check-title">
                           <h5 id="ac-attention-check-title">Video Attention Check</h5>
                           <p className="ac-manual-quiz-help">Optionally pause this video at random intervals and ask one of these questions.</p>
@@ -2183,7 +3034,10 @@ export default function AdminCourseManagement({ onLogout }) {
                       </>}
                       {contentDraft.type === 'assignment' && <>
                         <label className="ac-field"><span>Instructions</span><textarea rows="4" maxLength="10000" value={contentDraft.description} onChange={(event) => updateDraft('description', event.target.value)} /></label>
-                        <div className="ac-form-columns"><label className="ac-field"><span>Points</span><input type="number" min="0" max="100000" value={contentDraft.points} onChange={(event) => updateDraft('points', event.target.value)} /></label></div>
+                        <div className="ac-form-columns">
+                          <label className="ac-field"><span>Total marks</span><input type="number" min="1" max="100000" value={contentDraft.points} onChange={(event) => updateDraft('points', event.target.value)} /></label>
+                          <label className="ac-field"><span>Passing marks</span><input type="number" min="1" max={contentDraft.points} step="any" value={contentDraft.passingMarks ?? ''} onChange={(event) => updateDraft('passingMarks', event.target.value)} /></label>
+                        </div>
                         <section className="ac-ai-quiz" aria-label="Assignment marking rubric">
                           <h5>Marking rubric (optional)</h5>
                           <p className="ac-manual-quiz-help">Add criteria and maximum marks. The criterion marks must total the assignment points.</p>
@@ -2199,7 +3053,7 @@ export default function AdminCourseManagement({ onLogout }) {
                         </section>
                       </>}
                       {contentDraft.type === 'note' && <>
-                        <label className="ac-field"><span>Notes</span><textarea rows="5" maxLength="20000" value={contentDraft.content} onChange={(event) => updateDraft('content', event.target.value)} placeholder="Write the lesson notes here." /></label>
+                        <label className="ac-field"><span>Learning resource details</span><textarea rows="5" maxLength="20000" value={contentDraft.content} onChange={(event) => updateDraft('content', event.target.value)} placeholder="Add reading notes or resource details for students." /></label>
                         <label className="ac-resource-add ac-content-upload"><span aria-hidden="true">＋</span>{isUploading === 'resource' ? 'Uploading file…' : 'Attach PDF or resource'}<input type="file" accept="application/pdf,image/png,image/jpeg,image/webp" onChange={uploadContentResource} disabled={Boolean(isUploading)} /></label>
                         {contentDraft.resources.length > 0 && <ul className="ac-resource-list">{contentDraft.resources.map((resource, index) => <li key={resource._localId || resource._id || index}><a href={resource.url} target="_blank" rel="noreferrer">{resource.title}</a><button type="button" className="ac-text-button ac-text-button--danger" onClick={() => updateDraft('resources', contentDraft.resources.filter((_, resourceIndex) => resourceIndex !== index))}>Remove</button></li>)}</ul>}
                       </>}
@@ -2270,16 +3124,45 @@ export default function AdminCourseManagement({ onLogout }) {
               </label>
             ))}
             {course.assignments.map((assignment, index) => (
-              <label className="ac-ai-quiz__types" key={assignment._id || `assignment-${index}`}>
-                <input
-                  type="checkbox"
-                  checked={assignment.requiredForCertificate !== false}
-                  onChange={(event) => updateCourse('assignments', course.assignments.map((entry, itemIndex) => (
-                    itemIndex === index ? { ...entry, requiredForCertificate: event.target.checked } : entry
-                  )))}
-                />
-                Assignment: {assignment.title || `Assignment ${index + 1}`} is required for the course certificate
-              </label>
+              <div className="ac-legacy-assignment-settings" key={assignment._id || `assignment-${index}`}>
+                <label className="ac-ai-quiz__types">
+                  <input
+                    type="checkbox"
+                    checked={assignment.requiredForCertificate !== false}
+                    onChange={(event) => updateCourse('assignments', course.assignments.map((entry, itemIndex) => (
+                      itemIndex === index ? { ...entry, requiredForCertificate: event.target.checked } : entry
+                    )))}
+                  />
+                  Assignment: {assignment.title || `Assignment ${index + 1}`} is required for the course certificate
+                </label>
+                <div className="ac-form-columns">
+                  <label className="ac-field">
+                    <span>Total marks</span>
+                    <input
+                      type="number"
+                      min="1"
+                      max="100000"
+                      value={assignment.points}
+                      onChange={(event) => updateCourse('assignments', course.assignments.map((entry, itemIndex) => (
+                        itemIndex === index ? { ...entry, points: event.target.value } : entry
+                      )))}
+                    />
+                  </label>
+                  <label className="ac-field">
+                    <span>Passing marks</span>
+                    <input
+                      type="number"
+                      min="1"
+                      max={assignment.points}
+                      step="any"
+                      value={assignment.passingMarks ?? ''}
+                      onChange={(event) => updateCourse('assignments', course.assignments.map((entry, itemIndex) => (
+                        itemIndex === index ? { ...entry, passingMarks: event.target.value } : entry
+                      )))}
+                    />
+                  </label>
+                </div>
+              </div>
             ))}
           </section>
         )}

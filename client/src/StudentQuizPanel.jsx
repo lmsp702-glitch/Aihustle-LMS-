@@ -1,6 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { fetchWithAuth, isInvalidSessionResponse } from './auth-session.js'
-import { buildQuizSubmissionAnswers, getQuestionKey } from './student-quiz-answers.js'
+import {
+  buildQuizSubmissionAnswers,
+  canNavigateToQuestion,
+  getQuestionKey,
+  isQuizAnswerSaved,
+  updateQuizAnswerMap,
+  validateQuizQuestions,
+} from './student-quiz-answers.js'
 import { API_BASE_URL } from './api-base-url.js'
 
 function getQuizAttempts(quizId, attempts) {
@@ -49,10 +56,17 @@ export default function StudentQuizPanel({
       answer.selectedOptionIndices || [],
     ]),
   ))
+  const [savedAnswers, setSavedAnswers] = useState(() => Object.fromEntries(
+    (savedActiveAttempt?.answers || []).map((answer) => [
+      getQuestionKey({ _id: answer.questionId }),
+      answer.selectedOptionIndices || [],
+    ]),
+  ))
   const [questionIndex, setQuestionIndex] = useState(0)
   const [view, setView] = useState(savedActiveAttempt ? 'quiz' : latestSubmittedAttempt ? 'results' : 'intro')
   const [secondsRemaining, setSecondsRemaining] = useState(null)
   const [submitting, setSubmitting] = useState(false)
+  const [savingQuestionId, setSavingQuestionId] = useState('')
   const [error, setError] = useState('')
   const [quizStatus, setQuizStatus] = useState(() => ({
     maxAttempts,
@@ -63,33 +77,49 @@ export default function StudentQuizPanel({
     serverTime: null,
   }))
   const [statusRefresh, setStatusRefresh] = useState(0)
-  const [serverClockOffset, setServerClockOffset] = useState(0)
+  const [serverClockOffset, setServerClockOffset] = useState(null)
   const [lockSecondsRemaining, setLockSecondsRemaining] = useState(0)
   const quizStartVersion = useRef(0)
   const submitLock = useRef(false)
+  const answerSaveLock = useRef(false)
   const submitRef = useRef(null)
   const timerSubmissionRequested = useRef(false)
   const answersRef = useRef(answers)
+  const savedAnswersRef = useRef(savedAnswers)
   const questions = questionSet
   const questionCount = questions.length
   const currentQuestion = questions[questionIndex]
+  const currentQuestionKey = currentQuestion ? getQuestionKey(currentQuestion) : ''
+  const currentSelection = currentQuestion ? answers[currentQuestionKey] || [] : []
+  const currentAnswerIsSaved = isQuizAnswerSaved(currentQuestion, answers, savedAnswers)
+  const isFinalQuestion = questionIndex === questionCount - 1
+  const hasSavedCurrentSelection = currentAnswerIsSaved && currentSelection.length > 0
+  const canSubmitCurrentQuestion = isFinalQuestion && hasSavedCurrentSelection
+  const questionValidation = validateQuizQuestions(questions)
   const answeredCount = questions.filter((question) => (
-    (answers[getQuestionKey(question)] || []).length > 0
+    (savedAnswers[getQuestionKey(question)] || []).length > 0
   )).length
   const isLocked = Boolean(quizStatus.lockedUntil && lockSecondsRemaining > 0)
-  const hasAttemptsLeft = quizStatus.attemptsRemaining > 0 && !quizStatus.passed && !isLocked
+  const hasAttemptsLeft = quizStatus.attemptsRemaining > 0 && !isLocked
   const latestResult = activeAttempt?.status === 'submitted' ? activeAttempt : latestSubmittedAttempt
   const timeLimitMinutes = activeAttempt?.timeLimitMinutes ?? quiz.timeLimitMinutes ?? 0
+  const passingPercentage = Number(quiz.passingPercentage)
+  const hasPassingPercentage = Number.isFinite(passingPercentage) && passingPercentage >= 1 && passingPercentage <= 100
 
   function applyQuizStatus(status) {
     if (!status || typeof status !== 'object') return
     setQuizStatus(status)
     if (status.serverTime) {
-      const offset = new Date(status.serverTime).getTime() - Date.now()
-      setServerClockOffset(offset)
-      setLockSecondsRemaining(status.lockedUntil
-        ? Math.max(0, Math.ceil((new Date(status.lockedUntil).getTime() - (Date.now() + offset)) / 1000))
-        : 0)
+      const serverTime = new Date(status.serverTime).getTime()
+      if (Number.isFinite(serverTime)) {
+        const offset = serverTime - Date.now()
+        setServerClockOffset(offset)
+        setLockSecondsRemaining(status.lockedUntil
+          ? Math.max(0, Math.ceil((new Date(status.lockedUntil).getTime() - (Date.now() + offset)) / 1000))
+          : 0)
+      } else {
+        setServerClockOffset(null)
+      }
     }
   }
 
@@ -143,6 +173,8 @@ export default function StudentQuizPanel({
       setActiveAttempt(savedAttempt)
       answersRef.current = savedAnswers
       setAnswers(savedAnswers)
+      savedAnswersRef.current = savedAnswers
+      setSavedAnswers(savedAnswers)
       setQuestionIndex(0)
       setView('quiz')
       return
@@ -178,12 +210,70 @@ export default function StudentQuizPanel({
     return () => window.clearInterval(timerId)
   }, [quizStatus.lockedUntil, serverClockOffset])
 
-  function setAnswer(questionId, optionIndex, multiple) {
-    const questionKey = getQuestionKey({ _id: questionId })
-    const selected = new Set(multiple ? answersRef.current[questionKey] || [] : [])
-    if (multiple && selected.has(optionIndex)) selected.delete(optionIndex)
-    else selected.add(optionIndex)
-    const next = { ...answersRef.current, [questionKey]: [...selected].sort((a, b) => a - b) }
+  async function saveAnswer(question, selectedOptionIndices) {
+    if (!activeAttempt?._id || answerSaveLock.current) return false
+    const questionId = getQuestionKey(question)
+    if (!/^[a-f\d]{24}$/.test(questionId)) {
+      setError('This question does not have a valid saved ID.')
+      return false
+    }
+
+    answerSaveLock.current = true
+    setSavingQuestionId(questionId)
+    setError('')
+    try {
+      const savedAuth = sessionStorage.getItem('lms.auth')
+      const auth = savedAuth ? JSON.parse(savedAuth) : null
+      if (typeof auth?.token !== 'string') {
+        onLogout()
+        return false
+      }
+      const response = await fetchWithAuth(
+        `${API_BASE_URL}/courses/${encodeURIComponent(courseId)}/quizzes/${encodeURIComponent(quiz._id)}/attempts/${encodeURIComponent(activeAttempt._id)}/answers`,
+        {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${auth.token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ questionId, selectedOptionIndices }),
+        },
+        API_BASE_URL,
+        auth.token,
+      )
+      const result = await response.json()
+      if (isInvalidSessionResponse(response, result)) {
+        onLogout()
+        return false
+      }
+      if (!response.ok) throw new Error(result.message || 'Your answer could not be saved.')
+      if (!result.attempt?._id || result.attempt.status !== 'started') {
+        throw new Error('The server did not confirm that your answer was saved.')
+      }
+      const saved = { ...savedAnswersRef.current, [questionId]: [...selectedOptionIndices] }
+      savedAnswersRef.current = saved
+      setSavedAnswers(saved)
+      setActiveAttempt(result.attempt)
+      onAttemptAdded(result.attempt)
+      return true
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : 'Your answer could not be saved.')
+      return false
+    } finally {
+      answerSaveLock.current = false
+      setSavingQuestionId('')
+    }
+  }
+
+  function setAnswer(question, optionIndex) {
+    if (answerSaveLock.current || questionValidation.error) return
+    let next
+    try {
+      next = updateQuizAnswerMap(answersRef.current, question, optionIndex)
+    } catch (selectionError) {
+      setError(selectionError instanceof Error ? selectionError.message : 'The selected option is invalid.')
+      return
+    }
     answersRef.current = next
     setAnswers(next)
   }
@@ -191,6 +281,10 @@ export default function StudentQuizPanel({
   async function startQuiz() {
     if (!quiz._id) {
       setError('This quiz cannot be started because it has no saved ID.')
+      return
+    }
+    if (!hasPassingPercentage) {
+      setError('The Admin must configure a valid passing percentage before this quiz can start.')
       return
     }
     quizStartVersion.current += 1
@@ -227,10 +321,24 @@ export default function StudentQuizPanel({
       if (!Array.isArray(result.questions) || !result.questions.length) {
         throw new Error('The server did not return the saved questions for this quiz attempt.')
       }
+      const questionValidation = validateQuizQuestions(result.questions)
+      if (questionValidation.error) throw new Error(questionValidation.error)
+      const savedQuestionIds = new Set(result.questions.map(getQuestionKey))
+      const savedAnswers = Object.fromEntries((result.attempt.answers || [])
+        .filter((answer) => (
+          Array.isArray(answer.selectedOptionIndices)
+          && savedQuestionIds.has(getQuestionKey({ _id: answer.questionId }))
+        ))
+        .map((answer) => [
+          getQuestionKey({ _id: answer.questionId }),
+          answer.selectedOptionIndices,
+        ]))
       setQuestionSet(result.questions)
       setActiveAttempt(result.attempt)
-      setAnswers({})
-      answersRef.current = {}
+      setAnswers(savedAnswers)
+      answersRef.current = savedAnswers
+      setSavedAnswers(savedAnswers)
+      savedAnswersRef.current = savedAnswers
       timerSubmissionRequested.current = false
       setQuestionIndex(0)
       setView('quiz')
@@ -248,7 +356,7 @@ export default function StudentQuizPanel({
     submitLock.current = true
     setSubmitting(true)
     setError('')
-    const submission = buildQuizSubmissionAnswers(questions, answersRef.current, { allowUnanswered })
+    const submission = buildQuizSubmissionAnswers(questions, savedAnswersRef.current, { allowUnanswered })
     if (submission.error) {
       setError(submission.error)
       submitLock.current = false
@@ -299,11 +407,15 @@ export default function StudentQuizPanel({
       setSecondsRemaining(null)
       return undefined
     }
+    if (serverClockOffset === null) {
+      setSecondsRemaining(null)
+      return undefined
+    }
     const deadline = new Date(activeAttempt.startedAt).getTime() + timeLimitMinutes * 60 * 1000
     const updateTimeRemaining = () => {
-      const remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000))
+      const remaining = Math.max(0, Math.ceil((deadline - (Date.now() + serverClockOffset)) / 1000))
       setSecondsRemaining(remaining)
-      if (remaining === 0 && !timerSubmissionRequested.current) {
+      if (remaining === 0 && !timerSubmissionRequested.current && !answerSaveLock.current) {
         timerSubmissionRequested.current = true
         void submitRef.current?.()
       }
@@ -311,7 +423,7 @@ export default function StudentQuizPanel({
     updateTimeRemaining()
     const timerId = window.setInterval(updateTimeRemaining, 1000)
     return () => window.clearInterval(timerId)
-  }, [activeAttempt, timeLimitMinutes, view])
+  }, [activeAttempt, serverClockOffset, timeLimitMinutes, view])
 
   function findSavedAnswer(result, question) {
     const questionKey = getQuestionKey(question)
@@ -322,6 +434,8 @@ export default function StudentQuizPanel({
     answer.selectedOptionIndices?.length === answer.correctOptionIndices?.length
     && answer.selectedOptionIndices?.every((index, answerIndex) => index === answer.correctOptionIndices[answerIndex])
   )).length ?? 0
+  const earnedPoints = Number(latestResult?.earnedPoints) || 0
+  const totalPoints = Number(latestResult?.totalPoints) || 0
 
   return (
     <section className="student-course-activity student-quiz-experience">
@@ -342,17 +456,17 @@ export default function StudentQuizPanel({
           <div className="student-quiz-intro__facts">
             <span><small>Questions</small><strong>{questionCount}</strong></span>
             <span><small>Time limit</small><strong>{timeLimitMinutes > 0 ? `${timeLimitMinutes} minutes` : 'No time limit'}</strong></span>
-            <span><small>Passing score</small><strong>{quiz.passingPercentage || 70}%</strong></span>
+            <span><small>Passing score</small><strong>{hasPassingPercentage ? `${passingPercentage}%` : 'Not configured'}</strong></span>
             <span><small>Attempts</small><strong>{quizStatus.attemptsRemaining} remaining of {maxAttempts}</strong></span>
           </div>
           {isLocked && (
             <p className="student-quiz-lock" role="status">
-              All 3 attempts were unsuccessful. You can try again in <strong>{formatCooldown(lockSecondsRemaining)}</strong>.
+              You have used all 3 completed attempts. You can try again in <strong>{formatCooldown(lockSecondsRemaining)}</strong>.
             </p>
           )}
           {quizStatus.passed && <p className="student-quiz-lock" role="status">You have passed this quiz.</p>}
-          {!isLocked && !quizStatus.passed && quizStatus.attemptsRemaining === 0 && (
-            <p className="student-quiz-lock" role="status">No new attempts are available. Finish an active attempt or wait for the cooldown after three failed submissions.</p>
+          {!isLocked && quizStatus.attemptsRemaining === 0 && (
+            <p className="student-quiz-lock" role="status">No new attempts are available. Finish an active attempt or wait for the 24-hour cooldown.</p>
           )}
           {hasAttemptsLeft && (
             <button className="student-button" type="button" onClick={startQuiz} disabled={submitting}>
@@ -364,15 +478,20 @@ export default function StudentQuizPanel({
 
       {view === 'quiz' && currentQuestion && (
         <div className="student-quiz-running">
+          {questionValidation.error && (
+            <p className="student-courses__message is-error" role="alert">{questionValidation.error}</p>
+          )}
           <div className="student-quiz-running__top">
             <span>Question {questionIndex + 1} of {questionCount}</span>
             <strong className={secondsRemaining !== null && secondsRemaining <= 60 ? 'is-urgent' : ''}>
-              {secondsRemaining === null ? 'No time limit' : `Time remaining ${formatDuration(secondsRemaining)}`}
+              {secondsRemaining === null
+                ? timeLimitMinutes > 0 ? 'Syncing timer…' : 'No time limit'
+                : `Time remaining ${formatDuration(secondsRemaining)}`}
             </strong>
           </div>
           <nav className="student-quiz-question-nav" aria-label="Quiz questions">
             {questions.map((question, index) => {
-              const isAnswered = (answers[getQuestionKey(question)] || []).length > 0
+              const isAnswered = (savedAnswers[getQuestionKey(question)] || []).length > 0
               return (
                 <button
                   key={question._id || index}
@@ -380,6 +499,11 @@ export default function StudentQuizPanel({
                   className={`${index === questionIndex ? 'is-current' : ''}${isAnswered ? ' is-answered' : ''}`}
                   aria-label={`Question ${index + 1}, ${isAnswered ? 'answered' : 'unanswered'}`}
                   aria-current={index === questionIndex ? 'step' : undefined}
+                  disabled={
+                    Boolean(savingQuestionId)
+                    || Boolean(questionValidation.error)
+                    || !canNavigateToQuestion(questions, answers, savedAnswers, questionIndex, index)
+                  }
                   onClick={() => setQuestionIndex(index)}
                 >
                   {index + 1}
@@ -401,9 +525,10 @@ export default function StudentQuizPanel({
                 <label key={`${questionId}-${optionIndex}`} className={selected ? 'is-selected' : ''}>
                   <input
                     type={multiple ? 'checkbox' : 'radio'}
-                    name={`quiz-${quiz._id}-question-${questionId}`}
+                    name={`quiz-${quiz._id}-question-${questionId || questionIndex}`}
                     checked={selected}
-                    onChange={() => setAnswer(questionId, optionIndex, multiple)}
+                    disabled={Boolean(savingQuestionId) || Boolean(questionValidation.error) || submitting}
+                    onChange={() => setAnswer(currentQuestion, optionIndex)}
                   />
                   <span>{option}</span>
                 </label>
@@ -411,16 +536,35 @@ export default function StudentQuizPanel({
             })}
           </fieldset>
           <div className="student-quiz-running__actions">
-            <button type="button" className="student-button student-button--secondary" disabled={questionIndex === 0} onClick={() => setQuestionIndex((index) => index - 1)}>
+            <button type="button" className="student-button student-button--secondary" disabled={questionIndex === 0 || Boolean(savingQuestionId) || Boolean(questionValidation.error)} onClick={() => setQuestionIndex((index) => index - 1)}>
               Previous
             </button>
-            {questionIndex < questionCount - 1 ? (
-              <button type="button" className="student-button" onClick={() => setQuestionIndex((index) => index + 1)}>
+            {canSubmitCurrentQuestion ? (
+              <button type="button" className="student-button" onClick={() => void submitQuiz()} disabled={submitting || Boolean(savingQuestionId) || Boolean(questionValidation.error)}>
+                {submitting ? 'Submitting…' : 'Submit Quiz'}
+              </button>
+            ) : hasSavedCurrentSelection ? (
+              <button
+                type="button"
+                className="student-button"
+                onClick={() => setQuestionIndex((index) => Math.min(index + 1, questionCount - 1))}
+                disabled={submitting || Boolean(savingQuestionId) || Boolean(questionValidation.error)}
+              >
                 Next
               </button>
             ) : (
-              <button type="button" className="student-button" onClick={() => void submitQuiz()} disabled={submitting}>
-                {submitting ? 'Submitting…' : 'Submit Quiz'}
+              <button
+                type="button"
+                className="student-button"
+                onClick={() => void saveAnswer(currentQuestion, currentSelection)}
+                disabled={
+                  submitting
+                  || Boolean(savingQuestionId)
+                  || Boolean(questionValidation.error)
+                  || !currentSelection.length
+                }
+              >
+                {savingQuestionId === currentQuestionKey ? 'Saving…' : 'Save Answer'}
               </button>
             )}
           </div>
@@ -435,7 +579,7 @@ export default function StudentQuizPanel({
             <strong>{latestResult.scorePercentage}%</strong>
           </div>
           <div className="student-quiz-results__summary">
-            <span><small>Score</small><strong>{correctCount}/{questionCount}</strong></span>
+            <span><small>Score</small><strong>{earnedPoints}/{totalPoints} marks</strong></span>
             <span><small>Correct answers</small><strong>{correctCount}</strong></span>
             <span><small>Incorrect answers</small><strong>{latestResult.incorrectAnswers ?? questionCount - correctCount}</strong></span>
             <span><small>Percentage</small><strong>{latestResult.scorePercentage}%</strong></span>
@@ -495,7 +639,7 @@ export default function StudentQuizPanel({
           )}
           {isLocked && (
             <p className="student-quiz-lock" role="status">
-              All 3 attempts were unsuccessful. You can try again in <strong>{formatCooldown(lockSecondsRemaining)}</strong>.
+              You have used all 3 completed attempts. You can try again in <strong>{formatCooldown(lockSecondsRemaining)}</strong>.
             </p>
           )}
         </div>

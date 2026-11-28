@@ -10,7 +10,7 @@ import AdminProgressReports from './AdminProgressReports.jsx'
 import AdminFeedback from './AdminFeedback.jsx'
 import AdminSupport from './AdminSupport.jsx'
 import NotificationFeed from './NotificationFeed.jsx'
-import SettingsPage from './SettingsPage.jsx'
+import AdminSettingsPage from './AdminSettingsPage.jsx'
 import AdminProfilePage from './AdminProfilePage.jsx'
 import { readStudentFile } from './student-file.js'
 import './AdminDashboard.css'
@@ -2789,7 +2789,7 @@ function AdminDashboard({
                 </div>
               </section>
               {activeView === 'settings'
-                ? <SettingsPage user={user} onAccountUpdated={onAccountUpdated} themePreference={themePreference} onSetTheme={onSetTheme} onLogout={onLogout} />
+                ? <AdminSettingsPage user={user} onAccountUpdated={onAccountUpdated} themePreference={themePreference} onSetTheme={onSetTheme} onLogout={onLogout} />
                 : (
                   <section className="admin-panel admin-view-panel">
                     {activeView === 'reports'

@@ -36,11 +36,35 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    "core.middleware.VideoUploadDiagnosticsMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",
     "student_api.middleware.ApiJsonErrorMiddleware",
 ]
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "course_video_upload": {
+            "format": "%(asctime)s %(levelname)s %(message)s",
+        },
+    },
+    "handlers": {
+        "course_video_upload_console": {
+            "class": "logging.StreamHandler",
+            "formatter": "course_video_upload",
+        },
+    },
+    "loggers": {
+        "course_video_upload": {
+            "handlers": ["course_video_upload_console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+    },
+}
 
 ROOT_URLCONF = "config.urls"
 TEMPLATES = [
@@ -69,6 +93,9 @@ GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
 CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME", "").strip()
 CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY", "").strip()
 CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET", "").strip()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip() or "gemini-3.8-flash"
+GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.6-flash").strip() or "gemini-3.6-flash"
 
 _gmail_user = os.getenv("GMAIL_USER", "").strip()
 _gmail_app_password = os.getenv("GMAIL_APP_PASSWORD", "")

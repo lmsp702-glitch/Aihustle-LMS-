@@ -29,130 +29,86 @@ async function adminRequest(path, onLogout, { method = 'GET', body, signal } = {
   try {
     result = text ? JSON.parse(text) : {}
   } catch {
-    throw new Error('The server returned an invalid human review response.')
+    throw new Error('The server returned an invalid assignment review response.')
   }
   if (response.status === 401 || response.status === 403) {
     onLogout()
     throw new Error(result.message || 'Your admin session has expired. Sign in again.')
   }
-  if (!response.ok) throw new Error(result.message || 'The human review could not be completed.')
+  if (!response.ok) throw new Error(result.message || 'The assignment review could not be completed.')
   return result
 }
 
-async function openSubmissionFile(submission, onLogout) {
+async function downloadSubmission(review, onLogout) {
   let auth
   try {
-    const storedAuth = sessionStorage.getItem('lms.auth')
-    auth = storedAuth ? JSON.parse(storedAuth) : null
+    auth = JSON.parse(sessionStorage.getItem('lms.auth') || 'null')
   } catch {
     onLogout()
     throw new Error('Your admin session could not be verified. Sign in again.')
   }
-  if (typeof auth?.token !== 'string') {
+  if (auth?.user?.role !== 'main_admin' || typeof auth.token !== 'string') {
     onLogout()
     throw new Error('Your admin session has expired. Sign in again.')
   }
-  const response = await fetch(`${API_BASE_URL}${submission.fileUrl}`, {
-    headers: { Authorization: `Bearer ${auth.token}` },
-  })
+  const response = await fetch(
+    `${API_BASE_URL}/admin/assignment-reviews/${encodeURIComponent(review.id)}/file`,
+    { headers: { Authorization: `Bearer ${auth.token}` } },
+  )
   if (response.status === 401 || response.status === 403) {
     onLogout()
     throw new Error('Your admin session has expired. Sign in again.')
   }
-  if (!response.ok) throw new Error('The original submission could not be downloaded.')
-  const blob = await response.blob()
-  const url = URL.createObjectURL(blob)
+  if (!response.ok) {
+    const result = await response.json().catch(() => null)
+    throw new Error(result?.message || 'The submitted file could not be opened.')
+  }
+  const url = URL.createObjectURL(await response.blob())
   const link = document.createElement('a')
   link.href = url
-  link.download = submission.fileName
+  link.download = review.fileName || 'assignment-submission'
+  document.body.append(link)
   link.click()
-  URL.revokeObjectURL(url)
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 30_000)
 }
 
-function HumanEvaluationForm({ review, saving, onSave }) {
-  const [criteria, setCriteria] = useState(() => (
-    (review.aiEvaluation?.criteria || []).map((criterion) => ({ ...criterion }))
-  ))
-  const [feedback, setFeedback] = useState(review.aiEvaluation?.overallFeedback || '')
+function AssignmentReviewCard({ review, onLogout, onSave, saving }) {
+  const [marks, setMarks] = useState(review.marks ?? '')
+  const [feedback, setFeedback] = useState(review.feedback || '')
   const [error, setError] = useState('')
-  const marks = criteria.reduce((sum, criterion) => sum + Number(criterion.marks || 0), 0)
+  const reviewed = ['approved', 'rejected'].includes(String(review.status).toLowerCase())
+  const numericMarks = marks === '' ? Number.NaN : Number(marks)
+  const totalMarks = Number(review.maximumMarks)
+  const passingMarks = Number(review.passingMarks)
+  const totalMarksAreValid = Number.isFinite(totalMarks) && totalMarks > 0
+  const passingMarksAreValid = totalMarksAreValid
+    && Number.isFinite(passingMarks)
+    && passingMarks > 0
+    && passingMarks <= totalMarks
+  const marksAreValid = Number.isFinite(numericMarks)
+    && numericMarks >= 0
+    && totalMarksAreValid
+    && numericMarks <= totalMarks
+  const canApprove = marksAreValid && passingMarksAreValid && numericMarks >= passingMarks
+  const canReject = marksAreValid && passingMarksAreValid && numericMarks < passingMarks
 
-  async function submit(event) {
+  async function submitReview(event, decision) {
     event.preventDefault()
     setError('')
     try {
-      await onSave(review, { marks, feedback, criteria })
+      await onSave(review, { decision, marks, feedback })
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : 'The final result could not be saved.')
+      setError(saveError instanceof Error ? saveError.message : 'The review could not be saved.')
     }
   }
 
-  return (
-    <form className="admin-human-review__form" onSubmit={submit}>
-      <h4>Human evaluation</h4>
-      {criteria.map((criterion, index) => (
-        <fieldset className="admin-human-review__criterion" key={`${criterion.name}-${index}`}>
-          <legend>{criterion.name} · max {criterion.maximumMarks}</legend>
-          <label>
-            Marks
-            <input
-              type="number"
-              min="0"
-              max={criterion.maximumMarks}
-              step="any"
-              required
-              value={criterion.marks}
-              onChange={(event) => setCriteria((current) => current.map((item, itemIndex) => (
-                itemIndex === index ? { ...item, marks: event.target.value === '' ? '' : Number(event.target.value) } : item
-              )))}
-            />
-          </label>
-          <label>
-            Criterion feedback
-            <textarea
-              rows="2"
-              maxLength="2000"
-              required
-              value={criterion.feedback}
-              onChange={(event) => setCriteria((current) => current.map((item, itemIndex) => (
-                itemIndex === index ? { ...item, feedback: event.target.value } : item
-              )))}
-            />
-          </label>
-        </fieldset>
-      ))}
-      <p className="admin-human-review__total">Final marks: <strong>{marks}</strong> / {review.maximumMarks}</p>
-      <label>
-        Final feedback to the student
-        <textarea rows="4" maxLength="5000" required value={feedback} onChange={(event) => setFeedback(event.target.value)} />
-      </label>
-      {error && <p className="admin-human-review__error" role="alert">{error}</p>}
-      <button className="admin-button admin-button--primary" type="submit" disabled={saving || !criteria.length}>
-        {saving ? 'Publishing…' : 'Publish final result'}
-      </button>
-    </form>
-  )
-}
-
-function AssignmentHumanReviewCard({ review, onLogout, onStarted, onSave, saving }) {
-  const [error, setError] = useState('')
-  const evaluation = review.aiEvaluation
-
-  async function download() {
+  async function openFile() {
     setError('')
     try {
-      await openSubmissionFile(review, onLogout)
+      await downloadSubmission(review, onLogout)
     } catch (fileError) {
-      setError(fileError instanceof Error ? fileError.message : 'The original submission could not be opened.')
-    }
-  }
-
-  async function beginReview() {
-    setError('')
-    try {
-      await onStarted(review)
-    } catch (startError) {
-      setError(startError instanceof Error ? startError.message : 'The human review could not be started.')
+      setError(fileError instanceof Error ? fileError.message : 'The submitted file could not be opened.')
     }
   }
 
@@ -160,78 +116,79 @@ function AssignmentHumanReviewCard({ review, onLogout, onStarted, onSave, saving
     <article className="admin-human-review">
       <header className="admin-human-review__header">
         <div>
-          <h3>{review.assignmentName}</h3>
+          <h3>{review.assignmentTitle}</h3>
           <p>{review.courseName} · {review.studentName}{review.studentEmail ? ` · ${review.studentEmail}` : ''}</p>
         </div>
-        <span className={`admin-human-review__status is-${review.gradingStatus === 'Human Review' ? 'active' : 'requested'}`}>
-          {review.gradingStatus}
+        <span className={`admin-human-review__status ${reviewed ? 'is-active' : 'is-requested'}`}>
+          {String(review.status || 'submitted').replaceAll('-', ' ')}
         </span>
       </header>
       {review.instructions && <p className="admin-human-review__instructions">{review.instructions}</p>}
       <p className="admin-human-review__meta">
         Submitted {review.submittedAt ? new Date(review.submittedAt).toLocaleString() : 'date unavailable'}
         {' · '}{review.fileName}
-        {' · '}Attempt {review.attemptNumber || '—'} of {review.attemptState?.maxAttempts || 3}
       </p>
-      <div className="admin-human-review__request">
-        <strong>Student’s reason for disagreement</strong>
-        {review.humanReviewRequest?.reasons?.length
-          ? <ul>{review.humanReviewRequest.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
-          : <p>{review.humanReviewRequest?.reason || 'No reason recorded.'}</p>}
-        {review.humanReviewRequest?.otherExplanation && (
-          <p><strong>Other explanation:</strong> {review.humanReviewRequest.otherExplanation}</p>
-        )}
-        {review.humanReviewRequest?.comments && (
-          <p><strong>Additional comments:</strong> {review.humanReviewRequest.comments}</p>
-        )}
-      </div>
-      <div className="admin-human-review__attempt-state">
-        <span>Failed attempts in the current 24-hour window: {review.attemptState?.failedAttempts ?? '—'}</span>
-        <span>Remaining attempts: {review.attemptState?.remainingAttempts ?? '—'}</span>
-        {review.attemptState?.lockoutUntil && (
-          <span>Next submission available: {new Date(review.attemptState.lockoutUntil).toLocaleString()}</span>
-        )}
-      </div>
-      {review.attemptHistory?.length > 1 && (
-        <details className="admin-human-review__history">
-          <summary>Previous attempt evaluations ({review.attemptHistory.length})</summary>
-          {review.attemptHistory.map((attempt) => {
-            const evaluation = attempt.humanEvaluation || attempt.aiEvaluation
-            const marks = attempt.finalMarks ?? attempt.marksObtained ?? evaluation?.totalMarks
-            const feedback = attempt.humanEvaluation?.overallFeedback || attempt.aiEvaluation?.overallFeedback
-            return (
-              <article key={attempt.id}>
-                <strong>Attempt {attempt.attemptNumber || '—'} · {marks ?? '—'} / {evaluation?.maximumMarks ?? review.maximumMarks ?? '—'} · {attempt.academicStatus || attempt.gradingStatus}</strong>
-                {feedback && <p>{feedback}</p>}
-              </article>
-            )
-          })}
-        </details>
-      )}
-      <section className="admin-human-review__ai">
-        <div className="admin-human-review__ai-heading">
-          <h4>Original AI evaluation</h4>
-          <strong>{evaluation?.totalMarks ?? '—'} / {evaluation?.maximumMarks ?? review.maximumMarks ?? '—'}</strong>
-        </div>
-        {(evaluation?.criteria || []).map((criterion, index) => (
-          <div className="admin-human-review__ai-criterion" key={`${criterion.name}-${index}`}>
-            <strong>{criterion.name}: {criterion.marks} / {criterion.maximumMarks}</strong>
-            <p>{criterion.feedback}</p>
-          </div>
-        ))}
-        {evaluation?.strengths?.length > 0 && <p><strong>Strengths:</strong> {evaluation.strengths.join(' · ')}</p>}
-        {evaluation?.improvements?.length > 0 && <p><strong>Improvements:</strong> {evaluation.improvements.join(' · ')}</p>}
-        <p><strong>Feedback:</strong> {evaluation?.overallFeedback}</p>
-      </section>
-      {error && <p className="admin-human-review__error" role="alert">{error}</p>}
+      <p className="admin-human-review__meta">
+        Total marks: {totalMarksAreValid ? totalMarks : 'Not configured'}
+        {' · '}Passing marks: {passingMarksAreValid ? passingMarks : 'Not configured'}
+        {review.attemptNumber ? ` · Attempt ${review.attemptNumber} of 3` : ''}
+      </p>
       <div className="admin-human-review__actions">
-        <button type="button" className="admin-button admin-button--secondary" onClick={download}>Download original submission</button>
-        {review.gradingStatus === 'Re-evaluation Requested' && (
-          <button type="button" className="admin-button admin-button--primary" onClick={beginReview}>Begin human review</button>
-        )}
+        <button type="button" className="admin-button admin-button--secondary" onClick={openFile}>
+          View / download submission
+        </button>
       </div>
-      {review.gradingStatus === 'Human Review' && (
-        <HumanEvaluationForm review={review} saving={saving} onSave={onSave} />
+      <form className="admin-human-review__form" onSubmit={(event) => submitReview(event, 'approved')}>
+        <h4>Manual review</h4>
+        <label>
+          Marks (out of {review.maximumMarks})
+          <input
+            type="number"
+            min="0"
+            max={review.maximumMarks}
+            step="any"
+            required
+            value={marks}
+            onChange={(event) => setMarks(event.target.value)}
+          />
+        </label>
+        {!passingMarksAreValid && (
+          <p className="admin-human-review__error">
+            Configure passing marks above zero and no higher than the total marks in Course Management before reviewing this submission.
+          </p>
+        )}
+        <label>
+          Feedback for student
+          <textarea
+            rows="4"
+            maxLength="5000"
+            required
+            value={feedback}
+            onChange={(event) => setFeedback(event.target.value)}
+          />
+        </label>
+        {error && <p className="admin-human-review__error" role="alert">{error}</p>}
+        <div className="admin-human-review__actions">
+          <button className="admin-button admin-button--primary" type="submit" disabled={saving || reviewed || !canApprove}>
+            {saving ? 'Saving…' : 'Approve · Pass'}
+          </button>
+          <button
+            className="admin-button admin-button--secondary"
+            type="button"
+            disabled={saving || reviewed || !canReject}
+            onClick={(event) => submitReview(event, 'rejected')}
+          >
+            {saving ? 'Saving…' : 'Reject · Fail'}
+          </button>
+        </div>
+      </form>
+      {reviewed && (
+        <p className="admin-human-review__meta">
+          Saved result: {review.marks} / {review.maximumMarks}
+          {review.reviewedAt ? ` · Reviewed ${new Date(review.reviewedAt).toLocaleString()}` : ''}
+          {review.attemptNumber ? ` · Attempt ${review.attemptNumber} of 3` : ''}
+          {review.feedback ? ` · ${review.feedback}` : ''}
+        </p>
       )}
     </article>
   )
@@ -249,13 +206,13 @@ export default function AdminAssignmentReviews({ onLogout }) {
     let active = true
     setLoading(true)
     setError('')
-    adminRequest('/admin/assignment-human-reviews', onLogout, { signal: controller.signal })
+    adminRequest('/admin/assignment-reviews', onLogout, { signal: controller.signal })
       .then((result) => {
         if (active) setReviews(Array.isArray(result.reviews) ? result.reviews : [])
       })
       .catch((loadError) => {
         if (active && loadError?.name !== 'AbortError') {
-          setError(loadError instanceof Error ? loadError.message : 'Human review requests could not be loaded.')
+          setError(loadError instanceof Error ? loadError.message : 'Assignment submissions could not be loaded.')
         }
       })
       .finally(() => {
@@ -267,20 +224,17 @@ export default function AdminAssignmentReviews({ onLogout }) {
     }
   }, [onLogout, refresh])
 
-  async function startReview(review) {
-    await adminRequest(`/admin/assignment-human-reviews/${encodeURIComponent(review.id)}/start`, onLogout, { method: 'PATCH' })
-    setRefresh((value) => value + 1)
-  }
-
-  async function publishResult(review, result) {
+  async function saveReview(review, result) {
     setSavingIds((current) => ({ ...current, [review.id]: true }))
     try {
-      await adminRequest(
-        `/admin/assignment-human-reviews/${encodeURIComponent(review.id)}/result`,
+      const response = await adminRequest(
+        `/admin/assignment-reviews/${encodeURIComponent(review.id)}`,
         onLogout,
         { method: 'PUT', body: result },
       )
-      setReviews((current) => current.filter((entry) => entry.id !== review.id))
+      setReviews((current) => current.map((entry) => (
+        entry.id === review.id ? response.review : entry
+      )))
     } finally {
       setSavingIds((current) => ({ ...current, [review.id]: false }))
     }
@@ -290,25 +244,24 @@ export default function AdminAssignmentReviews({ onLogout }) {
     <section className="admin-human-reviews" aria-labelledby="admin-human-reviews-title">
       <header className="admin-human-reviews__heading">
         <div>
-          <span className="admin-human-reviews__eyebrow">Student-requested only</span>
-          <h2 id="admin-human-reviews-title">Human re-evaluation requests</h2>
-          <p>Only AI-graded submissions whose students requested a re-evaluation appear here.</p>
+          <span className="admin-human-reviews__eyebrow">Manual grading</span>
+          <h2 id="admin-human-reviews-title">Assignment Reviews</h2>
+          <p>Review Hustler student submissions, enter marks and feedback, then approve or reject.</p>
         </div>
         <button type="button" className="admin-button admin-button--secondary" onClick={() => setRefresh((value) => value + 1)}>
           Refresh
         </button>
       </header>
       {error && <p className="admin-human-review__error" role="alert">{error}</p>}
-      {loading ? <p className="admin-progress-empty">Loading human review requests…</p>
-        : reviews.length === 0 ? <p className="admin-progress-empty">No student-requested human reviews are waiting.</p>
+      {loading ? <p className="admin-progress-empty">Loading assignment submissions…</p>
+        : reviews.length === 0 ? <p className="admin-progress-empty">No Hustler assignment submissions are available to review.</p>
           : <div className="admin-human-reviews__list">
             {reviews.map((review) => (
-              <AssignmentHumanReviewCard
+              <AssignmentReviewCard
                 key={review.id}
                 review={review}
                 onLogout={onLogout}
-                onStarted={startReview}
-                onSave={publishResult}
+                onSave={saveReview}
                 saving={Boolean(savingIds[review.id])}
               />
             ))}

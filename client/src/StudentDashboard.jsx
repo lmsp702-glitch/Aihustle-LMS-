@@ -42,19 +42,7 @@ const studentReferralCache = new Map()
 const studentReferralRequests = new Map()
 let studentDashboardCacheGeneration = 0
 let studentLearningCacheGeneration = 0
-const ASSIGNMENT_PASSING_PERCENTAGE = 75
-const HUMAN_REVIEW_REASON_OPTIONS = [
-  'The AI misunderstood my answer.',
-  'My answer is correct, but marks were deducted.',
-  'The AI did not consider all the points in my answer.',
-  'My practical examples or implementation were not evaluated correctly.',
-  'The marks do not match the assignment requirements.',
-  'The AI feedback is incorrect or irrelevant.',
-  'I believe I deserve more marks.',
-  'Other (Please specify).',
-]
-const HUMAN_REVIEW_OTHER_REASON = HUMAN_REVIEW_REASON_OPTIONS[7]
-const COURSE_NOTES_KEY = 'course-notes'
+const LEGACY_ASSIGNMENT_PASSING_PERCENTAGE = 75
 const COURSE_CERTIFICATE_KEY = 'course-certificate'
 const COURSE_RESOURCES_KEY = 'course-resources'
 
@@ -1169,16 +1157,34 @@ function getCourseAssignments(course) {
 
 function getAssignmentAcademicResult(submission, assignment) {
   if (!submission) return null
+  const isHustlerAssignment = Boolean(submission.attemptState || assignment?.attemptState)
+  if (!isHustlerAssignment && ['approved', 'rejected'].includes(String(submission.reviewStatus || '').toLowerCase())) return null
+  const reviewStatus = String(submission.reviewStatus || '').toLowerCase()
+  const academicStatus = String(submission.academicStatus || '').toLowerCase()
+  const resultStatus = isHustlerAssignment
+    ? academicStatus === 'passed' || reviewStatus === 'approved'
+      ? 'Passed'
+      : academicStatus === 'failed' || reviewStatus === 'rejected'
+        ? 'Failed'
+        : ''
+    : ''
+  if (isHustlerAssignment && !resultStatus) return null
   const marks = Number(
-    submission.finalMarks
-      ?? submission.marksObtained
-      ?? submission.aiEvaluation?.totalMarks,
+    isHustlerAssignment
+      ? submission.finalMarks ?? submission.marksObtained
+      : submission.finalMarks
+        ?? submission.marksObtained
+        ?? submission.manualEvaluation?.marks
+        ?? submission.aiEvaluation?.totalMarks,
   )
   const maximumMarks = Number(
-    submission.aiEvaluation?.maximumMarks
-      ?? submission.humanEvaluation?.maximumMarks
-      ?? assignment?.points
-      ?? assignment?.maximumMarks,
+    isHustlerAssignment
+      ? submission.maximumMarks ?? assignment?.points ?? assignment?.maximumMarks
+      : submission.aiEvaluation?.maximumMarks
+        ?? submission.humanEvaluation?.maximumMarks
+        ?? submission.maximumMarks
+        ?? assignment?.points
+        ?? assignment?.maximumMarks,
   )
   if (
     !Number.isFinite(marks)
@@ -1191,8 +1197,33 @@ function getAssignmentAcademicResult(submission, assignment) {
   const scorePercentage = (marks / maximumMarks) * 100
   return {
     scorePercentage,
-    status: scorePercentage >= ASSIGNMENT_PASSING_PERCENTAGE ? 'Passed' : 'Failed',
+    status: isHustlerAssignment
+      ? resultStatus
+      : scorePercentage >= LEGACY_ASSIGNMENT_PASSING_PERCENTAGE ? 'Passed' : 'Failed',
   }
+}
+
+function formatAssignmentTimeRemaining(attemptState, now = Date.now()) {
+  const deadlineAt = new Date(attemptState?.deadlineAt || '').getTime()
+  if (!Number.isFinite(deadlineAt)) return ''
+  const remainingMs = deadlineAt - now
+  if (remainingMs <= 0) return 'Deadline passed'
+  const totalMinutes = Math.floor(remainingMs / 60_000)
+  const days = Math.floor(totalMinutes / 1440)
+  const hours = Math.floor((totalMinutes % 1440) / 60)
+  const minutes = totalMinutes % 60
+  if (days > 0) return `${days}d ${hours}h remaining`
+  if (hours > 0) return `${hours}h ${minutes}m remaining`
+  return `${minutes}m remaining`
+}
+
+function formatAssignmentDeadline(attemptState, fallbackDueDate, now = Date.now()) {
+  if (!attemptState?.deadlineAt) {
+    return fallbackDueDate ? `Due: ${formatResultDate(fallbackDueDate)}` : 'No due date'
+  }
+  const deadline = new Date(attemptState.deadlineAt)
+  if (Number.isNaN(deadline.getTime())) return 'Deadline unavailable'
+  return `${deadline.toLocaleDateString()} · ${formatAssignmentTimeRemaining(attemptState, now)}`
 }
 
 function AssignmentAcademicBadge({ submission, assignment }) {
@@ -1224,24 +1255,38 @@ function getAssignmentRecordStatus(submission) {
   if (['AI Graded', 'Re-evaluation Requested', 'Human Review', 'Final Result'].includes(submission.gradingStatus)) {
     return 'graded'
   }
+  if (['approved', 'rejected'].includes(String(submission.reviewStatus || '').toLowerCase())) return 'graded'
   if (['AI Grading', 'AI Grading Failed', 'Submitted'].includes(submission.gradingStatus)) return 'submitted'
   if (submission.reviewStatus === 'approved') return 'graded'
   if (submission.reviewStatus === 'pending') return 'submitted'
   return 'pending'
 }
 
-function getAssignmentStatusLabel(submission, status) {
-  if (submission?.gradingStatus) return submission.gradingStatus
-  if (submission?.reviewStatus === 'rejected') return 'Rejected'
-  if (status === 'graded') return 'Approved'
-  return status === 'submitted' ? 'Submitted' : 'Pending'
+function getAssignmentStatusLabel(submission, status, assignment) {
+  const isHustlerAssignment = Boolean(submission?.attemptState || assignment?.attemptState)
+  if (!isHustlerAssignment) {
+    if (submission?.reviewStatus === 'approved') return 'Approved'
+    if (submission?.reviewStatus === 'rejected') return 'Rejected'
+    if (submission?.gradingStatus) return submission.gradingStatus
+    if (status === 'graded') return 'Approved'
+    return status === 'submitted' ? 'Submitted' : 'Pending'
+  }
+  if (submission?.reviewStatus === 'approved') return 'Passed'
+  if (submission?.reviewStatus === 'rejected') return 'Failed'
+  if (status === 'graded') return getAssignmentAcademicResult(submission)?.status || 'Reviewed'
+  return status === 'submitted' ? 'Waiting for Admin review' : 'Not submitted'
 }
 
 function getAssignmentWorkflowStatusLabel(submission) {
-  if (submission?.gradingStatus) return submission.gradingStatus
-  if (submission?.reviewStatus === 'approved') return 'Evaluated'
-  if (submission?.reviewStatus === 'rejected') return 'Changes Requested'
-  return 'Submitted'
+  if (!submission?.attemptState) {
+    if (submission?.reviewStatus === 'approved') return 'Approved'
+    if (submission?.reviewStatus === 'rejected') return 'Rejected'
+    if (submission?.gradingStatus) return submission.gradingStatus
+    return 'Submitted'
+  }
+  if (submission?.reviewStatus === 'approved') return 'Passed'
+  if (submission?.reviewStatus === 'rejected') return 'Failed'
+  return 'Waiting for Admin review'
 }
 
 function getLatestEnrollmentsByCourse(enrollments) {
@@ -1393,22 +1438,29 @@ function getCachedStudentAssignmentRows() {
 }
 
 function getDashboardAssignmentStatus(entry) {
-  const gradingStatus = entry.submission?.gradingStatus
-  const academicResult = getAssignmentAcademicResult(entry.submission, entry.assignment)
-  if (!gradingStatus && academicResult) return { label: 'Evaluated', tone: 'evaluated' }
-  if (gradingStatus) {
-    if (['AI Graded', 'Re-evaluation Requested', 'Human Review', 'Final Result'].includes(gradingStatus)) {
-      return { label: gradingStatus, tone: 'evaluated' }
+  if (!entry.assignment?.attemptState && !entry.submission?.attemptState) {
+    const gradingStatus = entry.submission?.gradingStatus
+    const academicResult = getAssignmentAcademicResult(entry.submission, entry.assignment)
+    if (!gradingStatus && academicResult) return { label: 'Evaluated', tone: 'evaluated' }
+    if (gradingStatus) {
+      if (['AI Graded', 'Re-evaluation Requested', 'Human Review', 'Final Result'].includes(gradingStatus)) {
+        return { label: gradingStatus, tone: 'evaluated' }
+      }
+      if (gradingStatus === 'AI Grading Failed') return { label: gradingStatus, tone: 'rejected' }
+      return { label: gradingStatus, tone: 'submitted' }
     }
-    if (gradingStatus === 'AI Grading Failed') return { label: gradingStatus, tone: 'rejected' }
-    return { label: gradingStatus, tone: 'submitted' }
+    const reviewStatus = entry.submission?.reviewStatus
+    if (!entry.submission) return { label: 'Pending', tone: 'pending' }
+    if (reviewStatus === 'approved') return { label: 'Evaluated', tone: 'approved' }
+    if (reviewStatus === 'rejected') return { label: 'Rejected', tone: 'rejected' }
+    if (reviewStatus === 'pending') return { label: 'Awaiting Review', tone: 'awaiting' }
+    return { label: 'Submitted', tone: 'submitted' }
   }
   const reviewStatus = entry.submission?.reviewStatus
-  if (!entry.submission) return { label: 'Pending', tone: 'pending' }
-  if (reviewStatus === 'approved') return { label: 'Evaluated', tone: 'evaluated' }
-  if (reviewStatus === 'rejected') return { label: 'Rejected', tone: 'rejected' }
-  if (reviewStatus === 'pending') return { label: 'Awaiting Review', tone: 'awaiting' }
-  return { label: 'Submitted', tone: 'submitted' }
+  if (!entry.submission) return { label: 'Not submitted', tone: 'pending' }
+  if (reviewStatus === 'approved') return { label: 'Passed', tone: 'passed' }
+  if (reviewStatus === 'rejected') return { label: 'Failed', tone: 'failed' }
+  return { label: 'Waiting for Admin review', tone: 'submitted' }
 }
 
 function StudentDashboardUpcomingAssignments({ onLogout }) {
@@ -1446,7 +1498,7 @@ function StudentDashboardUpcomingAssignments({ onLogout }) {
     .sort((left, right) => {
       const priority = (entry) => {
         const status = getDashboardAssignmentStatus(entry).tone
-        return status === 'approved' ? 2 : status === 'awaiting' || status === 'submitted' ? 1 : 0
+        return status === 'passed' ? 2 : status === 'submitted' ? 1 : 0
       }
       const priorityDifference = priority(left) - priority(right)
       if (priorityDifference) return priorityDifference
@@ -1478,10 +1530,7 @@ function StudentDashboardUpcomingAssignments({ onLogout }) {
         />
       ) : visibleAssignments.map((entry) => {
         const status = getDashboardAssignmentStatus(entry)
-        const dueDate = entry.assignment.dueDate ? new Date(entry.assignment.dueDate) : null
-        const dueDateLabel = dueDate && Number.isFinite(dueDate.getTime())
-          ? `Due: ${formatResultDate(dueDate)}`
-          : 'No due date'
+        const dueDateLabel = formatAssignmentDeadline(entry.assignment.attemptState, entry.assignment.dueDate)
         return (
           <Link className="student-dashboard-assignment" key={entry.key} to="/student/assignments">
             <span className="student-dashboard-assignment__icon"><Icon name="file" size={18} /></span>
@@ -1491,7 +1540,12 @@ function StudentDashboardUpcomingAssignments({ onLogout }) {
               <small>{dueDateLabel}</small>
               <AssignmentAcademicBadge submission={entry.submission} assignment={entry.assignment} />
             </span>
-            <span className={`student-dashboard-assignment__status is-${status.tone}`}>{status.label}</span>
+            <span className={`student-dashboard-assignment__status is-${status.tone}`}>
+              {(entry.assignment.attemptState || entry.submission?.attemptState) && (
+                <Icon name={status.tone === 'passed' ? 'check' : status.tone === 'failed' ? 'circleX' : status.tone === 'submitted' ? 'clock' : 'clipboardCheck'} size={12} />
+              )}
+              {status.label}
+            </span>
           </Link>
         )
       })}
@@ -1876,12 +1930,17 @@ function StudentAssignmentsPage({ onLogout, onLearningDataChanged }) {
             </p>
           ) : visibleAssignments.map((entry) => {
             const { assignment, submission, status } = entry
-            const rejected = submission?.reviewStatus === 'rejected'
+            const isHustlerAssignment = Boolean(assignment.attemptState || submission?.attemptState)
+            const failed = submission?.reviewStatus === 'rejected'
+            const passed = submission?.reviewStatus === 'approved'
             const hasMarks = submission?.marksObtained !== null
               && submission?.marksObtained !== undefined
               && Number.isFinite(Number(submission.marksObtained))
-            const statusLabel = rejected ? 'Rejected' : getAssignmentStatusLabel(submission, status)
-            const actionLabel = rejected ? 'Resubmit' : status === 'graded' ? 'View Details' : status === 'submitted' ? 'View Submission' : 'View & Submit'
+            const statusLabel = getAssignmentStatusLabel(submission, status, assignment)
+            const actionLabel = failed ? 'Resubmit' : status === 'graded' ? 'View Details' : status === 'submitted' ? 'View Submission' : 'View & Submit'
+            const statusTone = isHustlerAssignment
+              ? passed ? 'passed' : failed ? 'failed' : status === 'submitted' ? 'submitted' : 'pending'
+              : failed ? 'rejected' : status === 'graded' ? 'graded' : status
             return (
               <article className="student-assignment-item" key={entry.key}>
                 <div className="student-assignment-item__meta">
@@ -1893,10 +1952,13 @@ function StudentAssignmentsPage({ onLogout, onLearningDataChanged }) {
                 </div>
                 <div className="student-assignment-item__due">
                   <Icon name="clock" size={14} />
-                  <span>{assignment.dueDate ? `Due: ${formatResultDate(assignment.dueDate)}` : 'No due date'}</span>
+                  <span>{formatAssignmentDeadline(assignment.attemptState, assignment.dueDate)}</span>
                 </div>
                 <span className="student-assignment-item__status-stack">
-                  <span className={`student-assignment-item__status is-${rejected ? 'rejected' : status === 'graded' ? 'graded' : status}`}>
+                  <span className={`student-assignment-item__status is-${statusTone}`}>
+                    {isHustlerAssignment && (
+                      <Icon name={passed ? 'check' : failed ? 'circleX' : status === 'submitted' ? 'clock' : 'clipboardCheck'} size={12} />
+                    )}
                     {statusLabel}
                   </span>
                   <AssignmentAcademicBadge submission={submission} assignment={assignment} />
@@ -1908,7 +1970,7 @@ function StudentAssignmentsPage({ onLogout, onLearningDataChanged }) {
                 ) : <span className="student-assignment-item__score-placeholder" aria-hidden="true" />}
                 <button
                   type="button"
-                  className={`student-assignment-item__action${status === 'pending' ? ' student-assignment-item__action--primary' : ''}`}
+                  className={`student-assignment-item__action${status === 'pending' || failed ? ' student-assignment-item__action--primary' : ''}`}
                   onClick={() => setActiveAssignmentKey(entry.key)}
                 >
                   {actionLabel} <span aria-hidden="true">›</span>
@@ -2524,25 +2586,24 @@ function getStudentContentLabel(type) {
     'video-lesson': 'Video',
     quiz: 'Quiz',
     assignment: 'Assignment',
-    note: 'Notes / resources',
+    note: 'Learning resource',
   }[type] || 'Course content'
 }
 
 function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submissions, onSubmitted, onLearningDataChanged, onLogout, onContinueLearning, showHeader = true, canSubmit = true }) {
   const [file, setFile] = useState(null)
   const [submitting, setSubmitting] = useState(false)
-  const [reviewRequesting, setReviewRequesting] = useState(false)
-  const [reviewFormOpen, setReviewFormOpen] = useState(false)
-  const [selectedReviewReason, setSelectedReviewReason] = useState('')
-  const [otherReviewExplanation, setOtherReviewExplanation] = useState('')
-  const [reviewComments, setReviewComments] = useState('')
   const [clockNow, setClockNow] = useState(Date.now())
   const [error, setError] = useState('')
+  const [successMessage, setSuccessMessage] = useState('')
   const [isDragging, setIsDragging] = useState(false)
   const [filePreviewUrl, setFilePreviewUrl] = useState('')
   const fileInputRef = useRef(null)
+  const submissionInFlightRef = useRef(false)
+  const submissionRequestIdRef = useRef('')
+  const assignmentId = assignment?._id || assignment?.id || ''
   const assignmentSubmissions = submissions.filter((submission) => (
-    String(submission.assignmentId) === String(assignment._id)
+    String(submission.assignmentId) === String(assignmentId)
   ))
   const latestRecord = assignmentSubmissions
     .slice()
@@ -2559,7 +2620,7 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
     .slice()
     .sort((left, right) => new Date(right.submittedAt || 0).getTime() - new Date(left.submittedAt || 0).getTime())[0]
     || latestRecord
-  const attemptState = assignmentSubmissions.find((submission) => submission.attemptState)?.attemptState || {
+  const attemptState = latestRecord?.attemptState || assignment?.attemptState || {
     maxAttempts: 3,
     currentAttemptNumber: latestRecord?.attemptNumber || 0,
     attemptsUsed: 0,
@@ -2574,9 +2635,24 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
     lockoutUntil: null,
     retrySubmissionId: null,
   }
+  const attemptStateReceivedAtRef = useRef({ state: attemptState, receivedAt: Date.now() })
+  if (attemptStateReceivedAtRef.current.state !== attemptState) {
+    attemptStateReceivedAtRef.current = { state: attemptState, receivedAt: Date.now() }
+  }
   const lockoutUntilTime = attemptState.lockoutUntil ? new Date(attemptState.lockoutUntil).getTime() : 0
   const isLocked = Boolean(lockoutUntilTime > clockNow)
   const lockoutExpired = Boolean(lockoutUntilTime && lockoutUntilTime <= clockNow)
+  const serverDeadlineRemainingMs = Number.isFinite(Number(attemptState.deadlineRemainingSeconds))
+    ? Number(attemptState.deadlineRemainingSeconds) * 1000
+      - (clockNow - attemptStateReceivedAtRef.current.receivedAt)
+    : new Date(attemptState.deadlineAt || '').getTime() - clockNow
+  const deadlineExpired = attemptState.deadlineExpired === true || serverDeadlineRemainingMs <= 0
+  const deadlineCountdown = Number.isFinite(serverDeadlineRemainingMs)
+    ? formatAssignmentTimeRemaining(
+      { deadlineAt: new Date(clockNow + Math.max(0, serverDeadlineRemainingMs)).toISOString() },
+      clockNow,
+    )
+    : ''
   const failedAttempts = lockoutExpired
     ? 0
     : Number.isInteger(attemptState.failedAttempts)
@@ -2593,9 +2669,11 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
       ? attemptState.attemptsUsed
       : failedAttempts
   const canSubmitAttempt = canSubmit
+    && (attemptState.canSubmit !== false || (attemptState.deadlineAt && lockoutExpired))
     && !attemptState.hasPassed
     && !attemptState.hasPendingGrading
     && !attemptState.hasPendingHumanReview
+    && !deadlineExpired
     && !isLocked
     && remainingAttempts > 0
   const displayAttemptNumber = lockoutExpired
@@ -2611,7 +2689,9 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
   ].map((value) => String(value).padStart(2, '0')).join(':')
   const isWaitingForGrading = submitting
     || attemptState.hasPendingGrading
-    || ['Submitted', 'AI Grading'].includes(latestRecord?.gradingStatus)
+    || (attemptState.deadlineAt
+      ? latestRecord && !['approved', 'rejected'].includes(String(latestRecord.reviewStatus || '').toLowerCase())
+      : ['Submitted', 'AI Grading'].includes(latestRecord?.gradingStatus))
 
   useEffect(() => {
     if (!file) {
@@ -2624,10 +2704,13 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
   }, [file])
 
   useEffect(() => {
-    if (!lockoutUntilTime || lockoutUntilTime <= Date.now()) return undefined
+    if (
+      (!lockoutUntilTime || lockoutUntilTime <= Date.now())
+      && (!attemptState.deadlineAt || Number(attemptState.deadlineRemainingSeconds) <= 0)
+    ) return undefined
     const timerId = window.setInterval(() => setClockNow(Date.now()), 1000)
     return () => window.clearInterval(timerId)
-  }, [lockoutUntilTime])
+  }, [lockoutUntilTime, attemptState.deadlineAt, attemptState.deadlineRemainingSeconds])
 
   function chooseAssignmentFile(candidate) {
     if (!candidate) return
@@ -2641,6 +2724,11 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
       return
     }
     setError('')
+    setSuccessMessage('')
+    submissionRequestIdRef.current = Array.from(
+      window.crypto.getRandomValues(new Uint8Array(12)),
+      (byte) => byte.toString(16).padStart(2, '0'),
+    ).join('')
     setFile(candidate)
   }
 
@@ -2651,21 +2739,35 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
   }
 
   function getSubmissionStatusLabel(submission) {
-    if (submission.gradingStatus) return submission.gradingStatus
-    if (submission.reviewStatus === 'approved') return 'Approved'
-    if (submission.reviewStatus === 'rejected') return 'Rejected — resubmission required'
-    return 'Awaiting Admin Review'
+    if (!attemptState.deadlineAt) {
+      if (submission.reviewStatus === 'approved') return 'Approved'
+      if (submission.reviewStatus === 'rejected') return 'Rejected'
+      if (submission.gradingStatus) return submission.gradingStatus
+      return submission.status === 'submitted'
+        ? 'Submitted — Awaiting Admin Review'
+        : 'Awaiting Admin Review'
+    }
+    if (submission.reviewStatus === 'approved') return 'Passed'
+    if (submission.reviewStatus === 'rejected') return 'Failed'
+    return 'Submitted — Waiting for Admin review'
   }
 
   async function submitAssignment(event) {
     event.preventDefault()
+    if (submissionInFlightRef.current) return
     const form = event.currentTarget
     if (!file) {
       setError('Choose a PDF, DOCX, or TXT file to submit.')
       return
     }
+    if (!assignmentId) {
+      setError('This assignment is missing its saved ID. Reload the course and try again.')
+      return
+    }
+    submissionInFlightRef.current = true
     setSubmitting(true)
     setError('')
+    setSuccessMessage('')
     try {
       const savedAuth = sessionStorage.getItem('lms.auth')
       const auth = savedAuth ? JSON.parse(savedAuth) : null
@@ -2675,72 +2777,32 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
       }
       const formData = new FormData()
       formData.append('file', file)
-      const response = await fetchWithAuth(`${API_BASE_URL}/courses/${encodeURIComponent(courseId)}/assignments/${encodeURIComponent(assignment._id)}/submissions`, {
+      formData.append('submissionRequestId', submissionRequestIdRef.current)
+      const response = await fetchWithAuth(`${API_BASE_URL}/courses/${encodeURIComponent(courseId)}/assignments/${encodeURIComponent(assignmentId)}/submissions`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${auth.token}` },
         body: formData,
       }, API_BASE_URL, auth.token)
-      const result = await response.json()
+      const result = await response.json().catch(() => null)
       if (isInvalidSessionResponse(response, result)) {
         onLogout()
         return
       }
-      if (result.submission?._id) {
-        onSubmitted(result.submission)
-        onLearningDataChanged()
+      if (!response.ok) {
+        throw new Error(result?.message || `Your assignment could not be submitted (HTTP ${response.status}).`)
       }
-      if (!response.ok) throw new Error(result.message || 'Your assignment could not be submitted.')
-      if (!result.submission?._id) throw new Error('The server did not confirm your assignment submission.')
+      if (!result?.submission?._id) throw new Error('The server did not confirm your assignment submission.')
+      onSubmitted(result.submission)
       setFile(null)
       form.reset()
+      submissionRequestIdRef.current = ''
+      setSuccessMessage('Assignment submitted successfully.')
+      onLearningDataChanged()
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : 'Your assignment could not be submitted.')
     } finally {
+      submissionInFlightRef.current = false
       setSubmitting(false)
-    }
-  }
-
-  async function requestHumanReview(event) {
-    event.preventDefault()
-    if (!latestSubmission?._id) return
-    setReviewRequesting(true)
-    setError('')
-    try {
-      const savedAuth = sessionStorage.getItem('lms.auth')
-      const auth = savedAuth ? JSON.parse(savedAuth) : null
-      if (typeof auth?.token !== 'string') {
-        onLogout()
-        return
-      }
-      const response = await fetchWithAuth(`${API_BASE_URL}/assignment-submissions/${encodeURIComponent(latestSubmission._id)}/human-review-requests`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${auth.token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          reasons: selectedReviewReason ? [selectedReviewReason] : [],
-          otherExplanation: otherReviewExplanation,
-          comments: reviewComments,
-        }),
-      }, API_BASE_URL, auth.token)
-      const result = await response.json()
-      if (isInvalidSessionResponse(response, result)) {
-        onLogout()
-        return
-      }
-      if (!response.ok) throw new Error(result.message || 'The human re-evaluation could not be requested.')
-      if (!result.submission?._id) throw new Error('The server did not confirm your re-evaluation request.')
-      onSubmitted(result.submission)
-      onLearningDataChanged()
-      setReviewFormOpen(false)
-      setSelectedReviewReason('')
-      setOtherReviewExplanation('')
-      setReviewComments('')
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : 'The human re-evaluation could not be requested.')
-    } finally {
-      setReviewRequesting(false)
     }
   }
 
@@ -2752,7 +2814,12 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
           <h2>{assignment.title}</h2>
           <span className="student-course-assignment-view__badge"><Icon name="clipboardCheck" size={13} />Assignment</span>
           {latestSubmission && (
-            <span className={`student-course-assignment-view__status is-${latestSubmission.gradingStatus || latestSubmission.reviewStatus === 'approved' || getAssignmentAcademicResult(latestSubmission, assignment) ? 'evaluated' : latestSubmission.reviewStatus || 'pending'}`}>
+            <span className={`student-course-assignment-view__status ${attemptState.deadlineAt
+              ? `is-${latestSubmission.reviewStatus === 'approved' ? 'passed' : latestSubmission.reviewStatus === 'rejected' ? 'failed' : 'submitted'}`
+              : `is-${latestSubmission.gradingStatus || latestSubmission.reviewStatus === 'approved' || getAssignmentAcademicResult(latestSubmission, assignment) ? 'evaluated' : latestSubmission.reviewStatus || 'pending'}`}`}>
+              {attemptState.deadlineAt && (
+                <Icon name={latestSubmission.reviewStatus === 'approved' ? 'check' : latestSubmission.reviewStatus === 'rejected' ? 'circleX' : 'clock'} size={12} />
+              )}
               {getSubmissionStatusLabel(latestSubmission)}
             </span>
           )}
@@ -2764,7 +2831,12 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
         <div className="student-course-activity__details student-course-assignment-view__details">
           <span>
             <Icon name="clock" size={19} />
-            <span><small>Due Date</small><strong>{assignment.dueDate ? new Date(assignment.dueDate).toLocaleDateString() : 'No due date'}</strong></span>
+            <span>
+              <small>{attemptState.deadlineAt ? 'Enrollment deadline' : 'Due Date'}</small>
+              <strong>{attemptState.deadlineAt
+                ? formatAssignmentDeadline(attemptState, assignment.dueDate, clockNow)
+                : assignment.dueDate ? new Date(assignment.dueDate).toLocaleDateString() : 'No due date'}</strong>
+            </span>
           </span>
           <span>
             <Icon name="award" size={20} />
@@ -2773,17 +2845,28 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
         </div>
       ) : (
         <div className="student-course-activity__details">
-          <span>Due {assignment.dueDate ? new Date(assignment.dueDate).toLocaleDateString() : 'No due date'}</span>
+          <span>{attemptState.deadlineAt
+            ? `Deadline ${formatAssignmentDeadline(attemptState, assignment.dueDate, clockNow)}`
+            : `Due ${assignment.dueDate ? new Date(assignment.dueDate).toLocaleDateString() : 'No due date'}`}</span>
           <span>{Number(assignment.points) || 0} points</span>
         </div>
       )}
       <div className="student-assignment-attempt-summary">
-        <strong>Attempted: {attemptsUsed} of 3</strong>
+        <strong>Attempted: {attemptsUsed} of {attemptState.maxAttempts || 3}</strong>
         <span>Remaining: {remainingAttempts}</span>
       </div>
+      {attemptState.deadlineAt && (
+        <p className="student-assignment-deadline" role="status">
+          {deadlineExpired
+            ? 'The 15-day submission period has ended.'
+            : `Time remaining to submit: ${deadlineCountdown}`}
+        </p>
+      )}
       {isLocked && (
         <div className="student-assignment-attempt-lockout" role="status">
-          <p>You have used all 3 attempts and have not achieved the required passing score of 75%. You can submit again after the 24-hour waiting period.</p>
+          <p>{attemptState.deadlineAt
+            ? 'All 3 reviewed attempts were failed. You can submit again after the 24-hour waiting period, if the assignment deadline remains open.'
+            : 'You have used all 3 attempts and have not achieved the required passing score of 75%. You can submit again after the 24-hour waiting period.'}</p>
           <strong>Next submission available in {lockoutCountdown}</strong>
         </div>
       )}
@@ -2799,9 +2882,11 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
       )}
       {isWaitingForGrading && (
         <div className="student-assignment-attempt-pending" role="status">
-          <strong>Assignment Being Processed</strong>
+          <strong>Waiting for Admin review</strong>
           <p>
-            Your assignment is being evaluated. Until then, continue your learning.
+            {attemptState.deadlineAt
+              ? 'Your submission is saved. Another attempt is available after Admin reviews this one.'
+              : 'Your assignment is being evaluated. Until then, continue your learning.'}
           </p>
           {!submitting && latestRecord?._id && onContinueLearning && (
             <button type="button" className="student-button" onClick={onContinueLearning}>
@@ -2816,6 +2901,7 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
         </p>
       )}
       {error && <p className="student-courses__message is-error" role="alert">{error}</p>}
+      {successMessage && <p className="student-courses__message" role="status">{successMessage}</p>}
       {canSubmitAttempt && (
         <form className={`student-assignment-submit${showHeader ? ' student-assignment-submit--card' : ''}`} onSubmit={submitAssignment}>
           {showHeader && (
@@ -2872,6 +2958,8 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
                 onClick={() => {
                   setFile(null)
                   setError('')
+                  setSuccessMessage('')
+                  submissionRequestIdRef.current = ''
                   if (fileInputRef.current) fileInputRef.current.value = ''
                 }}
               >
@@ -2882,7 +2970,7 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
           <button
             className={`student-button${showHeader ? ' student-assignment-submit__submit' : ''}`}
             type="submit"
-            disabled={submitting || !assignment._id || (showHeader && !file)}
+            disabled={submitting || (showHeader && !file)}
           >
             {submitting ? 'Submitting…' : showHeader ? <>{latestRecord ? 'Resubmit Assignment' : 'Submit assignment'} <Icon name="arrow" size={15} /></> : latestRecord ? 'Resubmit Assignment' : 'Submit assignment'}
           </button>
@@ -2916,9 +3004,9 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
                 <p><strong>AI feedback:</strong> {latestSubmission.aiEvaluation.overallFeedback}</p>
               </>
             )}
-          {latestSubmission.gradingStatus === 'Final Result' && (
+          {(latestSubmission.gradingStatus === 'Final Result' || latestSubmission.gradingStatus === 'Admin Reviewed') && (
             <div className="student-assignment-evaluation__final">
-              <strong>Final human-reviewed result: {latestSubmission.finalMarks} / {latestSubmission.aiEvaluation?.maximumMarks ?? assignment.points}</strong>
+              <strong>Admin review: {latestSubmission.reviewStatus || 'Reviewed'} · {latestSubmission.finalMarks ?? latestSubmission.marksObtained} / {latestSubmission.maximumMarks ?? assignment.points}</strong>
               <AssignmentAcademicBadge submission={latestSubmission} assignment={assignment} />
               {latestSubmission.humanEvaluation?.criteria?.map((criterion, index) => (
                 <div key={`human-${criterion.name}-${index}`}>
@@ -2926,7 +3014,8 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
                   <p>{criterion.feedback}</p>
                 </div>
               ))}
-              {latestSubmission.finalFeedback && <p>{latestSubmission.finalFeedback}</p>}
+              {(latestSubmission.reviewComment || latestSubmission.feedback || latestSubmission.finalFeedback)
+                && <p>{latestSubmission.reviewComment || latestSubmission.feedback || latestSubmission.finalFeedback}</p>}
             </div>
           )}
           {!latestSubmission.gradingStatus && (
@@ -2954,83 +3043,6 @@ function StudentAssignmentPanel({ courseId, enrollmentId, assignment, submission
           )}
           {!latestSubmission.humanReviewRequest?.reasons?.length && latestSubmission.humanReviewRequest?.reason && (
             <p><strong>Re-evaluation reason:</strong> {latestSubmission.humanReviewRequest.reason}</p>
-          )}
-          {latestSubmission.gradingStatus === 'AI Graded' && (
-            <>
-              {!reviewFormOpen ? (
-                <button
-                  type="button"
-                  className="student-button"
-                  onClick={() => setReviewFormOpen(true)}
-                >
-                  Request Human Re-evaluation
-                </button>
-              ) : (
-                <form className="student-assignment-evaluation__request" onSubmit={requestHumanReview}>
-                  <label className="student-assignment-evaluation__text-field">
-                    Reason for requesting human review
-                    <select
-                      required
-                      value={selectedReviewReason}
-                      onChange={(event) => {
-                        const reason = event.target.value
-                        setSelectedReviewReason(reason)
-                        if (reason !== HUMAN_REVIEW_OTHER_REASON) setOtherReviewExplanation('')
-                      }}
-                    >
-                      <option value="" disabled>Select a reason</option>
-                      {HUMAN_REVIEW_REASON_OPTIONS.map((reason) => (
-                        <option key={reason} value={reason}>{reason}</option>
-                      ))}
-                    </select>
-                  </label>
-                  {selectedReviewReason === HUMAN_REVIEW_OTHER_REASON && (
-                    <label className="student-assignment-evaluation__text-field">
-                      Please explain your reason
-                      <textarea
-                        rows="3"
-                        maxLength="2000"
-                        required
-                        value={otherReviewExplanation}
-                        onChange={(event) => setOtherReviewExplanation(event.target.value)}
-                      />
-                    </label>
-                  )}
-                  <label className="student-assignment-evaluation__text-field">
-                    Additional comments (optional)
-                    <textarea
-                      rows="3"
-                      maxLength="2000"
-                      value={reviewComments}
-                      onChange={(event) => setReviewComments(event.target.value)}
-                    />
-                  </label>
-                  <div className="student-assignment-evaluation__request-actions">
-                    <button
-                      type="submit"
-                      className="student-button"
-                      disabled={reviewRequesting || !selectedReviewReason
-                        || (selectedReviewReason === HUMAN_REVIEW_OTHER_REASON && !otherReviewExplanation.trim())}
-                    >
-                      {reviewRequesting ? 'Requesting…' : 'Submit Human Review Request'}
-                    </button>
-                    <button
-                      type="button"
-                      className="student-button student-assignment-evaluation__request-cancel"
-                      disabled={reviewRequesting}
-                      onClick={() => {
-                        setReviewFormOpen(false)
-                        setSelectedReviewReason('')
-                        setOtherReviewExplanation('')
-                        setReviewComments('')
-                      }}
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </form>
-              )}
-            </>
           )}
         </section>
       )}
@@ -3166,31 +3178,6 @@ function StudentAssignmentDetail({ entry, onClose, onLogout, onSubmitted, onLear
         />
       </section>
     </div>
-  )
-}
-
-function StudentNotePanel({ item }) {
-  return (
-    <section className="student-course-activity">
-      <header>
-        <span className="student-eyebrow">{getStudentContentLabel('note')}</span>
-        <h2>{item.title}</h2>
-      </header>
-      {item.description && <p className="student-course-activity__instructions">{item.description}</p>}
-      {item.content && <div className="student-course-note__content">{item.content}</div>}
-      {item.resources?.length > 0 ? (
-        <ul className="student-course-note__resources">
-          {item.resources.map((resource, index) => (
-            <li key={resource._id || `${resource.url}-${index}`}>
-              <a href={resource.url} target="_blank" rel="noreferrer" download={resource.resourceType === 'raw' || resource.format === 'pdf' ? resource.title : undefined}>
-                {resource.title || `Resource ${index + 1}`}
-              </a>
-              {resource.format && <small>{resource.format.toUpperCase()}</small>}
-            </li>
-          ))}
-        </ul>
-      ) : <p>No downloadable resources were added to this note.</p>}
-    </section>
   )
 }
 
@@ -3961,7 +3948,7 @@ function StudentCourseLearning({
   const moduleItems = orderedCourseModules.map(({ module, index }) => ({
     module,
     moduleKey: String(module?._id || `${module?.title || 'module'}-${index}`),
-    items: getModuleLearningItems(module, index),
+    items: getModuleLearningItems(module, index).filter((item) => item.type !== 'note'),
   }))
   const courseLevelItems = [
     ...normalizeArray(course.quizzes).map((quiz, index) => ({
@@ -4124,6 +4111,9 @@ function StudentCourseLearning({
   const transcriptCues = Array.isArray(activeEntry?.lesson?.transcriptCues)
     ? activeEntry.lesson.transcriptCues
     : []
+  const transcriptText = typeof activeEntry?.lesson?.transcriptText === 'string'
+    ? activeEntry.lesson.transcriptText
+    : ''
   const activeTranscriptCueIndex = transcriptPlayback.lessonKey === activeVideoKey
     ? transcriptPlayback.cueIndex
     : findActiveTranscriptCueIndex(transcriptCues, 0)
@@ -4210,15 +4200,32 @@ function StudentCourseLearning({
         normalizeArray(les.resources).forEach((res) => addResource(res, les.title || '', 'Lesson'))
       })
 
-      normalizeArray(mod.contentItems).forEach((item) => {
+      normalizeArray(mod.contentItems).forEach((item, itemIndex) => {
         if (!item) return
-        normalizeArray(item.resources).forEach((res) => addResource(res, item.title || '', item.type === 'note' ? 'Notes' : 'Lesson'))
+        normalizeArray(item.resources).forEach((res) => addResource(res, item.title || '', item.type === 'note' ? 'Learning resource' : 'Lesson'))
+        const noteContent = [item.description, item.content]
+          .filter((value) => typeof value === 'string' && value.trim())
+          .join('\n\n')
+        if (item.type === 'note' && noteContent) {
+          list.push({
+            _key: String(item._id || `${mod.title || 'module'}-${item.title || 'resource'}-${itemIndex}`),
+            title: item.title || 'Learning resource',
+            content: noteContent,
+            format: 'TXT',
+            topic: course.category || mod.title || course.title || 'Course',
+            courseId: String(course._id || ''),
+            courseName: course.title || 'Course',
+            sourceTitle: mod.title || '',
+            sourceType: 'Learning resource',
+            isInlineNote: true,
+            date: item.updatedAt || course.updatedAt,
+          })
+        }
       })
     })
 
     return list
   }, [course])
-  const courseNotes = allContentItems.filter((item) => item.type === 'note')
   const activeContentIndex = allContentItems.findIndex((item) => (
     item._learningKey === activeContentItemId
     || (!activeContentItemId && item.type === 'video-lesson' && item._learningKey === activeEntry?.lessonKey)
@@ -4936,14 +4943,17 @@ function StudentCourseLearning({
     endCurrentAttentionCheckSession()
     videoPlayerRef.current?.pause()
     setActiveContentItemId(item._learningKey)
-    setDetailsTab(item.type === 'note' ? 'notes' : 'overview')
+    setDetailsTab('overview')
     if (item._moduleKey) {
       setExpandedModules((current) => new Set(current).add(item._moduleKey))
     }
   }
 
   function addAssignmentSubmission(submission) {
-    setAssignmentSubmissions((current) => [submission, ...current])
+    setAssignmentSubmissions((current) => [
+      submission,
+      ...current.filter((entry) => String(entry._id) !== String(submission._id)),
+    ])
     setCourseCertificateRefresh((current) => current + 1)
   }
 
@@ -4963,14 +4973,13 @@ function StudentCourseLearning({
   function getAssignmentReviewStatus(assignment) {
     const submission = getLatestAssignmentSubmission(assignment?._id)
     if (!submission) return 'not-submitted'
+    if (submission.reviewStatus === 'approved') return 'passed'
+    if (submission.reviewStatus === 'rejected') return 'failed'
+    if (submission.reviewStatus === 'pending') return 'pending'
     const academicResult = getAssignmentAcademicResult(submission, assignment)
     if (academicResult) return academicResult.status.toLowerCase()
     if (submission.gradingStatus) {
-      if (['AI Graded', 'Final Result'].includes(submission.gradingStatus)) return 'submitted'
       return 'pending'
-    }
-    if (['approved', 'rejected', 'pending'].includes(submission.reviewStatus)) {
-      return submission.reviewStatus === 'approved' ? 'submitted' : submission.reviewStatus
     }
     return 'submitted'
   }
@@ -4978,8 +4987,7 @@ function StudentCourseLearning({
   function getAssignmentSidebarLabel(status) {
     if (status === 'passed') return 'Passed'
     if (status === 'failed') return 'Failed'
-    if (status === 'pending') return 'AI Grading'
-    if (status === 'rejected') return 'Rejected'
+    if (status === 'pending') return 'Waiting for Admin review'
     if (status === 'submitted') return 'Submitted'
     return 'Assignment'
   }
@@ -5171,16 +5179,7 @@ function StudentCourseLearning({
   function handleVideoMetadata(video, entry) {
     initializeAttentionCheckSession(video, entry)
     const lessonId = String(entry?.lesson?._id || '')
-    const savedPosition = Number(lessonPlaybackPositionsRef.current[lessonId])
-    const duration = getVideoCompletionDuration(video)
-    const resumePosition = Number.isFinite(savedPosition) && savedPosition >= 0
-      ? Math.min(savedPosition, duration || savedPosition)
-      : 0
-    lessonWatchedPositionsRef.current[lessonId] = Math.max(
-      getWatchedPosition(lessonId),
-      resumePosition,
-    )
-    video.currentTime = resumePosition
+    video.currentTime = 0
     updateTranscriptPlaybackTime(video)
     setAutoplayBlockedLessonId('')
     const playback = video.play()
@@ -5434,7 +5433,7 @@ function StudentCourseLearning({
           {courseResources.length > 0 && (
             <div className="student-course-resources__stats">
               <span className="student-course-resources__count-badge">
-                <strong>{courseResources.length}</strong> {courseResources.length === 1 ? 'file available' : 'files available'}
+                <strong>{courseResources.length}</strong> {courseResources.length === 1 ? 'resource available' : 'resources available'}
               </span>
             </div>
           )}
@@ -5458,20 +5457,21 @@ function StudentCourseLearning({
         {courseResources.length > 0 ? (
           <div className="student-course-resources__grid">
             {courseResources.map((resource, index) => {
-              const formatKey = getFormatKey(resource.format, resource.url)
+              const isInlineNote = Boolean(resource.isInlineNote)
+              const formatKey = isInlineNote ? 'txt' : getFormatKey(resource.format, resource.url)
               const formatLabel = getFormatLabel(formatKey)
               const originalFileName = getResourceOriginalFileName(resource)
               const displayTitle = resource.title && resource.title.trim() ? resource.title.trim() : (originalFileName || 'Learning Resource')
               const isDifferentFilename = originalFileName && originalFileName !== displayTitle && !displayTitle.includes(originalFileName)
               const fileSize = formatFileSize(resource.bytes)
-              const uploadDate = formatResourceDate(resource.createdAt || resource.updatedAt || course?.updatedAt)
-              const description = resource.description || resource.caption || ''
+              const uploadDate = formatResourceDate(resource.date || resource.createdAt || resource.updatedAt || course?.updatedAt)
+              const description = resource.content || resource.description || resource.caption || ''
               const sourceTitle = resource.sourceTitle
               const sourceType = resource.sourceType
 
               const courseId = course?._id || enrollment?.courseId?._id || enrollment?.courseId
-              const viewUrl = getStudentResourceFileUrl(courseId, resource, false)
-              const downloadUrl = getStudentResourceFileUrl(courseId, resource, true)
+              const viewUrl = isInlineNote ? '' : getStudentResourceFileUrl(courseId, resource, false)
+              const downloadUrl = isInlineNote ? '' : getStudentResourceFileUrl(courseId, resource, true)
               const isDownloading = downloadingResourceId === resource._key
 
               return (
@@ -5534,7 +5534,7 @@ function StudentCourseLearning({
                     )}
                   </div>
 
-                  <div className="student-resource-card__actions">
+                  {!isInlineNote && <div className="student-resource-card__actions">
                     <a
                       href={viewUrl}
                       target="_blank"
@@ -5557,7 +5557,7 @@ function StudentCourseLearning({
                       <Icon name={isDownloading ? 'loader' : 'download'} size={15} className={isDownloading ? 'is-spinning' : ''} />
                       <span>{isDownloading ? 'Downloading…' : 'Download'}</span>
                     </a>
-                  </div>
+                  </div>}
                 </article>
               )
             })}
@@ -5636,7 +5636,7 @@ function StudentCourseLearning({
                           ? quizPassed ? 'Passed' : `${quizAttemptCount} ${quizAttemptCount === 1 ? 'attempt' : 'attempts'}`
                           : item.type === 'assignment'
                             ? getAssignmentSidebarLabel(assignmentReviewStatus)
-                            : item.type === 'note' ? 'Notes / PDF' : getStudentContentLabel(item.type)
+                            : getStudentContentLabel(item.type)
                       const itemIconClassName = [
                         'student-course-learning__item-icon',
                         isCompleted && 'is-complete',
@@ -5657,7 +5657,7 @@ function StudentCourseLearning({
                             ? 'circleX'
                             : item.type === 'assignment' || item.type === 'quiz'
                               ? 'clipboardCheck'
-                              : item.type === 'note' ? 'folderOpen' : 'play'
+                              : 'play'
                       return (
                         <li key={item._learningKey}>
                           <button
@@ -5760,21 +5760,6 @@ function StudentCourseLearning({
                   <strong>Certificate</strong>
                 </button>
               )}
-              <button
-                className={detailsTab === 'notes' ? 'is-selected' : ''}
-                type="button"
-                aria-pressed={detailsTab === 'notes'}
-                onClick={() => {
-                  if (attentionCheckChallenge || attentionCheckLoading || attentionSessionRef.current.blocked) return
-                  videoPlayerRef.current?.pause()
-                  endCurrentAttentionCheckSession()
-                  setActiveContentItemId(COURSE_NOTES_KEY)
-                  setDetailsTab('notes')
-                }}
-              >
-                <span className="student-course-learning__item-icon"><Icon name="pen" size={15} /></span>
-                <strong>Notes</strong>
-              </button>
               <button
                 className={detailsTab === 'resources' ? 'is-selected' : ''}
                 type="button"
@@ -6054,12 +6039,12 @@ function StudentCourseLearning({
             <section className="student-course-learning__details">
               {!showVideoPlayer && !isActiveAssignment && detailsTab !== 'resources' && <div className="student-course-learning__active-heading">
                 <div>
-                  <h2>{detailsTab === 'certificate' ? 'Course Certificate' : activeContentItem?.title || (detailsTab === 'notes' ? 'Notes' : activeEntry?.lesson?.title) || 'Select course content'}</h2>
+                  <h2>{detailsTab === 'certificate' ? 'Course Certificate' : activeContentItem?.title || activeEntry?.lesson?.title || 'Select course content'}</h2>
                   {detailsTab === 'certificate'
                     ? <span className="student-course-learning__type student-course-learning__type--certificate"><Icon name="award" size={14} />Certificate</span>
                     : <span className={`student-course-learning__type student-course-learning__type--${activeContentItem?.type || 'video-lesson'}`}>
-                      <Icon name={activeContentItem?.type === 'assignment' ? 'clipboardCheck' : activeContentItem?.type === 'note' || detailsTab === 'notes' ? 'folderOpen' : activeContentItem?.type === 'quiz' ? 'check' : 'book'} size={14} />
-                      {getStudentContentLabel(activeContentItem?.type || (detailsTab === 'notes' ? 'note' : 'video-lesson'))}
+                      <Icon name={activeContentItem?.type === 'assignment' ? 'clipboardCheck' : activeContentItem?.type === 'quiz' ? 'check' : 'book'} size={14} />
+                      {getStudentContentLabel(activeContentItem?.type || 'video-lesson')}
                     </span>}
                 </div>
                 {!showVideoPlayer && detailsTab !== 'certificate' && !isActiveQuiz && <div className="student-course-learning__detail-nav">
@@ -6118,27 +6103,6 @@ function StudentCourseLearning({
               </div>}
               {detailsTab === 'certificate' ? (
                 <div className="student-course-learning__tab-content">{renderCourseCertificate()}</div>
-              ) : detailsTab === 'notes' ? (
-                <div className="student-course-learning__tab-content">
-                  {courseNotes.length ? courseNotes.map((note) => (
-                    <article className="student-course-learning__note-card" key={note._learningKey}>
-                      <h3>{note.title}</h3>
-                      {note.content && <p>{note.content}</p>}
-                      {note.resources?.length > 0 && (
-                        <ul className="student-course-note__resources">
-                          {note.resources.map((resource, index) => (
-                            <li key={resource._id || `${resource.url}-${index}`}>
-                              <a href={resource.url} target="_blank" rel="noreferrer" download={resource.resourceType === 'raw' || resource.format === 'pdf' ? resource.title : undefined}>
-                                {resource.title || `Resource ${index + 1}`}
-                              </a>
-                              {resource.format && <small>{resource.format.toUpperCase()}</small>}
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </article>
-                  )) : <p className="student-course-learning__tab-empty">No notes have been added to this course.</p>}
-                </div>
               ) : detailsTab === 'resources' ? (
                 <div className="student-course-learning__tab-content student-course-learning__tab-content--resources">
                   {renderCourseResources()}
@@ -6198,6 +6162,14 @@ function StudentCourseLearning({
                           </li>
                         ))}
                       </ol>
+                    ) : transcriptText ? (
+                      <div
+                        key={activeVideoKey}
+                        className="student-course-learning__transcript-script"
+                        aria-label="Video transcript"
+                      >
+                        <p>{transcriptText}</p>
+                      </div>
                     ) : <p className="student-course-learning__transcript-empty">Transcript not available</p>}
                   </section>
                 </div>
@@ -6236,8 +6208,6 @@ function StudentCourseLearning({
                       showHeader
                       canSubmit={getAssignmentReviewStatus(activeContentItem) !== 'passed'}
                     />
-                  ) : activeContentItem?.type === 'note' ? (
-                    <StudentNotePanel item={activeContentItem} />
                   ) : activeEntry?.lesson ? (
                     <section className="student-course-learning__lesson">
                       <span className="student-eyebrow">{activeEntry.module?.title || ''}</span>
@@ -6273,15 +6243,6 @@ function StudentCourseLearning({
                 <strong>Certificate</strong>
               </button>
               <button
-                className={detailsTab === 'notes' ? 'is-selected' : ''}
-                type="button"
-                aria-pressed={detailsTab === 'notes'}
-                onClick={() => setDetailsTab('notes')}
-              >
-                <span className="student-course-learning__item-icon"><Icon name="pen" size={15} /></span>
-                <strong>Notes</strong>
-              </button>
-              <button
                 className={detailsTab === 'resources' ? 'is-selected' : ''}
                 type="button"
                 aria-pressed={detailsTab === 'resources'}
@@ -6301,27 +6262,6 @@ function StudentCourseLearning({
             ) : detailsTab === 'resources' ? (
               <div className="student-course-learning__tab-content student-course-learning__tab-content--resources">
                 {renderCourseResources()}
-              </div>
-            ) : detailsTab === 'notes' ? (
-              <div className="student-course-learning__tab-content">
-                {courseNotes.length ? courseNotes.map((note) => (
-                  <article className="student-course-learning__note-card" key={note._learningKey}>
-                    <h3>{note.title}</h3>
-                    {note.content && <p>{note.content}</p>}
-                    {note.resources?.length > 0 && (
-                      <ul className="student-course-note__resources">
-                        {note.resources.map((resource, index) => (
-                          <li key={resource._id || `${resource.url}-${index}`}>
-                            <a href={resource.url} target="_blank" rel="noreferrer" download={resource.resourceType === 'raw' || resource.format === 'pdf' ? resource.title : undefined}>
-                              {resource.title || `Resource ${index + 1}`}
-                            </a>
-                            {resource.format && <small>{resource.format.toUpperCase()}</small>}
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </article>
-                )) : <p className="student-course-learning__tab-empty">No notes have been added to this course.</p>}
               </div>
             ) : <EmptyState icon="book" title="Course content is not available yet" description="This enrolled course does not currently have any lessons or activities." />}
           </div>
@@ -6972,7 +6912,7 @@ function StudentCourseDetailsPage({ user, onLogout, onLearningDataChanged }) {
             <h2>Course modules</h2>
             {course.modules?.length ? course.modules.map((module, moduleIndex) => {
               const moduleKey = String(module._id || `${module.title}-${moduleIndex}`)
-              const items = getModuleLearningItems(module, moduleIndex)
+              const items = getModuleLearningItems(module, moduleIndex).filter((item) => item.type !== 'note')
               return (
                 <details className="student-course-details__module" key={moduleKey} open>
                   <summary className="student-course-details__module-summary">
@@ -6999,9 +6939,7 @@ function StudentCourseDetailsPage({ user, onLogout, onLearningDataChanged }) {
                             : item.type === 'assignment'
                               ? `Module Assessment${Number(item.points) ? ` · ${Number(item.points)} pts` : ''}`
                               : 'Course Resource'
-                        const itemIcon = item.type === 'video-lesson'
-                          ? 'play'
-                          : item.type === 'note' ? 'folderOpen' : 'clipboardCheck'
+                        const itemIcon = item.type === 'video-lesson' ? 'play' : 'clipboardCheck'
                         return (
                           <li className="student-course-details__module-item" key={item._learningKey}>
                             <span className={`student-course-details__item-icon is-${item.type}`}>
@@ -8005,12 +7943,11 @@ function StudentDashboard({
         onPointerDown={handleSidebarInteraction}
         onKeyDown={handleSidebarInteraction}
       >
-        <Link className="student-sidebar__brand" to="/student/dashboard" aria-label="aiHustle home">
-          <span className="student-sidebar__mark" aria-hidden="true">
-            <img src="/logo.png" alt="" />
-          </span>
-          <span className="student-sidebar__tagline">LEARN. BUILD. LEAD.</span>
-        </Link>
+        {sidebarOpen && (
+          <Link className="student-sidebar__brand" to="/student/dashboard" aria-label="aiHustle home">
+            <img src="/logo.png" alt="aiHustle" className="student-brand__image" />
+          </Link>
+        )}
         <p className="student-sidebar__label">LEARNING SPACE</p>
         <nav className="student-sidebar__nav">
           {visibleNavigation.map((item) => (
@@ -8050,19 +7987,21 @@ function StudentDashboard({
               </>
             )}
           </div>
-          <Link
-            className="student-brand"
-            to="/student/dashboard"
-            aria-label="aiHustle home"
-            onClick={() => {
-              if (location.pathname === '/student/dashboard') {
-                window.scrollTo(0, 0)
-                document.querySelector('.student-main')?.scrollTo(0, 0)
-              }
-            }}
-          >
-            <img src="/logo.png" alt="aiHustle" className="student-brand__image" />
-          </Link>
+          {!sidebarOpen && (
+            <Link
+              className="student-brand"
+              to="/student/dashboard"
+              aria-label="aiHustle home"
+              onClick={() => {
+                if (location.pathname === '/student/dashboard') {
+                  window.scrollTo(0, 0)
+                  document.querySelector('.student-main')?.scrollTo(0, 0)
+                }
+              }}
+            >
+              <img src="/logo.png" alt="aiHustle" className="student-brand__image" />
+            </Link>
+          )}
           {isCourseLearningPage ? (
             <label className="student-search student-course-learning-topbar__search">
               <Icon name="search" size={17} />

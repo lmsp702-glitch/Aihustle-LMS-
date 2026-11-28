@@ -1338,7 +1338,7 @@ function AuthForm({ mode, role, onMessage, onRegistrationSuccess }) {
         {!isSubmitting && <span aria-hidden="true">→</span>}
       </button>
 
-      {!isAdministrativeRole && (
+      {!isAdministrativeRole && !isRegistering && (
         <>
           <div className="separator"><span>or</span></div>
           <button
@@ -2054,6 +2054,9 @@ function App() {
   const isDark = themePreference === 'dark'
   useEffect(() => {
     document.documentElement.dataset.theme = isDark ? 'dark' : 'light'
+    document.documentElement.dataset.tableDensity = localStorage.getItem('lms.table-density') === 'compact'
+      ? 'compact'
+      : 'comfortable'
     localStorage.setItem('lms.theme', themePreference)
   }, [isDark, themePreference])
   const isRegistering = mode === 'register'

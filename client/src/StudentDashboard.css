@@ -93,9 +93,7 @@
   display: flex;
   width: calc(100% - 20px);
   flex: 0 0 auto;
-  flex-direction: column;
   align-items: flex-start;
-  gap: 4px;
   margin: 0 10px 20px;
   color: #656b61;
   text-decoration: none;
@@ -104,30 +102,6 @@
 
 .student-sidebar__brand:hover {
   opacity: 0.88;
-}
-
-.student-sidebar__mark {
-  display: block;
-  width: 74px;
-  height: 40px;
-  flex: 0 0 40px;
-  overflow: hidden;
-}
-
-.student-sidebar__mark img {
-  display: block;
-  width: auto;
-  height: 40px;
-  max-width: none;
-  transform: translateX(-50px);
-}
-
-.student-sidebar__tagline {
-  color: #414b45;
-  font-size: 14px;
-  font-weight: 800;
-  letter-spacing: 0.1em;
-  line-height: 1.2;
 }
 
 .student-sidebar__label,
@@ -1678,6 +1652,7 @@ button.student-category {
   display: inline-flex;
   justify-self: center;
   align-items: center;
+  gap: 5px;
   padding: 5px 10px;
   border-radius: 999px;
   font-size: 10px;
@@ -1729,8 +1704,14 @@ button.student-category {
 }
 
 .student-assignment-item__status.is-submitted {
-  background: #dfeee8;
-  color: #2a7359;
+  background: #fff3dc;
+  color: #a65c00;
+}
+
+.student-assignment-item__status.is-passed,
+.student-assignment-item__status.is-approved {
+  background: #eaf5ed;
+  color: #267049;
 }
 
 .student-assignment-item__status.is-graded {
@@ -1738,9 +1719,10 @@ button.student-category {
   color: #724a92;
 }
 
+.student-assignment-item__status.is-failed,
 .student-assignment-item__status.is-rejected {
-  background: #f8e5e2;
-  color: #a34a3d;
+  background: #fbefed;
+  color: #9a493d;
 }
 
 .student-assignment-item__score {
@@ -3685,13 +3667,21 @@ button.student-category {
 }
 
 .student-dashboard-assignment__status {
+  display: inline-flex;
   flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
   padding: 5px 10px;
   border-radius: 999px;
   background: #f0eee7;
   color: #535a54;
   font-size: 10px;
   white-space: nowrap;
+}
+
+.student-dashboard-assignment__status.is-passed {
+  background: #e4f0e5;
+  color: #347052;
 }
 
 .student-dashboard-assignment__status.is-approved {
@@ -3704,16 +3694,25 @@ button.student-category {
   color: #654b82;
 }
 
+.student-dashboard-assignment__status.is-submitted {
+  background: #fbf0d7;
+  color: #8a661a;
+}
+
 .student-dashboard-assignment__status.is-awaiting {
   background: #fbf0d7;
   color: #8a661a;
+}
+
+.student-dashboard-assignment__status.is-failed {
+  background: #f7e6e2;
+  color: #984b3e;
 }
 
 .student-dashboard-assignment__status.is-rejected {
   background: #f7e6e2;
   color: #984b3e;
 }
-
 .student-dashboard-assignment--skeleton {
   pointer-events: none;
 }
@@ -8813,6 +8812,21 @@ button.student-category {
   white-space: nowrap;
 }
 
+.student-course-assignment-view__status.is-failed {
+  background: #fbefed;
+  color: #9a493d;
+}
+
+.student-course-assignment-view__status.is-passed {
+  background: #eaf5ed;
+  color: #267049;
+}
+
+.student-course-assignment-view__status.is-submitted {
+  background: #fff3dc;
+  color: #a65c00;
+}
+
 .student-course-assignment-view__status.is-rejected {
   background: #fbefed;
   color: #9a493d;
@@ -8827,7 +8841,6 @@ button.student-category {
   background: #eee8f5;
   color: #654b82;
 }
-
 .student-course-assignment-view__instructions {
   margin: 0;
 }
@@ -9130,6 +9143,13 @@ button.student-category {
 
 .student-assignment-attempt-summary strong {
   color: var(--student-ink);
+}
+
+.student-assignment-deadline {
+  margin: 0;
+  color: var(--student-muted);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .student-assignment-attempt-lockout,
@@ -9910,6 +9930,11 @@ button.student-results__summary-card:hover {
   color: var(--theme-muted);
 }
 
+:root[data-theme='dark'] .student-dashboard .student-dashboard-assignment__status.is-passed {
+  background: #263d31;
+  color: #a7d1b3;
+}
+
 :root[data-theme='dark'] .student-dashboard .student-dashboard-assignment__status.is-approved {
   background: #263d31;
   color: #a7d1b3;
@@ -9920,11 +9945,17 @@ button.student-results__summary-card:hover {
   color: #d3b9ec;
 }
 
+:root[data-theme='dark'] .student-dashboard .student-dashboard-assignment__status.is-submitted {
+  background: #403821;
+  color: #e4c56f;
+}
+
 :root[data-theme='dark'] .student-dashboard .student-dashboard-assignment__status.is-awaiting {
   background: #403821;
   color: #e4c56f;
 }
 
+:root[data-theme='dark'] .student-dashboard .student-dashboard-assignment__status.is-failed,
 :root[data-theme='dark'] .student-dashboard .student-dashboard-assignment__status.is-rejected,
 :root[data-theme='dark'] .student-dashboard .student-dashboard-data-error {
   background: #3b2927;

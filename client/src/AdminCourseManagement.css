@@ -284,6 +284,7 @@
 .ac-field textarea { min-height: 76px; resize: vertical; line-height: 1.5; }
 .ac-field input:focus,.ac-field select:focus,.ac-field textarea:focus { border-color: #c5a145; box-shadow: 0 0 0 3px rgba(239, 189, 67, 0.15); }
 .ac-form-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.ac-legacy-assignment-settings { display: grid; gap: 10px; padding: 12px 0; border-top: 1px solid #eee9df; }
 .ac-text-button { padding: 4px 0; border: 0; background: none; color: #6e745e; cursor: pointer; font: inherit; font-size: 10px; text-decoration: underline; text-underline-offset: 2px; }
 .ac-text-button--danger { color: #a34a3a; }
 .ac-builder-footer { gap: 10px; margin-top: 22px; padding-top: 16px; border-top: 1px solid #eee9df; }

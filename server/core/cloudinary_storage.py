@@ -1,3 +1,4 @@
+import logging
 import re
 import time
 import uuid
@@ -6,15 +7,23 @@ from urllib.parse import urlparse
 
 import cloudinary
 from cloudinary import api, uploader
-from cloudinary.exceptions import Error as CloudinaryError
+from cloudinary.exceptions import Error as CloudinaryError, GeneralError
 from cloudinary.utils import api_sign_request
 from django.conf import settings
+from urllib3.util import Timeout
+
+from core.middleware import log_video_upload_stage
 
 
 MIB = 1024 * 1024
-VIDEO_CHUNK_SIZE = 20 * MIB
-VIDEO_LARGE_UPLOAD_THRESHOLD = 100 * MIB
+VIDEO_CHUNK_SIZE = 5 * MIB
+VIDEO_CHUNKED_UPLOAD_THRESHOLD = VIDEO_CHUNK_SIZE
+VIDEO_UPLOAD_TIMEOUT_SECONDS = 600
+VIDEO_UPLOAD_CONNECT_TIMEOUT_SECONDS = 15
+VIDEO_UPLOAD_RETRIES = 2
+VIDEO_UPLOAD_RETRY_DELAY_SECONDS = 2
 CLOUDINARY_FOLDER = "aihustle-lms"
+logger = logging.getLogger(__name__)
 
 
 class CloudinaryConfigurationError(RuntimeError):
@@ -69,6 +78,10 @@ _RESOURCE_POLICIES = {
         "extensions": set(_IMAGE_TYPES),
         "max_bytes": 10 * MIB,
     },
+    "certificate_template": {
+        "extensions": {".jpg", ".jpeg", ".png"},
+        "max_bytes": 4 * MIB,
+    },
     "course_transcript": {
         "extensions": {".srt"},
         "max_bytes": 2 * MIB,
@@ -100,6 +113,14 @@ def configure_cloudinary():
         api_secret=api_secret,
         secure=True,
     )
+
+
+def _cloudinary_error_detail(exception):
+    detail = str(exception).strip() or type(exception).__name__
+    for secret in (settings.CLOUDINARY_API_KEY, settings.CLOUDINARY_API_SECRET):
+        if secret:
+            detail = detail.replace(secret, "[redacted]")
+    return detail
 
 
 def check_cloudinary_connection():
@@ -181,7 +202,7 @@ def _validate_upload(uploaded_file, purpose):
 
 
 def _resource_type_for(purpose, extension):
-    if purpose in {"profile_image", "course_thumbnail"}:
+    if purpose in {"profile_image", "course_thumbnail", "certificate_template"}:
         return "image"
     if purpose == "course_video":
         return "video"
@@ -208,6 +229,88 @@ def _upload_folder(purpose, owner_id, course_id=None, module_id=None):
     return "/".join(parts)
 
 
+def _upload_video_in_chunks(uploaded_file, filename, size, upload_options, trace_id):
+    upload_id = uuid.uuid4().hex
+    offset = 0
+    result = None
+
+    while offset < size:
+        uploaded_file.seek(offset)
+        chunk = uploaded_file.read(min(VIDEO_CHUNK_SIZE, size - offset))
+        if not chunk:
+            raise CloudinaryStorageError("The video stream ended before all chunks were uploaded.")
+
+        chunk_start = offset
+        chunk_end = chunk_start + len(chunk) - 1
+        chunk_headers = {
+            "Content-Range": f"bytes {chunk_start}-{chunk_end}/{size}",
+            "X-Unique-Upload-Id": upload_id,
+        }
+        attempt = 0
+        while True:
+            attempt += 1
+            started_at = time.perf_counter()
+            log_video_upload_stage(
+                trace_id,
+                "cloudinary_chunk_upload_started",
+                offset=chunk_start,
+                bytes=len(chunk),
+                total_bytes=size,
+                attempt=attempt,
+                upload_id=upload_id,
+            )
+            try:
+                result = uploader.upload_large_part(
+                    (filename, chunk),
+                    http_headers=chunk_headers,
+                    **upload_options,
+                )
+                log_video_upload_stage(
+                    trace_id,
+                    "cloudinary_chunk_response_received",
+                    offset=chunk_start,
+                    bytes=len(chunk),
+                    duration_ms=round((time.perf_counter() - started_at) * 1000),
+                    request_id=getattr(result, "request_id", "unavailable"),
+                )
+                break
+            except GeneralError as exc:
+                duration_ms = round((time.perf_counter() - started_at) * 1000)
+                should_retry = attempt <= VIDEO_UPLOAD_RETRIES
+                log_video_upload_stage(
+                    trace_id,
+                    "cloudinary_chunk_upload_failed",
+                    offset=chunk_start,
+                    bytes=len(chunk),
+                    duration_ms=duration_ms,
+                    attempt=attempt,
+                    retrying=should_retry,
+                    error_type=type(exc).__name__,
+                    error=_cloudinary_error_detail(exc),
+                )
+                if not should_retry:
+                    detail = _cloudinary_error_detail(exc)
+                    log_video_upload_stage(
+                        trace_id,
+                        "cloudinary_upload_failed",
+                        error_type=type(exc).__name__,
+                        error=detail,
+                    )
+                    raise CloudinaryStorageError(
+                        f"Cloudinary video chunk upload failed after {attempt} attempts: {detail}"
+                    ) from exc
+                time.sleep(VIDEO_UPLOAD_RETRY_DELAY_SECONDS * attempt)
+
+        if result is None:
+            raise CloudinaryStorageError("Cloudinary did not return a video chunk response.")
+        returned_public_id = result.get("public_id")
+        if isinstance(returned_public_id, str) and returned_public_id:
+            upload_options["public_id"] = returned_public_id
+        offset = chunk_end + 1
+
+    return result
+
+
 def upload_media(
     uploaded_file,
     purpose,
@@ -215,33 +318,116 @@ def upload_media(
     owner_id,
     course_id=None,
     module_id=None,
+    idempotency_key=None,
+    upload_trace_id=None,
 ):
+    if purpose == "course_video":
+        log_video_upload_stage(upload_trace_id, "validation_started")
+    validation_started_at = time.perf_counter()
     filename, extension, size = _validate_upload(uploaded_file, purpose)
     resource_type = _resource_type_for(purpose, extension)
+    if purpose == "course_video":
+        log_video_upload_stage(
+            upload_trace_id,
+            "validation_completed",
+            bytes=size,
+            resource_type=resource_type,
+            duration_ms=round((time.perf_counter() - validation_started_at) * 1000),
+        )
     folder = _upload_folder(purpose, owner_id, course_id, module_id)
-    public_id = f"{folder}/{uuid.uuid4().hex}"
+    if idempotency_key is not None:
+        if purpose != "course_video" or not re.fullmatch(r"[a-f0-9]{64}", str(idempotency_key)):
+            raise MediaValidationError("The video upload retry key is invalid.")
+        public_id = idempotency_key
+    else:
+        public_id = uuid.uuid4().hex
+    if purpose == "course_video":
+        log_video_upload_stage(upload_trace_id, "cloudinary_configuration_started")
     configure_cloudinary()
+    if purpose == "course_video":
+        log_video_upload_stage(upload_trace_id, "cloudinary_configuration_completed")
     upload_options = {
         "folder": folder,
         "public_id": public_id,
         "resource_type": resource_type,
-        "overwrite": False,
+        "overwrite": idempotency_key is not None,
         "unique_filename": False,
         "use_filename": False,
         "filename_override": filename,
         "type": "upload",
     }
+    if resource_type == "video":
+        upload_options["timeout"] = Timeout(
+            connect=VIDEO_UPLOAD_CONNECT_TIMEOUT_SECONDS,
+            read=VIDEO_UPLOAD_TIMEOUT_SECONDS,
+        )
     try:
         uploaded_file.seek(0)
-        is_large_video = resource_type == "video" and size > VIDEO_LARGE_UPLOAD_THRESHOLD
-        upload_function = uploader.upload_large if is_large_video else uploader.upload
+        is_large_video = resource_type == "video" and size >= VIDEO_CHUNKED_UPLOAD_THRESHOLD
         if is_large_video:
             upload_options["chunk_size"] = VIDEO_CHUNK_SIZE
-        result = upload_function(uploaded_file, **upload_options)
+        if purpose == "course_video":
+            log_video_upload_stage(
+                upload_trace_id,
+                "cloudinary_upload_started",
+                chunked=is_large_video,
+                chunk_size=upload_options.get("chunk_size", "single-request"),
+                connect_timeout_seconds=VIDEO_UPLOAD_CONNECT_TIMEOUT_SECONDS,
+                response_timeout_seconds=VIDEO_UPLOAD_TIMEOUT_SECONDS,
+                stream_position=uploaded_file.tell(),
+                stream_readable=uploaded_file.readable(),
+                stream_seekable=uploaded_file.seekable(),
+            )
+        cloudinary_started_at = time.perf_counter()
+        if purpose == "course_video":
+            log_video_upload_stage(
+                upload_trace_id,
+                "cloudinary_upload_attempt_started",
+                attempt=1,
+                max_attempts=1 if not is_large_video else "per-chunk",
+                bytes=size,
+            )
+        if is_large_video:
+            result = _upload_video_in_chunks(
+                uploaded_file,
+                filename,
+                size,
+                upload_options,
+                upload_trace_id,
+            )
+        else:
+            result = uploader.upload(uploaded_file, **upload_options)
+        response_duration_ms = round((time.perf_counter() - cloudinary_started_at) * 1000)
+        if purpose == "course_video" and is_large_video:
+            log_video_upload_stage(
+                upload_trace_id,
+                "cloudinary_upload_response_received",
+                duration_ms=response_duration_ms,
+                bytes=result.get("bytes", size),
+                request_id=getattr(result, "request_id", "unavailable"),
+            )
+        if purpose == "course_video":
+            log_video_upload_stage(
+                upload_trace_id,
+                "cloudinary_upload_completed",
+                bytes=result.get("bytes", size),
+                duration_ms=response_duration_ms,
+                chunked=is_large_video,
+            )
     except CloudinaryError as exc:
-        raise CloudinaryStorageError("The media upload failed.") from exc
+        if purpose == "course_video":
+            log_video_upload_stage(
+                upload_trace_id,
+                "cloudinary_upload_failed",
+                error_type=type(exc).__name__,
+                error=_cloudinary_error_detail(exc),
+            )
+        logger.exception("Cloudinary rejected a media upload.")
+        detail = _cloudinary_error_detail(exc)
+        raise CloudinaryStorageError(f"Cloudinary upload failed: {detail}") from exc
     finally:
-        uploaded_file.seek(0)
+        if not getattr(uploaded_file, "closed", False):
+            uploaded_file.seek(0)
 
     secure_url = result.get("secure_url")
     returned_public_id = result.get("public_id")
@@ -285,6 +471,31 @@ def create_signed_upload(purpose="course_thumbnail"):
         "timestamp": timestamp,
         "folder": folder,
         "publicId": public_id,
+        "signature": api_sign_request(parameters, settings.CLOUDINARY_API_SECRET),
+    }
+
+
+def create_signed_course_video_upload(owner_id, course_id, module_id, filename):
+    configure_cloudinary()
+    timestamp = int(time.time())
+    folder = _upload_folder("course_video", owner_id, course_id, module_id)
+    public_id = f"{folder}/{uuid.uuid4().hex}"
+    parameters = {
+        "overwrite": "false",
+        "filename_override": filename,
+        "public_id": public_id,
+        "timestamp": timestamp,
+        "type": "upload",
+    }
+    return {
+        "cloudName": settings.CLOUDINARY_CLOUD_NAME,
+        "apiKey": settings.CLOUDINARY_API_KEY,
+        "timestamp": timestamp,
+        "publicId": public_id,
+        "filenameOverride": filename,
+        "overwrite": "false",
+        "type": "upload",
+        "resourceType": "video",
         "signature": api_sign_request(parameters, settings.CLOUDINARY_API_SECRET),
     }
 
@@ -343,6 +554,7 @@ def get_media_metadata(public_id, resource_type):
         "duration": result.get("duration"),
         "version": result.get("version"),
         "originalName": result.get("original_filename"),
+        "createdAt": result.get("created_at"),
     }
 
 
